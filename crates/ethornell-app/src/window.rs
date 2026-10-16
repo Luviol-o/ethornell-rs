@@ -670,7 +670,7 @@ impl ApplicationHandler for WindowApp {
                         clip: item
                             .clip
                             .map(|clip| [clip.x, clip.y, clip.width, clip.height]),
-                        z: 2 + render_graph_z,
+                        z: graph_render_z(render_graph_z),
                     });
                 }
                 if let Some(runtime) = runtime.as_ref() {
@@ -689,6 +689,7 @@ impl ApplicationHandler for WindowApp {
                             })
                             .unwrap_or((0.0, 0.0, 1.0));
                         let layout = runtime.api.formatted_text_layout(node);
+                        let z = text_render_z(node.z);
                         let x = parent.0 + node.x;
                         let cursor_y = parent.1 + node.y;
                         let y = cursor_y + layout.body_y_offset;
@@ -748,7 +749,7 @@ impl ApplicationHandler for WindowApp {
                                     styles: shadow_styles,
                                     glow: None,
                                     clip,
-                                    z: node.z - 1,
+                                    z,
                                 });
                             }
                             TextNodeShadow::Message(None) => {}
@@ -765,7 +766,7 @@ impl ApplicationHandler for WindowApp {
                                         styles: shadow_styles,
                                         glow: None,
                                         clip,
-                                        z: node.z - 1,
+                                        z,
                                     });
                                 }
                             }
@@ -779,7 +780,7 @@ impl ApplicationHandler for WindowApp {
                             styles,
                             glow,
                             clip,
-                            z: node.z,
+                            z,
                         });
                         let mut positioned_node = node.clone();
                         positioned_node.x = x;
@@ -800,7 +801,7 @@ impl ApplicationHandler for WindowApp {
                                     styles: Vec::new(),
                                     glow: None,
                                     clip,
-                                    z: node.z,
+                                    z,
                                 });
                             }
                             commands.push(RenderCommand::DrawText {
@@ -812,7 +813,7 @@ impl ApplicationHandler for WindowApp {
                                 styles: Vec::new(),
                                 glow: None,
                                 clip,
-                                z: node.z + 1,
+                                z,
                             });
                         }
                     }
@@ -959,6 +960,21 @@ mod fitted_window_tests {
     }
 }
 
+/// Renderer depth of a graph object at native priority `z`; depths 0 and 1
+/// are below every graph object.
+fn graph_render_z(z: i32) -> i32 {
+    2 + z
+}
+
+/// Renderer depth of a text node at priority `z`: the depth of the images at
+/// that priority. Text is submitted after the images and the renderer sorts
+/// stably, so a window's text lands on its own background and under objects
+/// of higher priority, as in the target, where a window composes its text
+/// into its own surface. Shadows and ruby keep their order by submission.
+fn text_render_z(z: i32) -> i32 {
+    graph_render_z(z)
+}
+
 impl Drop for WindowApp {
     fn drop(&mut self) {
         let runtime = &self.runtime;
@@ -1033,7 +1049,7 @@ pub(super) fn run_window(
 
 #[cfg(test)]
 mod tests {
-    use super::{TRACKPAD_POINTS_PER_NOTCH, TrackpadScroll};
+    use super::{TRACKPAD_POINTS_PER_NOTCH, TrackpadScroll, graph_render_z, text_render_z};
     use std::time::{Duration, Instant};
     use winit::event::TouchPhase;
 
@@ -1064,5 +1080,20 @@ mod tests {
             scroll.notches(TRACKPAD_POINTS_PER_NOTCH * 2.5, TouchPhase::Moved, at(501)),
             2
         );
+    }
+
+    #[test]
+    fn window_text_is_drawn_over_its_window_and_under_higher_priorities() {
+        // A message window at priority 117: its background is an image at
+        // that priority and its text a node at the same priority. The text
+        // was drawn at depth 117, under the background at 119; through a
+        // half-transparent background black text vanished.
+        let window_priority = 117;
+        let background = graph_render_z(window_priority);
+        let text = text_render_z(window_priority);
+        // Equal depth: the text, submitted later, is drawn after it.
+        assert_eq!(text, background);
+        assert!(text > graph_render_z(window_priority - 1));
+        assert!(text < graph_render_z(window_priority + 1));
     }
 }
