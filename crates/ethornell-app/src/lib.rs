@@ -13716,6 +13716,35 @@ mod input_tests {
     }
 
     #[test]
+    fn graph92_91_draws_in_the_colour_and_style_it_is_given() {
+        let manager =
+            ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let mut api = super::RuntimeTraceApi::new(manager);
+        let target = 12_345;
+        // Wonderful Everyday's scrmsg._bp: the text colour setting (black)
+        // and its edge style, a one-pixel white glow at concentration 192.
+        let mut args = [target, 0, 0, 1, 0, 1, 2, 1, 1, 0xffffff, 192]
+            .map(Value::Int)
+            .to_vec();
+        args[1] = Value::Str("A line".into());
+
+        call_graph(&mut api, 0x92, 0x91, &mut args).unwrap();
+
+        let node = api.text_nodes[&target].clone();
+        assert_eq!(&node.color[..3], &[0.0, 0.0, 0.0]);
+        assert_eq!(
+            api.text_node_shadow(&node),
+            super::snapshot::TextNodeShadow::Message(Some(super::snapshot::TextShadow {
+                mode: 2,
+                dx: 1,
+                dy: 1,
+                rgb: 0xffffff,
+                concentration: 192,
+            }))
+        );
+    }
+
+    #[test]
     fn graph_icon_batch_rebuilds_window_backing_in_record_order() {
         let manager =
             ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
@@ -23104,6 +23133,17 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                 let args = pop_args(stack, 11);
                 let text = args.get(9).and_then(value_to_string);
                 let target = args.get(10).map(value_to_i32).unwrap_or_default();
+                // Source order (object, text, colour, _, _, _, five style
+                // fields): the system scripts pass their text colour setting
+                // and its edge style here.
+                if args.len() == 11 {
+                    let int = |index: usize| value_to_i32(&args[index]);
+                    self.set_message_text_style(
+                        target,
+                        int(8),
+                        [int(4), int(3), int(2), int(1), int(0)],
+                    );
+                }
                 let state = self.window_text_state(Some(target));
                 if let Some(text) = text.as_deref().filter(|text| !text.is_empty()) {
                     // sub_486500 and the message procedure both enter
@@ -23175,6 +23215,16 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                 let args = pop_args(stack, 15);
                 let text = args.get(13).and_then(value_to_string);
                 let target = args.get(14).map(value_to_i32).unwrap_or_default();
+                // Source order (object, text, colour, _, _, _, five style
+                // fields, ...), the same head as Graph92:91.
+                if args.len() == 15 {
+                    let int = |index: usize| value_to_i32(&args[index]);
+                    self.set_message_text_style(
+                        target,
+                        int(12),
+                        [int(8), int(7), int(6), int(5), int(4)],
+                    );
+                }
                 if let Some(text) = text.as_ref() {
                     // sub_4863E0 always enters sub_491220 for a valid
                     // CDspObjWindow. The target has no title-departure or

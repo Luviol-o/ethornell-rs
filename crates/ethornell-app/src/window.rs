@@ -1,4 +1,6 @@
 use super::*;
+use crate::snapshot::TextNodeShadow;
+use ethornell_render::TextGlow;
 use winit::application::ApplicationHandler;
 use winit::data_transfer::TypeHint;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
@@ -513,6 +515,7 @@ impl ApplicationHandler for WindowApp {
                         color: [0.0, 0.0, 0.0, 0.75],
                         size: 28.0,
                         styles: Vec::new(),
+                        glow: None,
                         clip: None,
                         z: 9,
                     });
@@ -523,6 +526,7 @@ impl ApplicationHandler for WindowApp {
                         color: [1.0, 1.0, 1.0, 1.0],
                         size: 28.0,
                         styles: Vec::new(),
+                        glow: None,
                         clip: None,
                         z: 10,
                     });
@@ -620,19 +624,57 @@ impl ApplicationHandler for WindowApp {
                                 ..*span
                             })
                             .collect::<Vec<_>>();
-                        if let Some((shadow_x, shadow_y, shadow_alpha)) =
-                            runtime.api.graph_defaults.shadow_for_height(size)
-                        {
-                            commands.push(RenderCommand::DrawText {
-                                text: node.text.clone(),
-                                x: x + shadow_x as f32,
-                                y: y + shadow_y as f32,
-                                color: [0.0, 0.0, 0.0, color[3] * shadow_alpha],
-                                size,
-                                styles: shadow_styles,
-                                clip,
-                                z: node.z - 1,
-                            });
+                        let node_shadow = runtime.api.text_node_shadow(node);
+                        let mut glow = None;
+                        match node_shadow {
+                            TextNodeShadow::Message(Some(effect)) if effect.mode == 2 => {
+                                glow = Some(TextGlow {
+                                    radius_x: effect.dx.max(0) as u32,
+                                    radius_y: effect.dy.max(0) as u32,
+                                    rgb: [
+                                        (effect.rgb >> 16) as u8,
+                                        (effect.rgb >> 8) as u8,
+                                        effect.rgb as u8,
+                                    ],
+                                    concentration: effect.concentration.max(0) as u32,
+                                });
+                            }
+                            TextNodeShadow::Message(Some(effect)) => {
+                                commands.push(RenderCommand::DrawText {
+                                    text: node.text.clone(),
+                                    x: x + effect.dx as f32,
+                                    y: y + effect.dy as f32,
+                                    color: [
+                                        ((effect.rgb >> 16) & 0xff) as f32 / 255.0,
+                                        ((effect.rgb >> 8) & 0xff) as f32 / 255.0,
+                                        (effect.rgb & 0xff) as f32 / 255.0,
+                                        color[3] * effect.concentration as f32 / 256.0,
+                                    ],
+                                    size,
+                                    styles: shadow_styles,
+                                    glow: None,
+                                    clip,
+                                    z: node.z - 1,
+                                });
+                            }
+                            TextNodeShadow::Message(None) => {}
+                            TextNodeShadow::Default(_) => {
+                                if let Some((shadow_x, shadow_y, shadow_alpha)) =
+                                    runtime.api.graph_defaults.shadow_for_height(size)
+                                {
+                                    commands.push(RenderCommand::DrawText {
+                                        text: node.text.clone(),
+                                        x: x + shadow_x as f32,
+                                        y: y + shadow_y as f32,
+                                        color: [0.0, 0.0, 0.0, color[3] * shadow_alpha],
+                                        size,
+                                        styles: shadow_styles,
+                                        glow: None,
+                                        clip,
+                                        z: node.z - 1,
+                                    });
+                                }
+                            }
                         }
                         commands.push(RenderCommand::DrawText {
                             text: node.text.clone(),
@@ -641,6 +683,7 @@ impl ApplicationHandler for WindowApp {
                             color,
                             size,
                             styles,
+                            glow,
                             clip,
                             z: node.z,
                         });
@@ -650,8 +693,9 @@ impl ApplicationHandler for WindowApp {
                         for (ruby, ruby_x, ruby_y, ruby_size) in
                             text::ruby_draw_runs(&positioned_node, layout)
                         {
-                            if let Some((shadow_x, shadow_y, shadow_alpha)) =
-                                runtime.api.graph_defaults.shadow_for_height(ruby_size)
+                            if let TextNodeShadow::Default(_) = node_shadow
+                                && let Some((shadow_x, shadow_y, shadow_alpha)) =
+                                    runtime.api.graph_defaults.shadow_for_height(ruby_size)
                             {
                                 commands.push(RenderCommand::DrawText {
                                     text: ruby.clone(),
@@ -660,6 +704,7 @@ impl ApplicationHandler for WindowApp {
                                     color: [0.0, 0.0, 0.0, color[3] * shadow_alpha],
                                     size: ruby_size,
                                     styles: Vec::new(),
+                                    glow: None,
                                     clip,
                                     z: node.z,
                                 });
@@ -671,6 +716,7 @@ impl ApplicationHandler for WindowApp {
                                 color,
                                 size: ruby_size,
                                 styles: Vec::new(),
+                                glow: None,
                                 clip,
                                 z: node.z + 1,
                             });
@@ -686,6 +732,7 @@ impl ApplicationHandler for WindowApp {
                             color: [0.0, 0.0, 0.0, 0.9],
                             size,
                             styles: Vec::new(),
+                            glow: None,
                             clip: None,
                             z: 29_999,
                         });
@@ -696,6 +743,7 @@ impl ApplicationHandler for WindowApp {
                             color: [0.95, 0.95, 0.95, 1.0],
                             size,
                             styles: Vec::new(),
+                            glow: None,
                             clip: None,
                             z: 30_000,
                         });

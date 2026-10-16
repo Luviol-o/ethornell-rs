@@ -940,7 +940,43 @@ impl RuntimeTraceApi {
             state.line_height =
                 (state.font_size * (100 + surface.line_spacing_percent) as f32 / 100.0).max(1.0);
         }
+        if let Some(style) = target_surface
+            .and_then(|id| self.surface_text_states.get(&id))
+            .and_then(|cursor| cursor.message_style)
+        {
+            state.color = style.color(state.color[3]);
+        }
         state
+    }
+
+    /// Records the colour and style a 92:90/92:91 call gives the text it
+    /// draws in `target`.
+    pub(crate) fn set_message_text_style(&mut self, target: i32, packed_rgb: i32, style: [i32; 5]) {
+        let font_size = self.window_text_state(Some(target)).font_size.round() as i32;
+        self.surface_text_states
+            .entry(target)
+            .or_default()
+            .message_style = Some(crate::graph_defaults::MessageTextStyle::from_operands(
+            packed_rgb, style, font_size,
+        ));
+    }
+
+    /// The shadow a text node is drawn with: its window's message style when
+    /// a 92:90/92:91 call set one, else the process-wide drop shadow.
+    pub(crate) fn text_node_shadow(
+        &self,
+        node: &RuntimeTextNode,
+    ) -> crate::snapshot::TextNodeShadow {
+        match node
+            .target_surface
+            .and_then(|surface| self.surface_text_states.get(&surface))
+            .and_then(|state| state.message_style)
+        {
+            Some(style) => crate::snapshot::TextNodeShadow::Message(style.effect),
+            None => {
+                crate::snapshot::TextNodeShadow::Default(self.graph_defaults.shadow_parameters())
+            }
+        }
     }
 
     pub(crate) fn reset_window_text_cursor(&mut self, target: i32) {
