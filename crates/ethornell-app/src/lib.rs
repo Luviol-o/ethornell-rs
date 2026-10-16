@@ -6355,7 +6355,12 @@ impl RuntimeTraceApi {
                 ?destination_format,
                 "Graph90:18 blit with an untracked bitmap format uses the portable compositor"
             );
-            if alpha_parameter == 0 {
+            if mode == 0x80 {
+                // Mode 128 copies the pixels in every native kernel
+                // (blit_copy); compositing it over the destination stacked
+                // the coverage of half-transparent bitmaps.
+                blit_decoded_image_raw_copy(&mut destination_image, &source_image, x, y);
+            } else if alpha_parameter == 0 {
                 blit_decoded_image(&mut destination_image, &source_image, x, y, mode);
             } else {
                 blit_decoded_image_parameter(
@@ -10269,6 +10274,36 @@ mod input_tests {
             api.graph_resources
                 .insert(bitmap, RuntimeGraphResource::whole(key.to_string()));
             api.bitmap_formats.insert(bitmap, 2);
+        }
+
+        let mut copy = [1086, 0, 0, 1084, 128, 0].map(Value::Int).to_vec();
+        call_graph(&mut api, 0x92, 0x89, &mut copy).unwrap();
+
+        assert_eq!(
+            api.graph_images["runtime:bitmap:1086"].rgba,
+            pixel.repeat(4 * 2)
+        );
+    }
+
+    #[test]
+    fn mode_128_copies_pixels_also_when_a_bitmap_format_is_untracked() {
+        let manager =
+            ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let mut api = super::RuntimeTraceApi::new(manager);
+        // The name patch is cloned from a region of the window background
+        // and has no recorded format, so the portable compositor runs.
+        let pixel = [90, 100, 110, 128];
+        for (bitmap, key) in [(1086, "test:window-background"), (1084, "test:name-patch")] {
+            api.store_graph_image(
+                key.to_string(),
+                DecodedImage {
+                    width: 4,
+                    height: 2,
+                    rgba: pixel.repeat(4 * 2),
+                },
+            );
+            api.graph_resources
+                .insert(bitmap, RuntimeGraphResource::whole(key.to_string()));
         }
 
         let mut copy = [1086, 0, 0, 1084, 128, 0].map(Value::Int).to_vec();
