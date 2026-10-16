@@ -92,6 +92,9 @@ impl RuntimeTraceApi {
             0x27 => {
                 let from = pop_string_value(stack).unwrap_or_default();
                 let to = pop_string_value(stack).unwrap_or_default();
+                if let Some(policy)=file_policy::active() {
+                    return Some(Ok(ethornell_vm::Value::Int(i32::from(policy.rename(&from,&to).is_ok()))));
+                }
                 let ok = match (
                     runtime_file_path_from_root(&self.manager, &self.native_root, &from),
                     runtime_file_path_from_root(&self.manager, &self.native_root, &to),
@@ -142,6 +145,7 @@ impl RuntimeTraceApi {
             }
             0x3E => {
                 let path = pop_string_value(stack).unwrap_or_default();
+                if let Some(policy) = file_policy::active() { return Some(Ok(ethornell_vm::Value::Int(i32::from(policy.metadata(&path).is_some_and(|m| m.is_dir()))))); }
                 let exists = runtime_file_path_from_root(&self.manager, &self.native_root, &path)
                     .is_some_and(|path| path.is_dir());
                 ethornell_vm::Value::Int(i32::from(exists))
@@ -204,6 +208,7 @@ impl RuntimeTraceApi {
         max_count: usize,
         directories: bool,
     ) -> Vec<String> {
+        if let Some(policy) = file_policy::active() { return policy.enumerate_user(pattern, recursive, max_count, directories).unwrap_or_default(); }
         let normalized = pattern.replace('\\', std::path::MAIN_SEPARATOR_STR);
         let pattern_path = Path::new(&normalized);
         let wildcard = pattern_path
@@ -288,6 +293,7 @@ fn enumerate_native_directory(
     directories: bool,
     output: &mut Vec<String>,
 ) {
+    if file_policy::restricted() && output.len()>=10_000 {return;}
     let Ok(entries) = std::fs::read_dir(directory) else {
         return;
     };

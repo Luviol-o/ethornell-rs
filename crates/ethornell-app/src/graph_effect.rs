@@ -176,6 +176,11 @@ impl GraphEffectRegistry {
             return 4;
         }
         let duration_ms = probe_mpeg_duration_ms(bytes);
+        if crate::file_policy::restricted() && duration_ms <= 0 {
+            // Do not install a permanently active zero-duration process and
+            // leave its native wait procedure blocked forever.
+            return 2;
+        }
         let Some(movie) = MovieDecoder::new(bytes) else {
             return 2;
         };

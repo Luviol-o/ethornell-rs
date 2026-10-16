@@ -191,6 +191,7 @@ impl RuntimeGraphInputObject {
     pub(crate) fn is_current_selection(&self, group: i32, index: i32) -> bool {
         self.current_selections.get(&group).copied() == Some(index)
     }
+    pub(crate) fn current_item(&self,group:i32)->i32 {self.current_selections.get(&group).copied().unwrap_or(-1)}
 
     /// Root+0x0C/+0x10 enable sampling the owning Window's input scope.
     /// With both clear, only the separate live-item Virtual scope is sampled.
@@ -311,11 +312,19 @@ impl RuntimeGraphInputObject {
     /// Returns true only when the group/item state actually changes and the
     /// group is eligible for pointer selection.
     pub(crate) fn select_pointer_item(&mut self, group: i32, index: i32) -> bool {
-        if !self.group_pointer_selection_enabled(group)
-            || self.current_selections.get(&group).copied() == Some(index)
-        {
+        if !self.group_pointer_selection_enabled(group) {
             return false;
         }
+        self.select_current_item(group,index)
+    }
+    /// Native root+1C enables current-item selection on successful action1,
+    /// independently from the group's hover/pointer-selection switch.
+    pub(crate) fn select_activated_item(&mut self,region:GraphInputRegion)->bool {
+        if self.descriptor.flags[4]==0 || !self.descriptor.groups.iter().find(|g|g.index==region.group).map(|g|g.selection_enabled).unwrap_or(self.descriptor.groups.is_empty()) {return false;}
+        self.select_current_item(region.group,region.index)
+    }
+    fn select_current_item(&mut self,group:i32,index:i32)->bool {
+        if self.current_selections.get(&group).copied()==Some(index){return false;}
 
         let exclusion_key = self
             .descriptor
@@ -732,6 +741,19 @@ mod tests {
             "registry lifetime is separate from the BC running flag"
         );
     }
+    #[test]
+    fn activation_root_flag_selects_without_hover_selection_and_keeps_exclusion_rules() {
+        for deferred in [false,true] {
+            let mut input=RuntimeGraphInputObject::new_extended(7);
+            input.configure(GraphInputDescriptor {flags:[1,0,0,0,1,0,0],groups:vec![GraphInputGroup {index:0,initial_current_item:-1,selection_enabled:true,pointer_selection_enabled:false,pointer_activation_enabled:false,selection_exclusion_key:-1,extended_flags:if deferred{2}else{0}}],regions:vec![region()],..GraphInputDescriptor::default()});
+            assert!(!input.select_pointer_item(0,1));assert_eq!(input.selected_region_values(),vec![-1]);
+            assert_eq!(input.pointer_activation_is_immediate(region()),!deferred);
+            input.begin_interaction(region(),20,20);assert!(input.select_activated_item(region()));
+            assert_eq!(input.selected_region_values(),vec![1]);
+            let mut excluded=region();excluded.current_selection_hit_excluded=true;
+            assert!(!input.pointer_hit_eligible(excluded));
+        }
+    }
 
     #[test]
     fn extended_item_state_reports_target_status_classes() {
@@ -873,4 +895,3 @@ mod tests {
         assert_eq!((ex.descriptor.regions[2].x, ex.descriptor.regions[2].y), (40, 50));
     }
 }
-

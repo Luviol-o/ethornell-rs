@@ -16,6 +16,7 @@ use std::sync::{
 mod async_program;
 mod debug;
 mod extended_opcodes;
+mod host_request;
 mod input;
 pub mod native_call;
 pub mod native_input;
@@ -28,6 +29,7 @@ mod program_thread;
 mod records;
 mod resource_io;
 mod scenario;
+mod sentence_table;
 mod scheduler;
 mod system80_state;
 mod system81_state;
@@ -35,6 +37,9 @@ pub mod target_thread;
 mod time;
 mod user_data;
 
+pub use host_request::{
+    HostMemoryWrite, HostRequest, HostResponse, VmResourceBudget, VmResourceUsage,
+};
 pub use native_call::{
     NativeCallFrame, NativeImplementationLevel, NativeMessageProcedureClass,
     NativeMessageProcedureConfig, NativeOpcode, NativeOpcodeSpec, NativeParameterSpec,
@@ -64,6 +69,7 @@ pub const DEFAULT_COOPERATIVE_WATCHDOG_STEPS: usize = TARGET_COOPERATIVE_QUANTUM
 static NEXT_VM_TRACE_ID: AtomicU64 = AtomicU64::new(1);
 
 pub type VmResult<T> = std::result::Result<T, VmError>;
+pub use ethornell_script::native_abi::NativeAbiProfile;
 
 #[derive(Debug, thiserror::Error)]
 pub enum VmError {
@@ -166,6 +172,9 @@ pub enum VmStopReason {
     /// The coroutine is suspended by a native CProcedure such as graph or
     /// sound playback.
     WaitingForProcedure,
+    /// A host-owned request has not been completed. No placeholder result has
+    /// been pushed; the embedding worker remains free to service lifecycle IO.
+    WaitingForHost,
     /// The target per-thread 0x100000 instruction quantum was exhausted.
     QuantumExhausted,
     /// A host-configured budget smaller than the target quantum was exhausted.
@@ -368,6 +377,37 @@ pub struct ShortcutInstallerWorkflowRequest {
 }
 
 pub trait SysApi {
+    /// Legacy desktop System81 helpers may use std::fs as a fallback. Sandboxed
+    /// hosts MUST return false so denied reads cannot bypass their IO policy.
+    /// This does not replace checks in all host filesystem/installer methods.
+    fn allow_direct_filesystem_fallback(&self) -> bool {
+        true
+    }
+
+    /// Policy-aware writeability probe used instead of a direct temporary-file
+    /// write when direct filesystem fallbacks are disabled. Never expand roots.
+    fn probe_directory_writable(&mut self, _path: &str) -> bool {
+        false
+    }
+
+    /// Opt in to pre-dispatch interception. Desktop hosts retain synchronous
+    /// behavior by default. Android must explicitly reject unsupported modal
+    /// calls rather than returning None and falling back to desktop behavior.
+    fn host_requests_enabled(&self) -> bool {
+        false
+    }
+    /// Opt-in numeric diagnostic only; never affects execution or guest state.
+    fn input_gate_diagnostics_enabled(&self)->bool {false}
+    fn record_input_gate(&mut self,_values:[u32;9]) {}
+
+    /// Some(nonzero id) transfers this call to a VM continuation; None leaves
+    /// the original desktop implementation in charge. IDs must be unique for
+    /// the entire session, including cancelled requests and child threads.
+    /// Never block here waiting for UI. The host owns queueing the request.
+    fn begin_host_request(&mut self, _request: &HostRequest) -> VmResult<Option<u64>> {
+        Ok(None)
+    }
+
     /// Identifier supplied by the game's native executable (Sys80:E8).
     fn game_id(&self) -> &str {
         "Tayutama2TV"
@@ -516,6 +556,11 @@ pub trait SysApi {
         None
     }
 
+    /// Final IO boundary: enforce the host's user-write root policy, commit via
+    /// same-filesystem temporary file + flush/sync + atomic replacement, and
+    /// return false on any failure without destroying an existing save. Read,
+    /// enumeration, deletion, rename (both ends), root selection and installer
+    /// methods require equivalent policy checks; this hook alone is no sandbox.
     fn write_file_bytes(&mut self, _path: &str, _bytes: &[u8]) -> bool {
         false
     }
@@ -2100,7 +2145,12 @@ fn placeholder_loaded_program(
 
 #[derive(Debug, Default)]
 pub struct Vm {
+    native_abi_profile: NativeAbiProfile,
     trace_id: u64,
+    pending_host_request: Option<host_request::PendingHostRequest>,
+    ready_host_response: Option<HostResponse>,
+    fatal_async_report: Option<Box<VmRunReport>>,
+    async_reports: Vec<VmRunReport>,
     graph_text_encoding: Option<&'static encoding_rs::Encoding>,
     pub stack: Vec<Value>,
     operand_slots: Vec<Value>,
@@ -2370,6 +2420,7 @@ impl Vm {
         let mut vm = Self {
             trace_id: NEXT_VM_TRACE_ID.fetch_add(1, Ordering::Relaxed),
             operand_slots: vec![Value::Int(0); OPERAND_STACK_CAPACITY],
+            native_abi_profile: NativeAbiProfile::default(),
             memory: vec![0; INITIAL_MEMORY_SIZE],
             heap_ptr: 0x0020_0000,
             rng_seed: 1,
@@ -2396,6 +2447,9 @@ impl Vm {
     /// Resource names and BP system strings retain their original encoding.
     pub fn set_graph_text_encoding(&mut self, encoding: &'static encoding_rs::Encoding) {
         self.graph_text_encoding = Some(encoding);
+        for task in &mut self.async_tasks {
+            task.vm.set_graph_text_encoding(encoding);
+        }
     }
 
     pub fn run<A>(
@@ -2412,6 +2466,10 @@ impl Vm {
     }
 
     pub fn start(&mut self, program: &BpProgram) {
+        self.pending_host_request = None;
+        self.ready_host_response = None;
+        self.fatal_async_report = None;
+        self.async_reports.clear();
         self.stack.clear();
         self.operand_slots.fill(Value::Int(0));
         self.operand_slots_synced_len = 0;
@@ -2444,12 +2502,24 @@ impl Vm {
         self.pending_root_program_callbacks.clear();
         self.timing.reset();
     }
+    /// Debug harness entry for replaying a real loaded module with the
+    /// initialized framework mediation table; never compiled into release.
+    #[cfg(debug_assertions)]
+    pub fn diagnostic_start_with_initialized_framework(&mut self,program:&BpProgram) {
+        let mediation=self.mediation_programs.clone();
+        self.start(program);
+        self.mediation_programs=mediation;
+    }
 
     pub fn run_loaded<A>(&mut self, api: &mut A, options: &VmRunOptions) -> VmRunReport
     where
         A: SysApi + GraphApi + SoundApi,
     {
+        if let Some(report) = &self.fatal_async_report {
+            return (**report).clone();
+        }
         self.collect_diagnostics = options.collect_diagnostics;
+        self.async_reports.clear();
         // `stack` is public for embedders and tests. Reconcile it once at the
         // host slice boundary; instruction dispatch maintains the ring
         // incrementally after this point.
@@ -2469,9 +2539,22 @@ impl Vm {
         let trace_events =
             std::env::var_os("TRACE_VM_EVENTS").is_some() || std::env::var_os("DEBUG").is_some();
         if !self.halted && !std::mem::take(&mut self.suppress_async_pump_once) {
-            self.pump_async_programs(api, trace_events, options.max_steps);
+            if let Some(report) = self.pump_async_programs(api, trace_events, options) {
+                self.halted = true;
+                self.fatal_async_report = Some(Box::new(report.clone()));
+                return report;
+            }
         }
-        let procedure_wait = self.poll_current_procedure(api, trace_events);
+        let response_error = self.settle_ready_host_response().err();
+        let procedure_wait = if let Some(error) = response_error {
+            self.push_trace(format!("host response failed: {error}"));
+            self.halted = true;
+            Some(VmStopReason::Error)
+        } else if self.pending_host_request.is_some() {
+            Some(VmStopReason::WaitingForHost)
+        } else {
+            self.poll_current_procedure(api, trace_events)
+        };
         if let Some(reason) = procedure_wait {
             stop_reason = reason;
         }
@@ -2573,6 +2656,10 @@ impl Vm {
                     }
                     steps += 1;
                     self.trace_msgwnd_loop(inst.offset as u32);
+                    if self.pending_host_request.is_some() {
+                        stop_reason = VmStopReason::WaitingForHost;
+                        break;
+                    }
                     // Every target handler marked as installing CProcedure must
                     // suspend at the syscall boundary. Continuing here would
                     // execute later BP instructions in the same scheduler pass
@@ -2655,6 +2742,9 @@ impl Vm {
             }
         }
         instruction_profile.report(self, steps);
+        if stop_reason == VmStopReason::Completed && !self.pending_host_request_ids().is_empty() {
+            stop_reason = VmStopReason::WaitingForHost;
+        }
         VmRunReport {
             steps,
             pc: self.pc,
@@ -3406,8 +3496,8 @@ impl Vm {
             } => {
                 let needle = self.pop_string_lossy()?;
                 let haystack = self.pop_string_lossy()?;
-                let (needle, _, _) = encoding_rs::SHIFT_JIS.encode(&needle);
-                let (haystack, _, _) = encoding_rs::SHIFT_JIS.encode(&haystack);
+                let needle=self.encode_native_string(&needle);
+                let haystack=self.encode_native_string(&haystack);
                 let found = if needle.is_empty() {
                     0
                 } else {
@@ -3429,17 +3519,17 @@ impl Vm {
                 let haystack = self.pop_string_lossy()?;
                 let dst = self.pop_ptr()?;
                 let (replaced, count) = target_strreplace(
-                    &encoding_rs::SHIFT_JIS.encode(&haystack).0,
-                    &encoding_rs::SHIFT_JIS.encode(&needle).0,
-                    &encoding_rs::SHIFT_JIS.encode(&replacement).0,
+                    &self.encode_native_string(&haystack),
+                    &self.encode_native_string(&needle),
+                    &self.encode_native_string(&replacement),
                 );
-                let (text, _, _) = encoding_rs::SHIFT_JIS.decode(&replaced);
+                let text=if self.native_abi_profile==NativeAbiProfile::Amachoco {String::from_utf8_lossy(&replaced)} else {encoding_rs::SHIFT_JIS.decode(&replaced).0};
                 self.write_c_string(dst, &text)?;
                 self.push_value(Value::Int(count));
             }
             BpOpcode::Known { name: "strlen", .. } => {
                 let text = self.pop_string_lossy()?;
-                let (encoded, _, _) = encoding_rs::SHIFT_JIS.encode(&text);
+                let encoded=self.encode_native_string(&text);
                 self.push_value(Value::Int(encoded.len() as i32));
             }
             BpOpcode::Known { name: "streq", .. } => {
@@ -3546,8 +3636,19 @@ impl Vm {
                 // sub_474FF0: default-button flag first, then the text; the
                 // Yes/No box result (Yes == IDYES) is pushed. A windowless
                 // runtime has no one to ask, so it answers Yes.
-                let _default_yes = self.pop_int()?;
+                let default_yes = self.pop_int()? != 0;
                 let message = self.pop_string_lossy().unwrap_or_default();
+                if self.begin_host_continuation(
+                    api,
+                    HostRequest::Confirmation {
+                        text: message.clone(),
+                        default_yes,
+                    },
+                    1,
+                )? {
+                    self.pc = next_pc;
+                    return Ok(());
+                }
                 tracing::warn!(%message, "BP confirm answered Yes without a dialog");
                 self.push_value(Value::Int(1));
             }
@@ -3558,6 +3659,16 @@ impl Vm {
                 let message = self
                     .pop_string_lossy()
                     .unwrap_or_else(|_| "<message>".into());
+                if self.begin_host_continuation(
+                    api,
+                    HostRequest::Message {
+                        text: message.clone(),
+                    },
+                    0,
+                )? {
+                    self.pc = next_pc;
+                    return Ok(());
+                }
                 tracing::warn!(%message, "BP message_box");
             }
             BpOpcode::Known {
@@ -3616,12 +3727,18 @@ impl Vm {
                 self.note_call("sys", code, id);
                 api.observe_dispatch(NativeOpcode { group: code, id });
                 if fail_on_stub
-                    && !native_call::is_strictly_supported(NativeOpcode { group: code, id })
+                    && !self.effective_strict_support(NativeOpcode { group: code, id })
                 {
                     self.note_stub("sys", code, id);
                     return Err(VmError::UnknownDispatch { group: code, id });
                 }
                 let opcode = NativeOpcode { group: code, id };
+                if api.host_requests_enabled() {
+                    if self.intercept_native_host_request(api, opcode)? {
+                        self.pc = next_pc;
+                        return Ok(());
+                    }
+                }
                 let result = if let Some(result) = self.dispatch_scheduler_opcode(
                     api,
                     opcode,
@@ -4010,6 +4127,12 @@ impl Vm {
                                 2,
                                 value as u32,
                             )?;
+                        }
+                        if self.native_abi_profile==NativeAbiProfile::Amachoco && api.input_gate_diagnostics_enabled() && state_buffer==(0x1200_0000u32|self.mem_ptr.wrapping_sub(0x64)) {
+                            let base=0x1200_0000u32|self.mem_ptr;
+                            let read=|offset:u32|self.read_int(base.wrapping_sub(offset),2).unwrap_or(u32::MAX);
+                            let event=read(0x70);
+                            if event!=0 {api.record_input_gate([self.pc as u32,self.mem_ptr,event,read(0x6c),read(0x68),read(0x44),read(0x40),state[0]as u32,self.read_int(1092,2).unwrap_or(u32::MAX)]);}
                         }
                     }
                     Value::Int(i32::from(exists))
@@ -5175,6 +5298,12 @@ impl Vm {
                     self.note_stub("user", code, id);
                     return Err(VmError::UnknownDispatch { group: code, id });
                 }
+                if api.host_requests_enabled()
+                    && self.intercept_native_host_request(api, NativeOpcode { group: code, id })?
+                {
+                    self.pc = next_pc;
+                    return Ok(());
+                }
                 self.normalize_user_string_args(code, id)?;
                 let direct_result = if (code, id) == (0xb0, 0x27) {
                     let destination = self.pop_ptr()?;
@@ -5822,7 +5951,7 @@ impl Vm {
             // not fabricate an unrecovered procedure when that path is taken.
             return;
         }
-        if native_abi::installs_procedure(opcode.group, opcode.id)
+        if self.effective_procedure(opcode.group, opcode.id)
             && self.thread.current_procedure().is_none()
         {
             if let Some(evidence) = crate::procedure_class_map::target_procedure_class(opcode) {
@@ -5939,11 +6068,11 @@ impl Vm {
                 let input_interrupted = !(deadline_reached || cancelled || callback_completed)
                     && procedure.input_enabled()
                     && {
-                        let aux_mask = self
-                            .system81_shared
-                            .lock()
-                            .expect("system81 state poisoned")
-                            .message_auxiliary_input_mask as u32;
+                        let aux_mask =
+                            self.system81_shared
+                                .lock()
+                                .expect("system81 state poisoned")
+                                .message_auxiliary_input_mask as u32;
                         api.query_input_event_bits(procedure.input_scope()) as u32
                             & (aux_mask | 0x8000_0181)
                             != 0
@@ -6131,7 +6260,9 @@ impl Vm {
                             self.thread.clear_current_procedure();
                             // sub_433600 pushes +0x34 (set by any filtered input) on
                             // every completion; scrmsg stores it as "ended by input".
-                            self.push_value(Value::Int(procedure.native.ordinary_input_latch as i32));
+                            self.push_value(Value::Int(
+                                procedure.native.ordinary_input_latch as i32,
+                            ));
                             return None;
                         }
                     }
@@ -6191,7 +6322,10 @@ impl Vm {
                     && let (Some(object_id), Some(control_id)) =
                         (procedure.object_id, procedure.control_id)
                 {
-                    for callback in callbacks.iter().filter(|callback| callback[0].as_i32() == 1) {
+                    for callback in callbacks
+                        .iter()
+                        .filter(|callback| callback[0].as_i32() == 1)
+                    {
                         api.request_native_graph_control_stop(
                             installed.source_opcode,
                             object_id,
@@ -6342,7 +6476,7 @@ impl Vm {
     }
 
     fn take_dispatch_call_frame(&mut self, group: u8, id: u16) -> VmResult<Vec<Value>> {
-        let Some(argc) = known_call_arg_count(group, id) else {
+        let Some(argc) = self.effective_arg_count(group, id) else {
             return Ok(Vec::new());
         };
         let mut args = Vec::with_capacity(argc);
@@ -6352,6 +6486,24 @@ impl Vm {
         args.reverse();
         Ok(args)
     }
+    pub fn set_native_abi_profile(&mut self,profile:NativeAbiProfile) {
+        self.native_abi_profile=profile;
+        for task in &mut self.async_tasks {task.vm.set_native_abi_profile(profile);}
+    }
+    pub fn native_abi_profile(&self)->NativeAbiProfile {self.native_abi_profile}
+    fn effective_arg_count(&self,group:u8,id:u16)->Option<usize> {
+        native_abi::lookup_profile(self.native_abi_profile,group,id).map(|a|a.argc).or_else(||known_call_arg_count(group,id))
+    }
+    fn effective_output_count(&self,group:u8,id:u16)->usize {
+        native_abi::lookup_profile(self.native_abi_profile,group,id).map(|a|a.stack_outputs).unwrap_or_else(||known_call_stack_output_count(group,id))
+    }
+    fn effective_procedure(&self,group:u8,id:u16)->bool {
+        native_abi::lookup_profile(self.native_abi_profile,group,id).map(|a|a.installs_procedure).unwrap_or_else(||native_abi::installs_procedure(group,id))
+    }
+    fn effective_strict_support(&self,opcode:NativeOpcode)->bool {
+        if self.native_abi_profile==NativeAbiProfile::Amachoco && opcode.group==0x81 && matches!(opcode.id,0x21|0xD8|0xDA) {return true;}
+        native_call::is_strictly_supported(opcode)
+    }
 
     fn settle_native_call_outputs(
         &mut self,
@@ -6360,7 +6512,7 @@ impl Vm {
         call_stack: &mut Vec<Value>,
         result: Value,
     ) -> Value {
-        let output_count = known_call_stack_output_count(group, id);
+        let output_count = self.effective_output_count(group, id);
         if output_count <= 1 {
             return result;
         }
@@ -6417,7 +6569,7 @@ impl Vm {
         id: u16,
         result: Value,
     ) -> Value {
-        let output_count = known_call_stack_output_count(group, id);
+        let output_count = self.effective_output_count(group, id);
         if output_count == 0 {
             if result != Value::None {
                 tracing::debug!(
@@ -6444,8 +6596,8 @@ impl Vm {
         fail_on_stub: bool,
     ) -> VmResult<()> {
         if !native_return_audit_enabled()
-            || !known_call_returns_value(group, id)
-            || native_abi::installs_procedure(group, id)
+            || self.effective_output_count(group,id)==0
+            || self.effective_procedure(group,id)
             || *result != Value::None
         {
             return Ok(());
@@ -7635,6 +7787,13 @@ impl Vm {
         encoding: &'static encoding_rs::Encoding,
     ) -> VmResult<String> {
         let bytes = self.read_c_string_bytes(ptr)?;
+        // This confirmed native revision's81:21 and sentence-table lookup
+        // produce UTF-8 buffers. Raw memcpy/strcpy may intentionally drop the
+        // synthetic String shadow; preserve the actual native bytes rather
+        // than reinterpret valid UTF-8 as legacy CP932/graph GBK mojibake.
+        if self.native_abi_profile==NativeAbiProfile::Amachoco {
+            if let Ok(text)=std::str::from_utf8(&bytes) {return Ok(text.to_owned());}
+        }
         let (text, _, _) = encoding.decode(&bytes);
         Ok(text.into_owned())
     }
@@ -7686,11 +7845,7 @@ impl Vm {
 
     fn write_c_string(&mut self, ptr: u32, text: &str) -> VmResult<()> {
         self.write_c_string_raw(ptr, text)?;
-        let len = encoding_rs::SHIFT_JIS
-            .encode(text)
-            .0
-            .len()
-            .saturating_add(1);
+        let len = self.encode_native_string(text).len().saturating_add(1);
         self.restore_script_records(ptr, len)?;
         Ok(())
     }
@@ -7725,7 +7880,7 @@ impl Vm {
     }
 
     fn write_c_string_raw(&mut self, ptr: u32, text: &str) -> VmResult<()> {
-        let (encoded, _, _) = encoding_rs::SHIFT_JIS.encode(text);
+        let encoded=if self.native_abi_profile==NativeAbiProfile::Amachoco {std::borrow::Cow::Borrowed(text.as_bytes())} else {encoding_rs::SHIFT_JIS.encode(text).0};
         let bytes = encoded.as_ref();
         let range = self.resolve_write_range(ptr, bytes.len().saturating_add(1))?;
         let start = range.start;
@@ -7733,6 +7888,9 @@ impl Vm {
         self.memory[start + bytes.len()] = 0;
         self.trace_watch_write(ptr, bytes.len().saturating_add(1), 0, "write_c_string");
         Ok(())
+    }
+    fn encode_native_string<'a>(&self,text:&'a str)->std::borrow::Cow<'a,[u8]> {
+        if self.native_abi_profile==NativeAbiProfile::Amachoco {std::borrow::Cow::Borrowed(text.as_bytes())} else {encoding_rs::SHIFT_JIS.encode(text).0}
     }
 
     /// Write one target Shift-JIS C string without splitting a multibyte
@@ -8795,6 +8953,7 @@ impl Vm {
                 Value::None
             }
             (0x81, 0x21) => {
+                if self.native_abi_profile!=NativeAbiProfile::Amachoco {return Ok(None);}
                 // amachoco.exe's sub_4953A0 pops source then destination and
                 // converts the source from CP932 to UTF-8. Retain the decoded
                 // string as a shadow value so later BP copies and graph calls
@@ -8802,7 +8961,11 @@ impl Vm {
                 let source = self.pop_value()?;
                 let destination = self.pop_ptr()?;
                 let text = self.value_as_native_string_lossy(source)?;
-                self.write_c_string(destination, &text)?;
+                let bytes=text.as_bytes();
+                let range=self.resolve_write_range(destination,bytes.len()+1)?;
+                self.memory[range.start..range.start+bytes.len()].copy_from_slice(bytes);
+                self.memory[range.start+bytes.len()]=0;
+                self.clear_shadow_values(destination,bytes.len()+1);
                 self.mem_values
                     .insert(Self::value_key(destination), Value::Str(text));
                 Value::None
@@ -8811,9 +8974,11 @@ impl Vm {
                 let mode = self.pop_int()?;
                 let path = self.pop_string_lossy()?;
                 let handle_destination = self.pop_ptr()?;
-                let bytes = api
-                    .load_file_bytes("", &path)
-                    .or_else(|| std::fs::read(&path).ok());
+                let bytes = api.load_file_bytes("", &path).or_else(|| {
+                    api.allow_direct_filesystem_fallback()
+                        .then(|| std::fs::read(&path).ok())
+                        .flatten()
+                });
                 let status = if !(0..=2).contains(&mode) {
                     1
                 } else if let Some(bytes) = bytes {
@@ -8908,7 +9073,9 @@ impl Vm {
                 let write_time = self.pop_ptr()?;
                 let access_time = self.pop_ptr()?;
                 let creation_time = self.pop_ptr()?;
-                let exists = std::fs::metadata(&path).is_ok() || api.file_exists("", &path);
+                let exists = (api.allow_direct_filesystem_fallback()
+                    && std::fs::metadata(&path).is_ok())
+                    || api.file_exists("", &path);
                 for destination in [creation_time, access_time, write_time] {
                     if destination != 0 {
                         for index in 0..8 {
@@ -8923,14 +9090,23 @@ impl Vm {
                 let _access_time = self.pop_ptr()?;
                 let _creation_time = self.pop_ptr()?;
                 let path = self.pop_string_lossy()?;
-                Value::Int(i32::from(std::fs::metadata(path).is_ok()))
+                Value::Int(i32::from(if api.allow_direct_filesystem_fallback() {
+                    std::fs::metadata(path).is_ok()
+                } else {
+                    api.file_exists("", &path)
+                }))
             }
             (0x81, 0x2f) => {
                 let path = self.pop_string_lossy()?;
                 let directory = std::path::Path::new(&path);
                 let test_path = directory.join(format!("BGI{:08x}.tmp", self.trace_id));
-                let writable = std::fs::write(&test_path, []).is_ok();
-                if writable {
+                let direct = api.allow_direct_filesystem_fallback();
+                let writable = if direct {
+                    std::fs::write(&test_path, []).is_ok()
+                } else {
+                    api.probe_directory_writable(&path)
+                };
+                if writable && direct {
                     let _ = std::fs::remove_file(test_path);
                 }
                 Value::Int(i32::from(writable))
@@ -9008,7 +9184,12 @@ impl Vm {
                 let path = self.pop_string_lossy()?;
                 let destination = self.pop_ptr()?;
                 let requested = self.pop_int()?.max(0) as usize;
-                let bytes = std::fs::read(&path).or_else(|_| {
+                let bytes = if api.allow_direct_filesystem_fallback() {
+                    std::fs::read(&path)
+                } else {
+                    Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+                }
+                .or_else(|_| {
                     api.load_file_bytes("", &path)
                         .ok_or(std::io::Error::from(std::io::ErrorKind::NotFound))
                 });
@@ -9029,7 +9210,11 @@ impl Vm {
                 let _context = self.pop_ptr()?;
                 let size = api
                     .load_file_bytes("", &path)
-                    .or_else(|| std::fs::read(&path).ok())
+                    .or_else(|| {
+                        api.allow_direct_filesystem_fallback()
+                            .then(|| std::fs::read(&path).ok())
+                            .flatten()
+                    })
                     .map_or(0, |bytes| bytes.len().min(i32::MAX as usize) as i32);
                 Value::Int(size)
             }
@@ -9046,7 +9231,11 @@ impl Vm {
             (0x81, 0x37) => {
                 let path = self.pop_string_lossy()?;
                 let destination = self.pop_ptr()?;
-                let exists = std::fs::metadata(path).is_ok();
+                let exists = if api.allow_direct_filesystem_fallback() {
+                    std::fs::metadata(path).is_ok()
+                } else {
+                    api.file_exists("", &path)
+                };
                 self.write_int(destination, 2, 0)?;
                 Value::Int(i32::from(exists))
             }
@@ -9131,7 +9320,10 @@ impl Vm {
             (0x81, 0x3c) => {
                 let path = self.pop_string_lossy()?;
                 Value::Int(i32::from(
-                    api.file_exists("", &path) || std::fs::metadata(path).is_ok(),
+                    api.file_exists("", &path)
+                        || api.directory_exists(&path)
+                        || (api.allow_direct_filesystem_fallback()
+                            && std::fs::metadata(path).is_ok()),
                 ))
             }
             (0x81, 0x3d) => {
@@ -9148,7 +9340,11 @@ impl Vm {
             (0x81, 0x3e) => {
                 let path = self.pop_string_lossy()?;
                 let destination = self.pop_ptr()?;
-                let available = std::fs::metadata(path).is_ok();
+                let available = if api.allow_direct_filesystem_fallback() {
+                    std::fs::metadata(path).is_ok()
+                } else {
+                    api.file_exists("", &path)
+                };
                 if destination != 0 {
                     self.write_int(destination, 2, u32::from(available))?;
                 }
@@ -9494,14 +9690,43 @@ impl Vm {
                 }
             }
             (0x81, 0xda) => {
-                // amachoco.exe's sub_4961E0 queries an optional sentence
-                // substitution table. Returning zero selects the script's
-                // built-in fallback, which copies the original sentence via
-                // Sys81:21.
-                let _text = self.pop_value()?;
-                let _keyword = self.pop_value()?;
-                let _destination = self.pop_ptr()?;
-                Value::Int(0)
+                if self.native_abi_profile!=NativeAbiProfile::Amachoco {return Ok(None);}
+                // Confirmed ac_chinese.exe497340 ->4A47B0: resolve group/key,
+                // optionally copy UTF-8 including NUL, return payload bytes
+                // excluding NUL. A null destination is a length query.
+                let text = self.pop_value()?;
+                let keyword = self.pop_value()?;
+                let destination = self.pop_ptr()?;
+                let key=self.value_as_native_string_lossy(text)?;
+                let group=self.value_as_native_string_lossy(keyword)?;
+                let replacement=self.system81_shared.lock().map_err(|_|VmError::Runtime("sentence table state poisoned".into()))?.sentence_table.get(&group,&key).map(str::to_owned);
+                if let Some(replacement)=replacement {
+                    let bytes=replacement.as_bytes();let length=bytes.len();
+                    if destination!=0 {
+                        let range=self.resolve_write_range(destination,length+1)?;
+                        self.memory[range.start..range.start+length].copy_from_slice(bytes);self.memory[range.start+length]=0;
+                        self.clear_shadow_values(destination,length+1);self.mem_values.insert(Self::value_key(destination),Value::Str(replacement));
+                    }
+                    Value::Int(length as i32)
+                } else {Value::Int(0)}
+            }
+            (0x81,0xd8) if self.native_abi_profile==NativeAbiProfile::Amachoco => {
+                // The confirmed later script consumes (bytes,length) and one
+                // result, unlike the default executable's unregistered slot.
+                // Only install a fully validated table; malformed data returns
+                // failure and leaves prior shared registrations unchanged.
+                let length=self.pop_int()?;
+                let pointer=self.pop_ptr()?;
+                if length==0 && pointer==0 {
+                    self.system81_shared.lock().map_err(|_|VmError::Runtime("sentence table state poisoned".into()))?.sentence_table=sentence_table::SentenceTable::default();
+                    Value::Int(1)
+                } else if length<0 || !sentence_table::SentenceTable::valid_size(length as usize) {Value::Int(0)} else {
+                    let bytes=self.resolve_range(pointer,length as usize)?;
+                    if let Some(table)=sentence_table::SentenceTable::parse(&self.memory[bytes]) {
+                        self.system81_shared.lock().map_err(|_|VmError::Runtime("sentence table state poisoned".into()))?.sentence_table=table;
+                        Value::Int(1)
+                    } else {Value::Int(0)}
+                }
             }
             (0x81, 0xe0) => {
                 let flags = self.pop_int()?;
@@ -10025,7 +10250,7 @@ impl Vm {
                 let mut cursor = destination;
                 let mut total = 0usize;
                 for value in values {
-                    let byte_len = encoding_rs::SHIFT_JIS.encode(&value).0.len() + 1;
+                    let byte_len = self.encode_native_string(&value).len() + 1;
                     if destination != 0 {
                         self.write_c_string_raw(cursor, &value)?;
                         cursor = cursor.saturating_add(byte_len as u32);
@@ -10064,7 +10289,7 @@ impl Vm {
                 else {
                     return Ok(Some(Value::Int(i32::MIN + 2)));
                 };
-                let byte_len = encoding_rs::SHIFT_JIS.encode(text).0.len();
+                let byte_len = self.encode_native_string(text).len();
                 self.write_int(output_length, 2, byte_len.min(u32::MAX as usize) as u32)?;
                 Value::Int(0)
             }
@@ -10361,7 +10586,9 @@ impl Vm {
                 // sub_489650 pops the label pointer first and the slot second.
                 let label = self.pop_string_lossy()?;
                 let slot = self.pop_int()?;
-                let _written = self.save_config_slot(api, slot, &label)?;
+                if !self.save_config_slot(api, slot, &label)? {
+                    return Err(VmError::Runtime("configuration save commit failed".into()));
+                }
                 Value::None
             }
             (0x80, 0x79) => {
@@ -10794,6 +11021,16 @@ impl Vm {
 
     fn normalize_sys_string_args(&mut self, group: u8, id: u16) -> VmResult<()> {
         let positions_from_top: &[usize] = match (group, id) {
+            // Host continuations intercept before the VM-owned dialog paths
+            // that would otherwise pop/decode these arguments themselves.
+            (0x80, 0x3b) => &[1, 3, 4, 5],
+            (0x80, 0x3c) => &[0, 1, 2],
+            (0x80, 0x3f) => &[1, 2, 3],
+            (0x80, 0xf0) => &[0, 7],
+            (0x80, 0xf1) => &[2, 3, 4, 5],
+            (0x81, 0x38) => &[1, 2],
+            (0x81, 0x3a) => &[1],
+            (0x81, 0x3b) => &[1, 2],
             (0x80, 0x34) | (0x80, 0x35) | (0x80, 0x40) => &[0, 1],
             (0x80, 0x28)
             | (0x80, 0x29)
@@ -11150,7 +11387,7 @@ impl Vm {
     fn value_as_fixed_bytes(&self, value: Value, size: usize) -> VmResult<Vec<u8>> {
         match value {
             Value::Str(text) => {
-                let (encoded, _, _) = encoding_rs::SHIFT_JIS.encode(&text);
+                let encoded=if self.native_abi_profile==NativeAbiProfile::Amachoco {std::borrow::Cow::Borrowed(text.as_bytes())} else {encoding_rs::SHIFT_JIS.encode(&text).0};
                 let mut bytes = Vec::with_capacity(size);
                 bytes.extend_from_slice(&encoded);
                 bytes.push(0);
@@ -15315,6 +15552,7 @@ mod tests {
         let source = 0x3000;
         let destination = 0x3100;
         let mut vm = Vm::new();
+        vm.set_native_abi_profile(super::NativeAbiProfile::Amachoco);
         vm.mem_values
             .insert(Vm::value_key(source), Value::Str("シナリオの台詞".into()));
         vm.stack
@@ -15326,7 +15564,7 @@ mod tests {
             Some(Value::None)
         );
         assert!(vm.stack.is_empty());
-        assert_eq!(vm.read_c_string(destination).unwrap(), "シナリオの台詞");
+        assert_eq!(vm.read_c_string_bytes(destination).unwrap(), "シナリオの台詞".as_bytes());
         assert_eq!(
             vm.mem_values.get(&Vm::value_key(destination)),
             Some(&Value::Str("シナリオの台詞".into()))
@@ -15822,7 +16060,8 @@ mod tests {
             message_animating: true,
             ..Default::default()
         };
-        assert!(vm.post_async_program_callback(Value::Int(super::MAIN_THREAD_ID),
+        assert!(vm.post_async_program_callback(
+            Value::Int(super::MAIN_THREAD_ID),
             [Value::Int(256), Value::Int(0), Value::Int(0)],
             false,
         ));
@@ -15844,7 +16083,8 @@ mod tests {
                 message_animating: true,
                 ..Default::default()
             };
-            assert!(vm.post_async_program_callback(Value::Int(super::MAIN_THREAD_ID),
+            assert!(vm.post_async_program_callback(
+                Value::Int(super::MAIN_THREAD_ID),
                 [Value::Int(code), Value::Int(0), Value::Int(0)],
                 false,
             ));
@@ -15865,7 +16105,8 @@ mod tests {
             message_animating: true,
             ..Default::default()
         };
-        assert!(vm.post_async_program_callback(Value::Int(super::MAIN_THREAD_ID),
+        assert!(vm.post_async_program_callback(
+            Value::Int(super::MAIN_THREAD_ID),
             [Value::Int(257), Value::Int(0), Value::Int(0)],
             false,
         ));
@@ -15876,7 +16117,8 @@ mod tests {
         assert_eq!(api.message_reveals, 0);
         assert_eq!(api.message_finishes, 0);
 
-        assert!(vm.post_async_program_callback(Value::Int(super::MAIN_THREAD_ID),
+        assert!(vm.post_async_program_callback(
+            Value::Int(super::MAIN_THREAD_ID),
             [Value::Int(257), Value::Int(1), Value::Int(0)],
             false,
         ));
@@ -16133,7 +16375,8 @@ mod tests {
         let mut vm = Vm::new();
         install_wait_timing_ex(&mut vm, 60_001, 0, 1808);
 
-        assert!(vm.post_async_program_callback(Value::Int(super::MAIN_THREAD_ID),
+        assert!(vm.post_async_program_callback(
+            Value::Int(super::MAIN_THREAD_ID),
             [Value::Int(0), Value::Int(0), Value::Int(0)],
             false,
         ));
@@ -16146,7 +16389,8 @@ mod tests {
         let mut vm = Vm::new();
         install_wait_timing_ex(&mut vm, 60_001, 0, 1808);
 
-        assert!(vm.post_async_program_callback(Value::Int(super::MAIN_THREAD_ID),
+        assert!(vm.post_async_program_callback(
+            Value::Int(super::MAIN_THREAD_ID),
             [Value::Int(1), Value::Int(0), Value::Int(0)],
             false,
         ));
@@ -16159,7 +16403,8 @@ mod tests {
         // sub_43D4B0 reacts to code 1 only; sub_431AF0 latches only code 0.
         let mut vm = Vm::new();
         install_wait_timing_ex(&mut vm, 60_001, 0, 1808);
-        assert!(vm.post_async_program_callback(Value::Int(super::MAIN_THREAD_ID),
+        assert!(vm.post_async_program_callback(
+            Value::Int(super::MAIN_THREAD_ID),
             [Value::Int(2), Value::Int(0), Value::Int(0)],
             false,
         ));
@@ -16203,7 +16448,8 @@ mod tests {
     fn replacing_or_finishing_a_procedure_discards_its_queued_callbacks() {
         let mut vm = Vm::new();
         install_wait_timing_ex(&mut vm, 60_001, 0, 1808);
-        assert!(vm.post_async_program_callback(Value::Int(super::MAIN_THREAD_ID),
+        assert!(vm.post_async_program_callback(
+            Value::Int(super::MAIN_THREAD_ID),
             [Value::Int(7), Value::Int(0), Value::Int(0)],
             false,
         ));
@@ -16214,7 +16460,8 @@ mod tests {
     #[test]
     fn native_program_callback_fails_without_an_installed_procedure() {
         let mut vm = Vm::new();
-        assert!(!vm.post_async_program_callback(Value::Int(super::MAIN_THREAD_ID),
+        assert!(!vm.post_async_program_callback(
+            Value::Int(super::MAIN_THREAD_ID),
             [Value::Int(1), Value::Int(0), Value::Int(0)],
             false,
         ));
@@ -16844,7 +17091,8 @@ mod tests {
             .unwrap(),
             Some(Value::Int(i32::MIN + 1))
         );
-        vm.stack.extend([Value::Str("none.arc".into()), Value::Str("none._bp".into())]);
+        vm.stack
+            .extend([Value::Str("none.arc".into()), Value::Str("none._bp".into())]);
         assert!(
             vm.dispatch_program_thread_opcode(
                 &mut TraceApi,

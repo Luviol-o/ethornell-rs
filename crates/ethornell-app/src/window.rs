@@ -37,6 +37,7 @@ struct WindowApp {
     frame_index: usize,
     input_script: Option<HeadlessInputScript>,
     failure: Arc<Mutex<Option<String>>>,
+    font: ab_glyph::FontArc,
 }
 
 impl ApplicationHandler for WindowApp {
@@ -305,9 +306,17 @@ impl ApplicationHandler for WindowApp {
                     queue_runtime_input_event(
                         pending_input_events,
                         if state == ElementState::Pressed {
-                            RuntimeInputEvent::ButtonPress { button: descriptor, x, y }
+                            RuntimeInputEvent::ButtonPress {
+                                button: descriptor,
+                                x,
+                                y,
+                            }
                         } else {
-                            RuntimeInputEvent::ButtonRelease { button: descriptor, x, y }
+                            RuntimeInputEvent::ButtonRelease {
+                                button: descriptor,
+                                x,
+                                y,
+                            }
                         },
                     );
                 }
@@ -328,7 +337,6 @@ impl ApplicationHandler for WindowApp {
                 let elapsed_ms = normalize_engine_elapsed_ms(raw_elapsed_ms);
                 let audio_elapsed_ms = host_clock_ms.saturating_sub(*last_audio_clock_ms);
                 *last_audio_clock_ms = host_clock_ms;
-                let mut frame_draw_items = Vec::new();
                 if let Some(runtime) = runtime.as_mut() {
                     let frame_report = runtime_frontend::drive_runtime_frame(
                         runtime,
@@ -340,6 +348,17 @@ impl ApplicationHandler for WindowApp {
                         Some(audio),
                         "window",
                     );
+                    let raster_error = snapshot::take_raster_error().or_else(|| {
+                        snapshot::take_missing_glyphs()
+                            .then(|| "font lacks required CPU text glyphs".to_owned())
+                    });
+                    if let Some(error) = raster_error {
+                        if let Ok(mut slot) = failure.lock() {
+                            *slot = Some(error);
+                        }
+                        target.exit();
+                        return;
+                    }
                     if runtime.api.screen_width > 0 && runtime.api.screen_height > 0 {
                         renderer.set_virtual_size(
                             runtime.api.screen_width as f32,
@@ -444,263 +463,54 @@ impl ApplicationHandler for WindowApp {
                         target.exit();
                         return;
                     }
-                    frame_draw_items = runtime.api.graph_output_draw_items();
-                    for key in frame_draw_items
-                        .iter()
-                        .map(|item| item.key.as_str())
-                        .collect::<BTreeSet<_>>()
-                    {
-                        let Some(image) = runtime.api.graph_images.get(key) else {
-                            continue;
-                        };
-                        let revision = runtime.api.graph_image_revision(key);
-                        match graph_textures.get_mut(key) {
-                            Some(cached) if cached.revision != revision => {
-                                match renderer.update_rgba(&cached.handle, image) {
-                                    Ok(handle) => {
-                                        cached.handle = handle;
-                                        cached.revision = revision;
-                                        tracing::debug!(key, revision, "updated graph texture");
-                                    }
-                                    Err(err) => tracing::warn!(
-                                        key,
-                                        revision,
-                                        %err,
-                                        "graph texture update failed"
-                                    ),
-                                }
+                }
+                let commands = if let Some(runtime) = runtime.as_ref() {
+                    match frame_presenter::prepare_frame(renderer, &runtime.api, graph_textures) {
+                        Ok(commands) => commands,
+                        Err(error) => {
+                            if let Ok(mut slot) = failure.lock() {
+                                *slot = Some(error.to_string());
                             }
-                            Some(_) => {}
-                            None => match renderer.insert_rgba(image) {
-                                Ok(handle) => {
-                                    tracing::info!(
-                                        key,
-                                        revision,
-                                        width = handle.width,
-                                        height = handle.height,
-                                        "uploaded graph texture"
-                                    );
-                                    graph_textures.insert(
-                                        key.to_string(),
-                                        CachedGraphTexture { handle, revision },
-                                    );
-                                }
-                                Err(err) => {
-                                    tracing::warn!(key, %err, "graph texture upload failed")
-                                }
-                            },
+                            target.exit();
+                            return;
                         }
                     }
-                }
-                let mut commands = vec![RenderCommand::Clear {
-                    color: [0.0, 0.0, 0.0, 1.0],
-                }];
-                // The decoded standalone image is only a startup fallback for
-                // games whose runtime script could not be created. A running
-                // BP runtime must render exclusively from its graph draw list.
-                let draw_static_fallback = runtime.is_none();
-                if draw_static_fallback
-                    && let (Some(texture), Some((image_width, image_height))) =
+                } else {
+                    let mut commands = vec![RenderCommand::Clear {
+                        color: [0.0, 0.0, 0.0, 1.0],
+                    }];
+                    // The decoded standalone image is only a startup fallback for
+                    // games whose runtime script could not be created. A running
+                    // BP runtime must render exclusively from its graph draw list.
+                    if let (Some(texture), Some((image_width, image_height))) =
                         (texture.as_ref(), *image_size)
-                {
-                    push_fit_texture_command(&mut commands, texture, image_width, image_height);
-                }
-                if let Some(text) = text.as_ref() {
-                    commands.push(RenderCommand::DrawText {
-                        text: text.clone(),
-                        x: 38.0,
-                        y: 38.0,
-                        color: [0.0, 0.0, 0.0, 0.75],
-                        size: 28.0,
-                        styles: Vec::new(),
-                        clip: None,
-                        z: 9,
-                    });
-                    commands.push(RenderCommand::DrawText {
-                        text: text.clone(),
-                        x: 36.0,
-                        y: 36.0,
-                        color: [1.0, 1.0, 1.0, 1.0],
-                        size: 28.0,
-                        styles: Vec::new(),
-                        clip: None,
-                        z: 10,
-                    });
-                }
-                // `graph_output_draw_items()` preserves ordinary raw-priority
-                // order and performs only the recovered BackF exception for
-                // projected Sprite modes 5/6.  The renderer performs a stable
-                // sort by z, so a projected sprite deliberately moved after a
-                // higher-priority BackF must inherit the preceding renderer z;
-                // otherwise the sort would put it behind BackF again.  Normal
-                // backgrounds and transition images remain monotonic and keep
-                // their raw z, allowing BackF to cover/fade them as in the
-                // target compositor.
-                let mut flattened_graph_z = i32::MIN;
-                for item in frame_draw_items {
-                    let Some(cached) = graph_textures.get(&item.key) else {
-                        continue;
-                    };
-                    let raw_graph_z = item.z;
-                    let render_graph_z = raw_graph_z.max(flattened_graph_z);
-                    if render_graph_z != raw_graph_z {
-                        tracing::debug!(
-                            owner = ?item.owner_object,
-                            key = item.key,
-                            raw_graph_z,
-                            render_graph_z,
-                            "promoted graph render z to preserve flattened native display order"
-                        );
-                    }
-                    flattened_graph_z = render_graph_z;
-                    let texture = &cached.handle;
-                    commands.push(RenderCommand::DrawTexture {
-                        texture: texture.id,
-                        x: item.x,
-                        y: item.y,
-                        width: item.width,
-                        height: item.height,
-                        src_x: item.src_x / texture.width as f32,
-                        src_y: item.src_y / texture.height as f32,
-                        src_width: item.src_width / texture.width as f32,
-                        src_height: item.src_height / texture.height as f32,
-                        opacity: item.opacity,
-                        ignore_source_alpha: item.ignore_source_alpha,
-                        blend_mode: item.blend_mode,
-                        rotation_degrees: item.rotation_degrees,
-                        destination_quad: item.destination_quad,
-                        linear_sampling: item.linear_sampling,
-                        clip: item
-                            .clip
-                            .map(|clip| [clip.x, clip.y, clip.width, clip.height]),
-                        z: 2 + render_graph_z,
-                    });
-                }
-                if let Some(runtime) = runtime.as_ref() {
-                    for node in runtime
-                        .api
-                        .text_nodes
-                        .values()
-                        .filter(|node| runtime.api.should_draw_text_node(node))
                     {
-                        let parent = node
-                            .target_surface
-                            .filter(|surface| runtime.api.graph_surfaces.contains_key(surface))
-                            .map(|surface| {
-                                let (x, y) = runtime.api.surface_world_position(surface);
-                                (x, y, runtime.api.surface_display_opacity(surface))
-                            })
-                            .unwrap_or((0.0, 0.0, 1.0));
-                        let layout = runtime.api.formatted_text_layout(node);
-                        let x = parent.0 + node.x;
-                        let cursor_y = parent.1 + node.y;
-                        let y = cursor_y + layout.body_y_offset;
-                        let clip = node
-                            .target_surface
-                            .and_then(|surface| runtime.api.surface_chain_clip(surface))
-                            .map(|clip| [clip.x, clip.y, clip.width, clip.height]);
-                        let size = node.size.max(12.0);
-                        let mut color = node.color;
-                        color[3] *= parent.2;
-                        let styles = node
-                            .style_spans
-                            .iter()
-                            .map(|span| TextStyleSpan {
-                                start_char: span.start_char,
-                                end_char: span.end_char,
-                                packed_rgb: span.style.packed_rgb,
-                                bold: span.style.bold,
-                                italic: span.style.italic,
-                            })
-                            .collect::<Vec<_>>();
-                        let shadow_styles = styles
-                            .iter()
-                            .map(|span| TextStyleSpan {
-                                packed_rgb: None,
-                                ..*span
-                            })
-                            .collect::<Vec<_>>();
-                        if let Some((shadow_x, shadow_y, shadow_alpha)) =
-                            runtime.api.graph_defaults.shadow_for_height(size)
-                        {
-                            commands.push(RenderCommand::DrawText {
-                                text: node.text.clone(),
-                                x: x + shadow_x as f32,
-                                y: y + shadow_y as f32,
-                                color: [0.0, 0.0, 0.0, color[3] * shadow_alpha],
-                                size,
-                                styles: shadow_styles,
-                                clip,
-                                z: node.z - 1,
-                            });
-                        }
-                        commands.push(RenderCommand::DrawText {
-                            text: node.text.clone(),
-                            x,
-                            y,
-                            color,
-                            size,
-                            styles,
-                            clip,
-                            z: node.z,
-                        });
-                        let mut positioned_node = node.clone();
-                        positioned_node.x = x;
-                        positioned_node.y = cursor_y;
-                        for (ruby, ruby_x, ruby_y, ruby_size) in
-                            text::ruby_draw_runs(&positioned_node, layout)
-                        {
-                            if let Some((shadow_x, shadow_y, shadow_alpha)) =
-                                runtime.api.graph_defaults.shadow_for_height(ruby_size)
-                            {
-                                commands.push(RenderCommand::DrawText {
-                                    text: ruby.clone(),
-                                    x: ruby_x + shadow_x as f32,
-                                    y: ruby_y + shadow_y as f32,
-                                    color: [0.0, 0.0, 0.0, color[3] * shadow_alpha],
-                                    size: ruby_size,
-                                    styles: Vec::new(),
-                                    clip,
-                                    z: node.z,
-                                });
-                            }
-                            commands.push(RenderCommand::DrawText {
-                                text: ruby,
-                                x: ruby_x,
-                                y: ruby_y,
-                                color,
-                                size: ruby_size,
-                                styles: Vec::new(),
-                                clip,
-                                z: node.z + 1,
-                            });
-                        }
+                        push_fit_texture_command(&mut commands, texture, image_width, image_height);
                     }
-                }
-                if let Some(runtime) = runtime.as_ref() {
-                    for (line, x, y, size) in runtime.api.user_modeless_dialog_text_lines() {
+                    if let Some(text) = text.as_ref() {
                         commands.push(RenderCommand::DrawText {
-                            text: line.clone(),
-                            x: x + 2.0,
-                            y: y + 2.0,
-                            color: [0.0, 0.0, 0.0, 0.9],
-                            size,
+                            text: text.clone(),
+                            x: 38.0,
+                            y: 38.0,
+                            color: [0.0, 0.0, 0.0, 0.75],
+                            size: 28.0,
                             styles: Vec::new(),
                             clip: None,
-                            z: 29_999,
+                            z: 9,
                         });
                         commands.push(RenderCommand::DrawText {
-                            text: line,
-                            x,
-                            y,
-                            color: [0.95, 0.95, 0.95, 1.0],
-                            size,
+                            text: text.clone(),
+                            x: 36.0,
+                            y: 36.0,
+                            color: [1.0, 1.0, 1.0, 1.0],
+                            size: 28.0,
                             styles: Vec::new(),
                             clip: None,
-                            z: 30_000,
+                            z: 10,
                         });
                     }
-                }
+                    commands
+                };
                 renderer.submit(&commands);
                 let present_started = Instant::now();
                 window.pre_present_notify();
@@ -717,6 +527,9 @@ impl ApplicationHandler for WindowApp {
                     }
                     Err(err) => {
                         tracing::error!(%err, "render failed");
+                        if let Ok(mut slot) = failure.lock() {
+                            *slot = Some(err.to_string());
+                        }
                         target.exit();
                     }
                 }
@@ -756,7 +569,8 @@ impl WindowApp {
             .create_window(attributes)
             .map_err(|err| EthornellError::Other(format!("window init failed: {err}")))?
             .into();
-        let mut renderer = pollster::block_on(Renderer::new(window.clone()))?;
+        let mut renderer =
+            pollster::block_on(Renderer::new_with_font(window.clone(), self.font.clone()))?;
         if let Some(runtime) = self.runtime.as_mut() {
             runtime.api.graphics_memory_metric = renderer.graphics_memory_metric();
             let size = window.surface_size();
@@ -808,6 +622,8 @@ pub(super) fn run_window(
     bgm: Option<Vec<u8>>,
     runtime: Option<RuntimeEngine>,
 ) -> Result<()> {
+    let font = snapshot::load_default_font()?;
+    let _font_session = snapshot::enter_font_session(&font);
     let event_loop =
         EventLoop::new().map_err(|err| EthornellError::Other(format!("event loop: {err}")))?;
     let mut audio = AudioSystem::new()?;
@@ -839,6 +655,7 @@ pub(super) fn run_window(
         frame_index: 0,
         input_script: HeadlessInputScript::from_env(),
         failure: failure.clone(),
+        font,
     };
     event_loop
         .run_app(app)

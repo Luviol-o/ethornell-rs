@@ -9,9 +9,9 @@ use std::sync::Arc;
 #[derive(Debug)]
 pub(crate) struct AsyncProgramTask {
     key: String,
-    vm: Box<Vm>,
+    pub(crate) vm: Box<Vm>,
     pub(crate) runnable: bool,
-    completed: bool,
+    pub(crate) completed: bool,
 }
 
 impl Vm {
@@ -53,6 +53,8 @@ impl Vm {
 
         self.flush_shared_heap();
         let mut vm = Vm::new();
+        vm.native_abi_profile = self.native_abi_profile;
+        vm.graph_text_encoding = self.graph_text_encoding;
         vm.shared_heap = Arc::clone(&self.shared_heap);
         vm.system80_shared = Arc::clone(&self.system80_shared);
         vm.system81_shared = Arc::clone(&self.system81_shared);
@@ -321,8 +323,9 @@ impl Vm {
         &mut self,
         api: &mut A,
         trace_events: bool,
-        watchdog_steps: usize,
-    ) where
+        run_options: &VmRunOptions,
+    ) -> Option<crate::VmRunReport>
+    where
         A: SysApi + GraphApi + SoundApi,
     {
         self.flush_shared_heap();
@@ -338,11 +341,13 @@ impl Vm {
         let requested_start = self.scheduler_switch_target.take();
         let mut cursor =
             match requested_start {
-                Some(thread_id) if thread_id == MAIN_THREAD_ID || thread_id == self.thread.thread_id() => {
+                Some(thread_id)
+                    if thread_id == MAIN_THREAD_ID || thread_id == self.thread.thread_id() =>
+                {
                     // Status 3 selected the root CThread; `run_loaded` executes it
                     // immediately after returning from this child scheduler.
                     self.refresh_thread_links();
-                    return;
+                    return None;
                 }
                 Some(thread_id) => {
                     let Some(index) = self.async_tasks.iter().position(|task| {
@@ -352,7 +357,7 @@ impl Vm {
                         // outer list walk terminates instead of falling back to the
                         // first thread.
                         self.refresh_thread_links();
-                        return;
+                        return None;
                     };
                     index
                 }
@@ -374,10 +379,7 @@ impl Vm {
             }
 
             let options = VmRunOptions {
-                max_steps: watchdog_steps,
-                trace: false,
-                fail_on_stub: false,
-                collect_diagnostics: false,
+                ..run_options.clone()
             };
             let mut task = self.async_tasks.remove(cursor);
             task.vm.sync_shared_heap();
@@ -392,6 +394,9 @@ impl Vm {
                 self.root_procedure_active
             };
             let report = task.vm.run_loaded(api, &options);
+            if options.collect_diagnostics || report.stop_reason.is_fatal() {
+                self.async_reports.push(report.clone());
+            }
             let requested_switch = task.vm.scheduler_switch_target.take();
             if report.stop_reason == VmStopReason::WatchdogExceeded {
                 tracing::warn!(
@@ -442,11 +447,7 @@ impl Vm {
             }
             if matches!(
                 report.stop_reason,
-                VmStopReason::Completed
-                    | VmStopReason::InterpreterTerminated
-                    | VmStopReason::Error
-                    | VmStopReason::UnknownOpcode
-                    | VmStopReason::UnknownDispatch
+                VmStopReason::Completed | VmStopReason::InterpreterTerminated
             ) {
                 task.completed = true;
                 if report.stop_reason != VmStopReason::InterpreterTerminated {
@@ -462,12 +463,19 @@ impl Vm {
             scheduler_tasks.insert(cursor.min(scheduler_tasks.len()), task);
             self.async_tasks = scheduler_tasks;
             scheduler_hops += 1;
+            if report.stop_reason.is_fatal() {
+                // Keep the failing context and report its actual thread/PC to
+                // the root host. It is not a successfully completed coroutine.
+                self.refresh_thread_links();
+                return Some(report);
+            }
 
             if report.stop_reason == VmStopReason::SwitchedThread {
                 let Some(target_thread_id) = requested_switch else {
                     break;
                 };
-                if target_thread_id == MAIN_THREAD_ID || target_thread_id == self.thread.thread_id() {
+                if target_thread_id == MAIN_THREAD_ID || target_thread_id == self.thread.thread_id()
+                {
                     // The requested root CThread is executed by `run_loaded`
                     // immediately after this flat child pass.
                     break;
@@ -494,6 +502,7 @@ impl Vm {
         }
         self.async_tasks.retain(|task| !task.completed);
         self.refresh_thread_links();
+        None
     }
 
     fn refresh_thread_links(&mut self) {

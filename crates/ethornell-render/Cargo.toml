@@ -6,10 +6,15 @@ edition.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = ["desktop-window"]
+desktop-window = ["dep:winit"]
+
 [dependencies]
 ethornell-core = { path = "../ethornell-core" }
 wgpu.workspace = true
-winit.workspace = true
+winit = { workspace = true, optional = true }
+raw-window-handle = "0.6"
 tracing.workspace = true
 bytemuck.workspace = true
 ethornell-image = { path = "../ethornell-image" }

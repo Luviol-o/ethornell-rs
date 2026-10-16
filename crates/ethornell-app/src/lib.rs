@@ -16,6 +16,9 @@ mod character_image;
 mod debug_trace;
 mod display_tree;
 mod effects;
+mod frame_presenter;
+mod file_policy;
+pub mod host_runtime;
 mod graph;
 mod graph_bitmap_nodes;
 mod graph_color;
@@ -104,10 +107,22 @@ use user_files::{
     read_runtime_bytes, resolve_existing_path_case_insensitive, runtime_file_cache_key,
     runtime_file_exists_from_root, runtime_file_path, runtime_file_path_from_root,
 };
+#[cfg(feature = "desktop-window")]
 use winit::keyboard::KeyCode;
+#[cfg(not(feature = "desktop-window"))]
+#[derive(Clone, Copy)]
+enum KeyCode { ArrowLeft, ArrowUp, ArrowRight, ArrowDown, Enter, NumpadEnter, Space, Tab, Backspace }
+#[cfg(feature = "desktop-window")]
 mod window;
+#[cfg(feature = "desktop-window")]
 mod window_icon;
+#[cfg(feature = "desktop-window")]
 use window::run_window;
+
+#[cfg(not(feature = "desktop-window"))]
+fn run_window(_: &str, _: Option<DecodedImage>, _: Option<String>, _: Option<Vec<u8>>, _: Option<RuntimeEngine>) -> Result<()> {
+    Err(EthornellError::Other("desktop frontend disabled; use HostRuntime".into()))
+}
 
 macro_rules! trace_graph {
     ($runtime:expr, $($arg:tt)*) => {
@@ -163,6 +178,22 @@ fn configured_game_id(manager: &ResourceManager) -> (String, &'static str) {
 
     (DEFAULT_GAME_ID.into(), "fallback")
 }
+fn confirmed_native_profile(manager:&ResourceManager,bootstrap:&[u8])->ethornell_vm::NativeAbiProfile {
+    // Session version detection uses two exact code-resource fingerprints,
+    // never graph encoding, Android target, an arbitrary ID or .exe execution.
+    // FNV64 is an identity/version hint, not a security signature; IO remains
+    // restricted regardless of this profile.
+    fn fingerprint(bytes:&[u8])->u64 {bytes.iter().fold(0xcbf29ce484222325,|h,b|(h^u64::from(*b)).wrapping_mul(0x100000001b3))}
+    if bootstrap.len()==10176 && fingerprint(bootstrap)==CONFIRMED_BOOTSTRAP_FNV {
+        if let Ok(title)=manager.read_decoded_from_archive("sysprg.arc","title._bp") {
+            if title.len()==CONFIRMED_TITLE_LEN && fingerprint(&title)==CONFIRMED_TITLE_FNV {return ethornell_vm::NativeAbiProfile::Amachoco;}
+        }
+    }
+    ethornell_vm::NativeAbiProfile::Tayutama
+}
+const CONFIRMED_BOOTSTRAP_FNV:u64=0x9f5e9248ec3ad577;
+const CONFIRMED_TITLE_FNV:u64=0xc6bdd0d97d4f4893;
+const CONFIRMED_TITLE_LEN:usize=26272;
 
 pub struct AppConfig {
     pub game_root: GameRoot,
@@ -174,6 +205,8 @@ pub struct AppConfig {
 }
 
 pub fn run(config: AppConfig) -> Result<()> {
+    let font = snapshot::load_default_font()?;
+    let _font_session = snapshot::enter_font_session(&font);
     let headless = config.headless || std::env::var_os("ETHORNELL_GUI_HEADLESS").is_some();
     // A full recursive magic probe opens every loose file in the game tree and
     // is diagnostic work, not runtime initialization. Keep it behind --trace;
@@ -455,6 +488,7 @@ struct NativeControlInputLatch {
 }
 
 struct RuntimeTraceApi {
+    host: host_runtime::HostServices,
     manager: ResourceManager,
     native_root: PathBuf,
     game_id: String,
@@ -837,6 +871,7 @@ impl RuntimeTraceApi {
             );
         }
         Self {
+            host: host_runtime::HostServices::default(),
             manager,
             native_root,
             game_id,
@@ -1604,6 +1639,7 @@ impl RuntimeTraceApi {
         let program = match self.manager.read_decoded_from_archive(archive, file) {
             Ok(bytes) => ethornell_script::parse_bp_program(Some(key.clone()), &bytes),
             Err(err) => {
+                if file_policy::restricted() { self.host.unsupported("missing BP program; empty-program fallback denied"); }
                 tracing::warn!(
                     archive,
                     file,
@@ -1624,6 +1660,10 @@ impl RuntimeTraceApi {
     }
 
     fn cached_file_exists(&mut self, archive: &str, file: &str) -> bool {
+        if let Some(policy) = file_policy::active() {
+            let _ = policy;
+            return runtime_file_exists_from_root(&self.manager, &self.native_root, archive, file);
+        }
         // Loose files change at run time (saves are written and deleted;
         // the target never caches GetFileAttributesA), so only the immutable
         // archive-entry answer is cached.
@@ -1642,6 +1682,14 @@ impl RuntimeTraceApi {
     }
 
     fn cached_file_size(&mut self, archive: &str, file: &str) -> i32 {
+        if let Some(policy) = file_policy::active() {
+            if !user_files::authorized_archive_arg(archive) { return -1; }
+            if user_files::named_archive(archive) { return find_runtime_resource(&self.manager,archive,file).and_then(|e|self.manager.decoded_size_by_entry(&e).ok()).map(|size|size.min(i32::MAX as u64)as i32).unwrap_or(-1); }
+            let Some(name) = user_files::scoped_name(archive, file) else { return -1; };
+            let explicit = name.replace('\\', "/").starts_with("bgi-");
+            let metadata = policy.metadata(&name).or_else(|| if explicit { None } else { user_files::authorized_container_name(&self.manager, file).and_then(|p| policy.metadata(&p)) });
+            return metadata.filter(|m| m.is_file()).map(|m| m.len().min(i32::MAX as u64) as i32).or_else(|| if name.replace('\\', "/").starts_with("bgi-") { None } else { find_runtime_resource(&self.manager, archive, file).and_then(|e|self.manager.decoded_size_by_entry(&e).ok()).map(|size|size.min(i32::MAX as u64)as i32) }).unwrap_or(-1);
+        }
         if let Some(size) =
             find_runtime_file_from_root(&self.manager, &self.native_root, archive, file)
                 .and_then(|path| std::fs::metadata(path).ok())
@@ -1658,7 +1706,7 @@ impl RuntimeTraceApi {
             .map(|meta| meta.len() as i32)
             .or_else(|| {
                 find_runtime_resource(&self.manager, archive, file)
-                    .map(|entry| entry.unpacked_size.unwrap_or(entry.packed_size) as i32)
+                    .and_then(|entry| self.manager.decoded_size_by_entry(&entry).ok()).map(|size|size.min(i32::MAX as u64)as i32)
             })
             .unwrap_or(-1);
         self.file_size_cache.insert(key, size);
@@ -4054,7 +4102,7 @@ impl RuntimeTraceApi {
         if self
             .graph_surfaces
             .get(&input.layer)
-            .is_some_and(|surface| !self.surface_display_chain_visible(input.layer, surface))
+                .is_some_and(|_| !self.surface_input_chain_enabled(input.layer))
         {
             return None;
         }
@@ -7456,6 +7504,20 @@ impl RuntimeTraceApi {
         }
         self.surface_display_opacity(surface) > 0.001
     }
+    fn surface_input_chain_enabled(&self,surface:i32)->bool {
+        // Native DCIPIcon uses the Window/Virtual enabled scope, not rendered
+        // pixel opacity. Alpha=256 may intentionally hide the Window's own
+        // bitmap while its separately-composed toolbar children stay live.
+        let mut current=Some(surface);let mut visited=BTreeSet::new();
+        while let Some(id)=current {
+            if !visited.insert(id){return false;}
+            if !self.display_tree.chain_drawable(id){return false;}
+            let Some(record)=self.graph_surfaces.get(&id)else{break;};
+            if !record.enabled {return false;}
+            current=record.parent_surface;
+        }
+        true
+    }
 
     fn surface_display_opacity(&self, surface: i32) -> f32 {
         let mut opacity = self
@@ -8162,6 +8224,7 @@ impl RuntimeEngine {
     ) -> Self {
         let program = ethornell_script::parse_bp_program(Some(script.to_string()), bytes);
         let mut vm = ethornell_vm::Vm::new();
+        vm.set_native_abi_profile(confirmed_native_profile(&manager,bytes));
         if let Ok(label) = std::env::var("ETHORNELL_TEXT_ENCODING") {
             match label.trim().to_ascii_lowercase().as_str() {
                 "gbk" | "cp936" | "windows-936" => {
@@ -9865,6 +9928,8 @@ mod input_tests {
 
     #[test]
     fn graph92_1e_draws_one_bit_cells_and_raises_the_target_errors() {
+        let font = super::snapshot::load_default_font().unwrap();
+        let _font_session = super::snapshot::enter_font_session(&font);
         let manager =
             ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
         let mut api = super::RuntimeTraceApi::new(manager);
@@ -13934,6 +13999,8 @@ mod input_tests {
 
     #[test]
     fn bitmap_text_draw_uses_native_argument_order_and_rasterizes_pixels() {
+        let font = super::snapshot::load_default_font().unwrap();
+        let _font_session = super::snapshot::enter_font_session(&font);
         let manager =
             ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
         let mut api = super::RuntimeTraceApi::new(manager);
@@ -15362,6 +15429,9 @@ mod input_tests {
         display.x = 100.0;
         display.y = 500.0;
         api.graph_surfaces.insert(surface, display);
+        // A separately-composed native Window can have zero base opacity
+        // while enabled child controls remain registered for pointer input.
+        api.graph_object_properties.entry(surface).or_default().native.alpha_parameter=256;
         api.graph_input_objects.insert(
             object,
             super::graph_input::RuntimeGraphInputObject::new_extended(surface),
@@ -15370,11 +15440,12 @@ mod input_tests {
             &mut api,
             object,
             GraphInputDescriptor {
+                flags:[1,0,0,0,1,0,0],
                 groups: vec![GraphInputGroup {
                     index: 0,
                     initial_current_item: -1,
                     selection_enabled: true,
-                    pointer_selection_enabled: true,
+                    pointer_selection_enabled: false,
                     pointer_activation_enabled: false,
                     selection_exclusion_key: -1,
                     // sub_44C6F0 false: defer activation until release.
@@ -15421,7 +15492,8 @@ mod input_tests {
             .drain(..)
             .map(|event| event[0])
             .collect::<Vec<_>>();
-        assert_eq!(hover, [0x1000_0001, 0x1000_0002, 0x1000_0004]);
+        assert_eq!(hover, [0x1000_0001, 0x1000_0002]);
+        assert_eq!(api.graph_input_objects[&object].selected_region_values(),vec![-1]);
 
         super::apply_runtime_input_event(
             &mut api,
@@ -15443,6 +15515,7 @@ mod input_tests {
             .collect::<Vec<_>>();
         assert_eq!(events.len(), 2);
         assert_eq!(events[0][0], 0x1000_0007);
+        assert_eq!(api.graph_input_objects[&object].selected_region_values(),vec![2]);
         assert_eq!(events[0][1], super::graph_input::pack_words(0, 2));
         assert_eq!(
             events[1],
@@ -15925,7 +15998,8 @@ mod input_tests {
         assert!(!draws_key(&api));
         assert!(
             api.hit_test_graph_input_object(object, (111.0, 521.0))
-                .is_none()
+                .is_some(),
+            "native input enable is independent from rendered alpha"
         );
 
         api.graph_surfaces.get_mut(&surface).unwrap().opacity = 1.0;
@@ -17084,6 +17158,14 @@ impl RuntimeTraceApi {
     /// Fresh MouseDown is first masked by root+0x14 and mapped through the
     /// root+0x18 action table. Internal group+0x14 is not a fresh-click gate;
     /// it is consulted only by the later held-button reinjection path.
+    fn record_input_route(&mut self,object:i32,region:Option<ethornell_vm::GraphInputRegion>,press:bool,up:bool,event6:bool) {
+        if !self.host.input_trace {return;}
+        let Some(input)=self.graph_input_objects.get(&object)else{return;};
+        let (group,item,flags)=region.map(|r|(r.group,r.index,r.flags)).unwrap_or((-1,-1,0));
+        let current=if group<0 {-1}else {input.current_item(group)};
+        let pending=input.deferred_pointer_activation().map(|(_,i)|i).unwrap_or(-1);
+        self.host.input_route([object as u32,group as u32,item as u32,input.descriptor.flags[4] as u32,flags as u32,current as u32,pending as u32],[input.descriptor.pointer_processing_enabled,region.is_some(),press,up,event6]);
+    }
     fn process_graph_input_mouse_press(&mut self, point: (f32, f32)) -> bool {
         // sub_448690 updates raw/pointer-current state before resolving action.
         self.update_graph_pointer_hover(point);
@@ -17143,6 +17225,7 @@ impl RuntimeTraceApi {
                     .unwrap_or(-1),
                 "GraphInputPressRouteCandidate"
             );
+            self.record_input_route(object,hit.as_ref().map(|(r,_,_)|*r),true,false,false);
             if action == 1 {
                 mapped.push((object, surface, extended, hit));
             }
@@ -17218,6 +17301,7 @@ impl RuntimeTraceApi {
             if let Some(input) = self.graph_input_objects.get_mut(&object) {
                 input.clear_deferred_pointer_activation();
                 input.begin_interaction(region, local_x, local_y);
+                input.select_activated_item(region);
                 if extended {
                     let payload = graph_input::pack_words(region.group, region.index);
                     input.queue_event([
@@ -17370,6 +17454,7 @@ impl RuntimeTraceApi {
         let mut matching = Vec::new();
         for (object, pending_item) in &pending {
             let hit = self.hit_test_graph_input_object(*object, point);
+            self.record_input_route(*object,hit.as_ref().map(|(r,_,_)|*r),false,true,false);
             let matches_pending = hit
                 .as_ref()
                 .is_some_and(|(region, _, _)| (region.group, region.index) == *pending_item);
@@ -17424,6 +17509,7 @@ impl RuntimeTraceApi {
             .is_some_and(|input| input.extended);
         if let Some(input) = self.graph_input_objects.get_mut(&object) {
             input.begin_interaction(region, local_x, local_y);
+            input.select_activated_item(region);
             if extended {
                 let payload = graph_input::pack_words(region.group, region.index);
                 input.queue_event([
@@ -17790,6 +17876,41 @@ impl RuntimeTraceApi {
 }
 
 impl ethornell_vm::SysApi for RuntimeTraceApi {
+    fn allow_direct_filesystem_fallback(&self) -> bool { !self.host.enabled }
+    fn host_requests_enabled(&self) -> bool { self.host.enabled }
+    fn input_gate_diagnostics_enabled(&self)->bool {self.host.enabled && self.host.input_trace}
+    fn record_input_gate(&mut self,values:[u32;9]) {self.host.input_gate(values);}
+    fn probe_directory_writable(&mut self, path: &str) -> bool {
+        if let Some(policy) = file_policy::active() {
+            let result=policy.probe_writable(path);
+            #[cfg(test)]
+            if std::env::var_os("ETHORNELL_RESTRICTED_REPRO_GAME").is_some() {eprintln!("local-only filesystem probe path={path:?} result={result:?}");}
+            return result.is_ok();
+        }
+        runtime_file_path_from_root(&self.manager, &self.native_root, path).as_deref().is_some_and(platform::test_path_writable)
+    }
+    fn begin_host_request(&mut self, request: &ethornell_vm::HostRequest) -> ethornell_vm::VmResult<Option<u64>> {
+        use ethornell_vm::{HostRequest, Value, VmError};
+        let (text, outputs) = match request {
+            HostRequest::Confirmation {text,..} => (text.clone(),1),
+            HostRequest::Message {text} => (text.clone(),0),
+            HostRequest::Native {opcode,args} => {
+                let (g,id)=(opcode.group,opcode.id);
+                if (g == 0x80 && matches!(id, 0x3B | 0x3C | 0x3F | 0xE0..=0xE3 | 0xF0..=0xFC)) || (g == 0x81 && matches!(id, 0x20 | 0x22..=0x26 | 0x38 | 0x3A | 0x3B)) || (g == 0xB0 && id == 0xF0) {
+                    self.last_native_call=Some(*opcode);
+                    return Err(VmError::Runtime("unsupported filesystem/platform/installer host capability".into()));
+                }
+                if g==0xB0 && matches!(id,0x80..=0x82) {
+                    (args.iter().find_map(|v|if let Value::Str(s)=v {Some(s.clone())} else {None}).unwrap_or_default(),if id==0x80 {0} else {1})
+                } else if (g==0x80 && matches!(id,0x3C)) || (g==0xB0 && matches!(id,0x84..=0x8F|0xA0|0xA3)) {
+                    self.last_native_call=Some(*opcode);
+                    return Err(VmError::Runtime("unsupported host dialog/input/media retry capability".into()));
+                } else {return Ok(None);}
+            }
+        };
+        if self.host.pending.len()>=16 {return Err(VmError::Runtime("host request queue limit".into()));}
+        Ok(Some(self.host.request(text,outputs)))
+    }
     fn game_id(&self) -> &str {
         &self.game_id
     }
@@ -17833,6 +17954,7 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
     fn register_graphic_resource(&mut self, namespace: i32, resource_id: i32, path: &str) -> bool {
         let resource = self.manager.find(path);
         let found = resource.is_some()
+            || file_policy::active().is_some_and(|p| p.metadata(path).is_some_and(|m| m.is_file()))
             || runtime_file_path(&self.manager, path)
                 .map(|path| path.is_file())
                 .unwrap_or(false);
@@ -17931,10 +18053,17 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
     }
 
     fn primary_resource_root(&mut self) -> Option<String> {
+        if file_policy::restricted() { return Some("bgi-resource\\".into()); }
         Some(self.native_root.to_string_lossy().into_owned())
     }
 
     fn directory_exists(&mut self, path: &str) -> bool {
+        if let Some(policy) = file_policy::active() {
+            let result=policy.user_metadata(path).is_some_and(|m|m.is_dir());
+            #[cfg(test)]
+            if std::env::var_os("ETHORNELL_RESTRICTED_REPRO_GAME").is_some() {eprintln!("local-only filesystem directory_exists path={path:?} result={result}");}
+            return result;
+        }
         let normalized = path.replace('\\', std::path::MAIN_SEPARATOR_STR);
         let candidate = Path::new(&normalized);
         let path = if candidate.is_absolute() {
@@ -17948,6 +18077,7 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
     }
 
     fn special_folder_path(&mut self, mode: i32) -> Option<String> {
+        if file_policy::restricted() { self.host.unsupported("special folders"); return None; }
         let game_root = self.native_root.clone();
         let home = std::env::var_os("USERPROFILE")
             .or_else(|| std::env::var_os("HOME"))
@@ -17989,6 +18119,7 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
         title: &str,
         mode: i32,
     ) -> std::result::Result<Option<String>, i32> {
+        if file_policy::restricted() { self.host.unsupported("file chooser"); return Err(4); }
         if !self.native_dialog_presentation {
             return Ok(None);
         }
@@ -18017,6 +18148,7 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
         default_name: &str,
         filters: &[(String, String)],
     ) -> std::result::Result<Option<String>, i32> {
+        if file_policy::restricted() { self.host.unsupported("resource chooser"); return Err(4); }
         if !self.native_dialog_presentation {
             return Ok(None);
         }
@@ -18046,6 +18178,7 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
     }
 
     fn show_resource_list_dialog(&mut self, title: &str, pattern: &str) -> bool {
+        if file_policy::restricted() { self.host.unsupported("resource list dialog"); return false; }
         if !self.native_dialog_presentation {
             return false;
         }
@@ -18059,6 +18192,7 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
     }
 
     fn browse_folder(&mut self, title: &str, root: i32) -> Option<String> {
+        if file_policy::restricted() { self.host.unsupported("folder chooser"); return None; }
         if !self.native_dialog_presentation {
             return None;
         }
@@ -18081,6 +18215,7 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
         subdirectory: &str,
         retry: bool,
     ) -> Option<String> {
+        if file_policy::restricted() { self.host.unsupported("secondary resource root discovery"); return None; }
         fn append_directory_children(root: &Path, output: &mut Vec<PathBuf>) {
             let Ok(entries) = std::fs::read_dir(root) else {
                 return;
@@ -18286,6 +18421,15 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
     }
 
     fn write_file_bytes(&mut self, path: &str, bytes: &[u8]) -> bool {
+        if let Some(policy) = file_policy::active() {
+            let result=policy.atomic_write(path,bytes);
+            #[cfg(test)]
+            if std::env::var_os("ETHORNELL_RESTRICTED_REPRO_GAME").is_some() {eprintln!("local-only filesystem write path={path:?} bytes={} result={result:?}",bytes.len());}
+            let ok = result.is_ok();
+            self.file_exists_cache.clear(); self.file_size_cache.clear();
+            if !ok { self.host.unsupported("save path denied or atomic write failed"); }
+            return ok;
+        }
         let Some(path) = runtime_file_path_from_root(&self.manager, &self.native_root, path) else {
             tracing::warn!(path, "WriteFileBytes rejected path");
             return false;
@@ -18319,6 +18463,12 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
     }
 
     fn read_user_file_bytes(&mut self, path: &str) -> Option<Vec<u8>> {
+        if let Some(policy)=file_policy::active() {
+            let result=policy.read_user(path);
+            #[cfg(test)]
+            if std::env::var_os("ETHORNELL_RESTRICTED_REPRO_GAME").is_some() {eprintln!("local-only filesystem user_read path={path:?} result={:?}",result.as_ref().map(Vec::len));}
+            return result.ok();
+        }
         let path = runtime_file_path_from_root(&self.manager, &self.native_root, path)?;
         match std::fs::read(&path) {
             Ok(bytes) => {
@@ -18342,6 +18492,7 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
         recursive: bool,
         max_count: usize,
     ) -> Vec<String> {
+        if let Some(policy) = file_policy::active() { return policy.enumerate_user(pattern, recursive, max_count, false).unwrap_or_default(); }
         let normalized = pattern.replace('\\', "/");
         let pattern_path = Path::new(&normalized);
         let file_pattern = pattern_path
@@ -18403,6 +18554,9 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
     }
 
     fn select_bootstrap(&mut self, root_or_archive_path: &str, archive_namespace: &str) {
+        if file_policy::restricted() && (root_or_archive_path.contains(['/', '\\', ':']) || root_or_archive_path.contains("..")) {
+            self.host.unsupported("bootstrap root change"); return;
+        }
         self.native_system.bootstrap_root_or_archive = root_or_archive_path.to_owned();
         self.native_system.bootstrap_namespace = archive_namespace.to_owned();
         tracing::info!(root_or_archive_path, archive_namespace, "SelectBootstrap");
@@ -18531,6 +18685,11 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
     }
 
     fn delete_file(&mut self, root: &str, file: &str) -> bool {
+        if let Some(policy)=file_policy::active() {
+            if !user_files::authorized_archive_arg(root) || root.replace('\\', "/") == "bgi-resource/" {self.host.unsupported("delete root");return false;}
+            self.file_exists_cache.clear(); self.file_size_cache.clear();
+            return policy.delete(file).is_ok();
+        }
         let file_path = Path::new(file);
         let combined = if file_path.is_absolute() || is_empty_archive_arg(root.trim()) {
             file_path.to_path_buf()
@@ -18555,6 +18714,7 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
     }
 
     fn user_data_root(&mut self, kind: i32) -> Option<String> {
+        if file_policy::restricted() { return Some("bgi-user\\".into()); }
         let root = self.native_root.clone();
         tracing::debug!(kind, root = %root.display(), "GetUserDataRoot");
         let mut root = root.to_string_lossy().into_owned();
@@ -18572,6 +18732,7 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
         restore_parent_window: bool,
         wait_for_uninstaller: bool,
     ) -> bool {
+        if file_policy::restricted() { self.host.unsupported("process execution"); return false; }
         let mut arguments = native_system::split_native_command_line(command_line);
         if arguments.is_empty() {
             tracing::warn!(
@@ -18630,6 +18791,7 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
         command_line: &str,
         error_message: &str,
     ) {
+        if file_policy::restricted() { self.host.unsupported("process restart"); return; }
         self.native_system.restart_working_directory = working_directory.to_owned();
         self.native_system.restart_command_line = command_line.to_owned();
         self.native_system.restart_error_message = error_message.to_owned();
@@ -18643,6 +18805,7 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
     }
 
     fn shell_open(&mut self, target: &str) -> bool {
+        if file_policy::restricted() { self.host.unsupported("shell/open URL"); return false; }
         #[cfg(target_os = "windows")]
         let result = std::process::Command::new("cmd")
             .args(["/C", "start", "", target])
@@ -18669,6 +18832,7 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
     }
 
     fn remove_uninstall_listed_files(&mut self, root: &str, exclusions: &[String]) -> bool {
+        if file_policy::restricted() { self.host.unsupported("uninstaller"); return false; }
         let Some(root_path) = runtime_file_path_from_root(&self.manager, &self.native_root, root)
         else {
             return false;
@@ -18701,6 +18865,7 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
     }
 
     fn append_uninstall_list_entries(&mut self, root: &str, entries: &[String]) -> bool {
+        if file_policy::restricted() { self.host.unsupported("uninstaller"); return false; }
         let Some(root_path) = runtime_file_path_from_root(&self.manager, &self.native_root, root)
         else {
             return false;
@@ -18732,6 +18897,7 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
         secondary_file: &str,
         remove_group: bool,
     ) {
+        if file_policy::restricted() { self.host.unsupported("installer shortcuts"); return; }
         let desktop = self.special_folder_path(1).map(PathBuf::from);
         let programs = self.special_folder_path(2).map(PathBuf::from);
         if let Some(desktop) = desktop {
@@ -18751,6 +18917,7 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
         &mut self,
         request: &ethornell_vm::SystemInputDialogRequest,
     ) -> Option<ethornell_vm::SystemInputDialogResponse> {
+        if file_policy::restricted() { self.host.unsupported("system input/IME"); return None; }
         let text = host_dialog::prompt_text(
             &request.caption,
             &request.caption,
@@ -18784,6 +18951,7 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
     }
 
     fn show_installer_dialog(&mut self, request: &ethornell_vm::InstallerDialogRequest) -> bool {
+        if file_policy::restricted() { self.host.unsupported("installer dialog"); return false; }
         let title = if request.text2.trim().is_empty() {
             "Installer"
         } else {
@@ -18807,6 +18975,7 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
     }
 
     fn run_installer_workflow(&mut self, request: &ethornell_vm::InstallerWorkflowRequest) -> bool {
+        if file_policy::restricted() { self.host.unsupported("installer"); return false; }
         let root = {
             let candidate =
                 PathBuf::from(request.root.replace('\\', std::path::MAIN_SEPARATOR_STR));
@@ -18893,6 +19062,7 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
         &mut self,
         request: &ethornell_vm::InstallationProcedureRequest,
     ) -> std::result::Result<(), i32> {
+        if file_policy::restricted() { self.host.unsupported("installer"); return Err(-1); }
         if request.root.trim().is_empty() {
             return Err(3);
         }
@@ -19025,6 +19195,7 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
         shortcut_name: &str,
         target: &str,
     ) -> bool {
+        if file_policy::restricted() {self.host.unsupported("shortcuts");return false;}
         let Some(folder) = self.special_folder_path(special_folder_mode) else {
             return false;
         };
@@ -19047,6 +19218,7 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
     }
 
     fn read_installed_folder(&mut self, vendor: &str, product: &str) -> Option<String> {
+        if file_policy::restricted() {self.host.unsupported("installer metadata");return None;}
         if let Some(path) = host_installer::read_installed_folder(vendor, product) {
             return Some(path);
         }
@@ -19055,6 +19227,7 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
     }
 
     fn delete_installed_registry_key(&mut self, vendor: &str, product: &str) -> bool {
+        if file_policy::restricted() {self.host.unsupported("registry changes");return false;}
         let native = host_installer::delete_installed_registry_key(vendor, product);
         let key = format!("hklm/software/{vendor}/{product}/installedfolder");
         self.platform_store
@@ -19071,6 +19244,7 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
         icon: &str,
         open_command: &str,
     ) -> bool {
+        if file_policy::restricted() {self.host.unsupported("file associations");return false;}
         let native = host_installer::register_file_association(
             extension,
             class_name,
@@ -19577,6 +19751,7 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
                 // order this is destination, source.
                 let source = pop_string_value(stack).unwrap_or_else(|| "<unknown>".into());
                 let destination = pop_string_value(stack).unwrap_or_else(|| "<unknown>".into());
+                if let Some(policy)=file_policy::active() {return Ok(ethornell_vm::Value::Int(i32::from(policy.rename(&source,&destination).is_ok())));}
                 let ok = match (
                     runtime_file_path_from_root(&self.manager, &self.native_root, &source),
                     runtime_file_path_from_root(&self.manager, &self.native_root, &destination),
@@ -19591,6 +19766,7 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
             }
             (0x80, 0x28) => {
                 let path = pop_string_value(stack).unwrap_or_else(|| "<unknown>".into());
+                if let Some(policy) = file_policy::active() { return Ok(ethornell_vm::Value::Int(i32::from(policy.create_directory(&path).is_ok()))); }
                 // CreateDirectoryA creates one level and fails when a parent
                 // is absent; create_dir is the portable equivalent.
                 let ok = runtime_file_path_from_root(&self.manager, &self.native_root, &path)
@@ -19601,6 +19777,7 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
             }
             (0x80, 0x2a) => {
                 let path = pop_string_value(stack).unwrap_or_else(|| "<unknown>".into());
+                if let Some(policy) = file_policy::active() { return Ok(ethornell_vm::Value::Int(i32::from(policy.metadata(&path).is_some_and(|m| m.is_dir())))); }
                 let exists = runtime_file_path_from_root(&self.manager, &self.native_root, &path)
                     .map(|path| path.is_dir())
                     .unwrap_or(false);
@@ -19616,6 +19793,7 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
                 return Ok(ethornell_vm::Value::Int(i32::from(source_present)));
             }
             (0x80, 0x29) => {
+                if file_policy::restricted() {return Err(ethornell_vm::VmError::Runtime("unsupported standalone directory mutation".into()));}
                 let path = pop_string_value(stack).unwrap_or_else(|| "<unknown>".into());
                 let ok = runtime_file_path_from_root(&self.manager, &self.native_root, &path)
                     .map(|path| std::fs::remove_dir(&path).is_ok())
@@ -19630,6 +19808,7 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
                 return Ok(ethornell_vm::Value::Int(attrs));
             }
             (0x80, 0x2d) => {
+                if file_policy::restricted() {return Err(ethornell_vm::VmError::Runtime("unsupported file permission mutation".into()));}
                 let attrs = pop_int_value(stack).unwrap_or_default();
                 let path = pop_string_value(stack).unwrap_or_else(|| "<unknown>".into());
                 let ok = runtime_file_path_from_root(&self.manager, &self.native_root, &path)
@@ -19648,6 +19827,7 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
                 return Ok(ethornell_vm::Value::Int(i32::from(ok)));
             }
             (0x80, 0x2f) => {
+                if file_policy::restricted() {return Err(ethornell_vm::VmError::Runtime("unsupported file copy; use atomic save API".into()));}
                 let source = pop_string_value(stack).unwrap_or_else(|| "<unknown>".into());
                 let destination = pop_string_value(stack).unwrap_or_else(|| "<unknown>".into());
                 let ok = match (
@@ -20079,6 +20259,7 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
             }
             (0x81, 0x2f) => {
                 let path = pop_string_value(stack).unwrap_or_default();
+                if let Some(policy) = file_policy::active() { return Ok(ethornell_vm::Value::Int(i32::from(policy.probe_writable(&path).is_ok()))); }
                 let writable = runtime_file_path_from_root(&self.manager, &self.native_root, &path)
                     .as_deref()
                     .map(platform::test_path_writable)
@@ -23955,6 +24136,10 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                 .and_then(RuntimeGraphInputObject::pop_event)
                 .unwrap_or([0; 3]);
             if event != [0; 3] {
+                let group=((event[1]as u32>>16)as u16)as i32;
+                let item=(event[1]as u16)as i32;
+                let region=self.graph_input_objects.get(&object).and_then(|input|input.descriptor.regions.iter().find(|r|r.group==group && r.index==item)).copied();
+                self.record_input_route(object,region,false,false,event[0]==0x1000_0006);
                 self.observe_title_graph_event(event);
                 tracing::debug!(
                     target: "graph_input",
@@ -24504,7 +24689,12 @@ fn find_runtime_resource(
         // Target sub_406AF0 accepts an empty entry name and resolves the first
         // entry in the named archive. Small data archives such as
         // data10000.arc rely on this to expose their sole SDC payload.
-        manager.first_in_archive(archive)
+        manager.first_in_archive(archive).or_else(|| {
+            manager.archives().archives.iter().find_map(|candidate| {
+                let name = candidate.path.file_name()?.to_str()?;
+                bgi_xxx_pattern_matches(archive,name).then(|| manager.first_in_archive(name)).flatten()
+            })
+        })
     } else {
         manager
             .find_in_archive(archive, file)
@@ -24536,6 +24726,7 @@ fn enumerate_matching_files(
     max_count: usize,
     output: &mut Vec<String>,
 ) {
+    if file_policy::restricted() && output.len()>=10_000 {return;}
     let Ok(entries) = std::fs::read_dir(directory) else {
         return;
     };
@@ -24599,6 +24790,9 @@ fn windows_wildcard_matches(pattern: &str, value: &str) -> bool {
 }
 
 fn runtime_file_attributes(manager: &ResourceManager, file: &str) -> i32 {
+    if let Some(policy) = file_policy::active() {
+        return policy.metadata(file).map(|m| (if m.permissions().readonly() { 1 } else { 0 }) | if m.is_dir() { 0x10 } else { 0x80 }).unwrap_or(-1);
+    }
     let Some(path) = runtime_file_path(manager, file) else {
         return -1;
     };

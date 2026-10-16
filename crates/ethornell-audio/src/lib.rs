@@ -1,5 +1,6 @@
 use ethornell_core::{EthornellError, Result};
 use kira::dsp::Frame;
+use kira::manager::backend::{Backend, DefaultBackend};
 use kira::manager::{AudioManager, AudioManagerSettings};
 use kira::sound::{
     PlaybackPosition, PlaybackState,
@@ -108,32 +109,71 @@ fn read_u32(data: &[u8], offset: usize) -> Option<u32> {
     Some(u32::from_le_bytes(bytes))
 }
 
-pub struct AudioSystem {
-    manager: AudioManager,
+pub struct AudioSystem<B: Backend = DefaultBackend> {
+    manager: AudioManager<B>,
     volume: f64,
     channels: BTreeMap<i32, StaticSoundHandle>,
     next_unmanaged_channel: i32,
+    host_suspended: bool,
 }
 
 impl AudioSystem {
     pub fn new() -> Result<Self> {
-        let manager = AudioManager::new(AudioManagerSettings::default())
-            .map_err(|err| EthornellError::Other(format!("audio init failed: {err}")))?;
+        Self::with_settings(AudioManagerSettings::default())
+    }
+}
+
+impl<B: Backend> AudioSystem<B> {
+    /// Accepts real Kira backend/capacity settings; a mock backend can exercise
+    /// the same pause commands without a device. Android must initialize
+    /// ndk-context before constructing the default CPAL/Oboe backend.
+    pub fn with_settings(settings: AudioManagerSettings<B>) -> Result<Self>
+    where
+        B::Error: std::fmt::Debug,
+    {
+        let manager = AudioManager::new(settings)
+            .map_err(|err| EthornellError::Other(format!("audio init failed: {err:?}")))?;
         Ok(Self {
             manager,
             volume: 1.0,
             channels: BTreeMap::new(),
             next_unmanaged_channel: i32::MIN,
+            host_suspended: false,
         })
     }
 
-    pub fn play_ogg_file(&mut self, path: impl AsRef<std::path::Path>) -> Result<()> {
-        let data = StaticSoundData::from_file(path, StaticSoundSettings::default())
-            .map_err(|err| EthornellError::Other(format!("load audio failed: {err}")))?;
-        self.manager
-            .play(data)
-            .map_err(|err| EthornellError::Other(format!("play audio failed: {err}")))?;
+    /// Host lifecycle/focus pause, independent of each script sound's state.
+    /// Call on the engine's serial command thread. Success means queued, not
+    /// synchronous acknowledgement by the hardware callback. No stop/restart.
+    pub fn host_suspend(&mut self) -> Result<()> {
+        if !self.host_suspended {
+            self.manager
+                .pause(immediate_tween())
+                .map_err(|err| EthornellError::Other(format!("audio suspend failed: {err}")))?;
+            self.host_suspended = true;
+        }
         Ok(())
+    }
+
+    /// Resumes the mixer clock, not script-paused channels. Host reason masks
+    /// belong to the runtime: call only when every pause reason has cleared.
+    pub fn host_resume(&mut self) -> Result<()> {
+        if self.host_suspended {
+            self.manager
+                .resume(immediate_tween())
+                .map_err(|err| EthornellError::Other(format!("audio resume failed: {err}")))?;
+            self.host_suspended = false;
+        }
+        Ok(())
+    }
+
+    pub fn is_host_suspended(&self) -> bool {
+        self.host_suspended
+    }
+
+    pub fn play_ogg_file(&mut self, path: impl AsRef<std::path::Path>) -> Result<()> {
+        // Track file playback too, so channel cleanup applies uniformly.
+        self.play_from_bytes(&std::fs::read(path)?)
     }
 
     pub fn play_from_bytes(&mut self, bytes: &[u8]) -> Result<()> {
@@ -205,6 +245,7 @@ impl AudioSystem {
         fade_in_ms: u64,
         restart: bool,
     ) -> Result<bool> {
+        validate_playback_parameters(volume, decode_gain, playback_rate, panning)?;
         if !restart && self.channel_is_active(channel) {
             return Ok(false);
         }
@@ -249,6 +290,7 @@ impl AudioSystem {
         fade_in_ms: u64,
         restart: bool,
     ) -> Result<bool> {
+        validate_playback_parameters(volume, decode_gain, playback_rate, panning)?;
         if !restart && self.channel_is_active(channel) {
             return Ok(false);
         }
@@ -264,6 +306,8 @@ impl AudioSystem {
     }
 
     fn start_static_sound(&mut self, channel: i32, data: StaticSoundData) -> Result<bool> {
+        self.channels
+            .retain(|_, handle| handle.state() != PlaybackState::Stopped);
         let handle = self
             .manager
             .play(data)
@@ -292,18 +336,23 @@ impl AudioSystem {
     }
 
     pub fn pause_channel(&mut self, channel: i32, paused: bool, fade_ms: u64) {
+        let _ = self.try_pause_channel(channel, paused, fade_ms);
+    }
+
+    pub fn try_pause_channel(&mut self, channel: i32, paused: bool, fade_ms: u64) -> Result<()> {
         let Some(handle) = self.channels.get_mut(&channel) else {
-            return;
+            return Ok(());
         };
         let tween = Tween {
             duration: Duration::from_millis(fade_ms),
             ..Tween::default()
         };
-        if paused {
-            let _ = handle.pause(tween);
+        let result = if paused {
+            handle.pause(tween)
         } else {
-            let _ = handle.resume(tween);
-        }
+            handle.resume(tween)
+        };
+        result.map_err(|err| EthornellError::Other(format!("audio channel pause failed: {err}")))
     }
 
     pub fn set_channel_volume(&mut self, channel: i32, volume: f64, fade_ms: u64) {
@@ -339,12 +388,45 @@ impl AudioSystem {
     }
 
     pub fn set_volume(&mut self, volume: f64) {
-        self.volume = volume.clamp(0.0, 1.0);
+        let _ = self.try_set_volume(volume);
+    }
+
+    /// Sets the main mixer volume, affecting both existing and future sounds.
+    pub fn try_set_volume(&mut self, volume: f64) -> Result<()> {
+        if !volume.is_finite() {
+            return Err(EthornellError::Other("non-finite audio volume".into()));
+        }
+        let volume = volume.clamp(0.0, 1.0);
+        self.manager
+            .main_track()
+            .set_volume(volume, immediate_tween())
+            .map_err(|err| EthornellError::Other(format!("audio volume failed: {err}")))?;
+        self.volume = volume;
+        Ok(())
     }
 
     pub fn volume(&self) -> f64 {
         self.volume
     }
+}
+
+fn immediate_tween() -> Tween {
+    Tween {
+        duration: Duration::ZERO,
+        ..Tween::default()
+    }
+}
+
+fn validate_playback_parameters(volume: f64, gain: f64, rate: f64, panning: f64) -> Result<()> {
+    if ![volume, gain, rate, panning]
+        .into_iter()
+        .all(f64::is_finite)
+    {
+        return Err(EthornellError::Other(
+            "non-finite audio playback parameter".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn decode_static_sound(bytes: &[u8]) -> Result<StaticSoundData> {
@@ -391,4 +473,170 @@ fn apply_decode_gain(data: &mut StaticSoundData, decode_gain: f64) {
         })
         .collect::<Vec<_>>()
         .into();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kira::manager::backend::mock::{MockBackend, MockBackendSettings};
+
+    fn mock_audio(capacity: usize) -> AudioSystem<MockBackend> {
+        let mut settings = AudioManagerSettings::default();
+        settings.backend_settings = MockBackendSettings { sample_rate: 1000 };
+        settings.capacities.command_capacity = capacity;
+        AudioSystem::with_settings(settings).unwrap()
+    }
+
+    fn process(audio: &mut AudioSystem<MockBackend>, frames: usize) -> Vec<Frame> {
+        let backend = audio.manager.backend_mut();
+        backend.on_start_processing();
+        (0..frames).map(|_| backend.process()).collect()
+    }
+
+    fn start_tone(audio: &mut AudioSystem<MockBackend>, channel: i32) {
+        audio
+            .start_static_sound(
+                channel,
+                StaticSoundData {
+                    sample_rate: 1000,
+                    frames: vec![Frame::new(0.5, 0.5); 10000].into(),
+                    settings: StaticSoundSettings::default(),
+                },
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn host_pause_preserves_position_and_does_not_resume_script_pause() {
+        let mut audio = mock_audio(128);
+        start_tone(&mut audio, 1);
+        start_tone(&mut audio, 2);
+        process(&mut audio, 100);
+        audio.try_pause_channel(2, true, 0).unwrap();
+        process(&mut audio, 10);
+        audio.host_suspend().unwrap();
+        let silent = process(&mut audio, 100);
+        assert!(
+            silent
+                .iter()
+                .all(|frame| frame.left == 0.0 && frame.right == 0.0)
+        );
+        let held_position = audio.channels[&1].position();
+        process(&mut audio, 100);
+        assert_eq!(audio.channels[&1].position(), held_position);
+        assert!(audio.is_host_suspended());
+        audio.host_resume().unwrap();
+        process(&mut audio, 100);
+        process(&mut audio, 1); // publish positions at the next processing block
+        assert!(audio.channels[&1].position() > held_position);
+        assert_eq!(audio.channels[&2].state(), PlaybackState::Paused);
+        assert!(!audio.is_host_suspended());
+    }
+
+    #[test]
+    fn sounds_created_while_suspended_wait_for_mixer_resume() {
+        let mut audio = mock_audio(128);
+        audio.host_suspend().unwrap();
+        start_tone(&mut audio, 1);
+        assert!(
+            process(&mut audio, 100)
+                .iter()
+                .all(|frame| frame.left == 0.0)
+        );
+        assert_eq!(audio.channels[&1].position(), 0.0);
+        audio.host_resume().unwrap();
+        assert!(
+            process(&mut audio, 100)
+                .iter()
+                .any(|frame| frame.left > 0.0)
+        );
+    }
+
+    #[test]
+    fn command_failure_keeps_host_state_retryable_and_idempotent() {
+        let mut audio = mock_audio(1);
+        audio.try_set_volume(0.5).unwrap(); // fill the real Kira command queue
+        assert!(audio.host_suspend().is_err());
+        assert!(!audio.is_host_suspended());
+        process(&mut audio, 1);
+        audio.host_suspend().unwrap();
+        audio.host_suspend().unwrap(); // no duplicate command
+        assert!(audio.host_resume().is_err());
+        assert!(audio.is_host_suspended());
+        process(&mut audio, 1);
+        audio.host_resume().unwrap();
+        assert!(!audio.is_host_suspended());
+    }
+
+    #[test]
+    fn master_volume_changes_existing_and_future_sounds() {
+        let mut audio = mock_audio(128);
+        start_tone(&mut audio, 1);
+        assert!(process(&mut audio, 10).iter().any(|frame| frame.left > 0.0));
+        audio.try_set_volume(0.0).unwrap();
+        start_tone(&mut audio, 2);
+        assert!(
+            process(&mut audio, 100)
+                .iter()
+                .all(|frame| frame.left.abs() < 0.0001)
+        );
+        assert_eq!(audio.volume(), 0.0);
+        assert!(audio.try_set_volume(f64::NAN).is_err());
+    }
+
+    #[test]
+    fn settings_apply_and_invalid_playback_parameters_fail_before_decode() {
+        let mut audio = mock_audio(128);
+        assert!(
+            audio
+                .play_on_channel(1, b"bad", false, f64::NAN, 1.0, 1.0, 0.5, 0)
+                .unwrap_err()
+                .to_string()
+                .contains("non-finite")
+        );
+        let settings = playback_settings(0.7, 1.5, 0.25, 120);
+        assert_eq!(
+            settings.volume,
+            kira::tween::Value::Fixed(kira::Volume::Amplitude(0.7))
+        );
+        assert_eq!(
+            settings.playback_rate,
+            kira::tween::Value::Fixed(kira::sound::PlaybackRate::Factor(1.5))
+        );
+        assert_eq!(settings.panning, kira::tween::Value::Fixed(0.25));
+        assert_eq!(
+            settings.fade_in_tween.unwrap().duration,
+            Duration::from_millis(120)
+        );
+    }
+
+    struct FailedBackend;
+
+    impl Backend for FailedBackend {
+        type Settings = ();
+        type Error = &'static str;
+
+        fn setup(_: ()) -> std::result::Result<(Self, u32), Self::Error> {
+            Err("test device unavailable")
+        }
+
+        fn start(
+            &mut self,
+            _: kira::manager::backend::Renderer,
+        ) -> std::result::Result<(), Self::Error> {
+            unreachable!()
+        }
+    }
+
+    #[test]
+    fn initialization_failure_is_reported_not_silent_success() {
+        let result = AudioSystem::<FailedBackend>::with_settings(AudioManagerSettings::default());
+        assert!(
+            result
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("test device unavailable")
+        );
+    }
 }

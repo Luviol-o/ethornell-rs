@@ -18,6 +18,28 @@ pub struct NativeCallAbi {
     pub raw_descriptor_bit8: bool,
 }
 
+/// Runtime dispatch profile. The default is the recovered 695-handler table;
+/// later profiles are explicit session configuration, not encoding selection.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum NativeAbiProfile {
+    #[default]
+    Tayutama,
+    Amachoco,
+}
+
+pub fn lookup_profile(profile: NativeAbiProfile, group:u8, id:u16)->Option<NativeCallAbi> {
+    if profile==NativeAbiProfile::Amachoco {
+        let (argc,stack_outputs)=match (group,id) {
+            (0x81,0x21)=>(2,0),
+            (0x81,0xD8)=>(2,1),
+            (0x81,0xDA)=>(3,1),
+            _=>return lookup(group,id),
+        };
+        return Some(NativeCallAbi {argc,stack_outputs,installs_procedure:false,raw_descriptor_bit8:stack_outputs!=0});
+    }
+    lookup(group,id)
+}
+
 impl NativeCallAbi {
     pub const fn returns_value(self) -> bool {
         self.stack_outputs != 0

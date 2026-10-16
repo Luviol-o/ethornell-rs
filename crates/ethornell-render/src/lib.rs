@@ -2,9 +2,86 @@ use ab_glyph::{Font, FontArc, PxScale, ScaleFont};
 use ethornell_core::{EthornellError, NativeBlendPath, Result, classify_native_blend};
 use ethornell_image::DecodedImage;
 use std::collections::{BTreeMap, BTreeSet};
+#[cfg(feature = "desktop-window")]
 use winit::window::Window;
 
+mod font;
+pub use font::FontProvider;
+
 pub type TextureId = u64;
+
+fn validate_surface_size(width: u32, height: u32, limit: u32) -> Result<()> {
+    if width == 0 || height == 0 || width > limit || height > limit {
+        return Err(EthornellError::Other(format!(
+            "invalid GPU dimensions {width}x{height} (limit {limit})"
+        )));
+    }
+    Ok(())
+}
+
+fn renderer_limits(adapter: &wgpu::Limits) -> Result<wgpu::Limits> {
+    let required = wgpu::Limits::downlevel_webgl2_defaults()
+        .using_resolution(adapter.clone())
+        .using_alignment(adapter.clone());
+    let mut failures = Vec::new();
+    required.check_limits_with_fail_fn(adapter, false, |name, requested, available| {
+        failures.push(format!(
+            "{name}: requested {requested}, available {available}"
+        ));
+    });
+    if !failures.is_empty() {
+        return Err(EthornellError::Other(format!(
+            "adapter does not meet 2D renderer limits: {}",
+            failures.join(", ")
+        )));
+    }
+    Ok(required)
+}
+
+fn surface_configuration(
+    caps: &wgpu::SurfaceCapabilities,
+    width: u32,
+    height: u32,
+    limit: u32,
+) -> Result<wgpu::SurfaceConfiguration> {
+    validate_surface_size(width, height, limit)?;
+    let format = caps
+        .formats
+        .iter()
+        .copied()
+        .find(|f| f.is_srgb())
+        .or_else(|| caps.formats.first().copied())
+        .ok_or_else(|| EthornellError::Other("surface has no supported formats".into()))?;
+    let present_mode = caps
+        .present_modes
+        .iter()
+        .copied()
+        .find(|mode| *mode == wgpu::PresentMode::Fifo)
+        .or_else(|| caps.present_modes.first().copied())
+        .ok_or_else(|| EthornellError::Other("surface has no supported present modes".into()))?;
+    let alpha_mode = caps
+        .alpha_modes
+        .iter()
+        .copied()
+        .find(|mode| *mode == wgpu::CompositeAlphaMode::Opaque)
+        .or_else(|| caps.alpha_modes.first().copied())
+        .ok_or_else(|| EthornellError::Other("surface has no supported alpha modes".into()))?;
+    if !caps.usages.contains(wgpu::TextureUsages::RENDER_ATTACHMENT) {
+        return Err(EthornellError::Other(
+            "surface does not support rendering".into(),
+        ));
+    }
+    Ok(wgpu::SurfaceConfiguration {
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        format,
+        width,
+        height,
+        present_mode,
+        alpha_mode,
+        view_formats: vec![],
+        desired_maximum_frame_latency: 2,
+    })
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TextStyleSpan {
@@ -180,15 +257,36 @@ pub struct Renderer<'w> {
     font: FontArc,
     virtual_width: f32,
     virtual_height: f32,
+    surface_suspended: bool,
+    gpu_fault: std::sync::Arc<std::sync::Mutex<Option<String>>>,
 }
 
 impl<'w> Renderer<'w> {
+    #[cfg(feature = "desktop-window")]
     pub async fn new(window: std::sync::Arc<dyn Window>) -> Result<Self> {
+        Self::new_with_font(window, load_system_cjk_font()?).await
+    }
+
+    #[cfg(feature = "desktop-window")]
+    pub async fn new_with_font(window: std::sync::Arc<dyn Window>, font: FontArc) -> Result<Self> {
         let size = window.surface_size();
         let instance = wgpu::Instance::default();
         let surface = instance
             .create_surface(window)
             .map_err(|err| EthornellError::Other(format!("create surface failed: {err}")))?;
+        Self::from_surface(&instance, surface, size.width, size.height, font).await
+    }
+
+    /// Creates a renderer without a window/event-loop dependency. The caller
+    /// owns any raw surface target and must keep it alive until this is dropped.
+    pub async fn from_surface(
+        instance: &wgpu::Instance,
+        surface: wgpu::Surface<'w>,
+        width: u32,
+        height: u32,
+        font: FontArc,
+    ) -> Result<Self> {
+        validate_surface_size(width, height, u32::MAX)?;
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
@@ -197,34 +295,40 @@ impl<'w> Renderer<'w> {
             })
             .await
             .ok_or_else(|| EthornellError::Other("no compatible wgpu adapter".into()))?;
+        let adapter_limits = adapter.limits();
+        let required_limits = renderer_limits(&adapter_limits)?;
         let (device, queue) = adapter
             .request_device(
                 &wgpu::DeviceDescriptor {
                     label: Some("ethornell-device"),
                     required_features: wgpu::Features::empty(),
-                    required_limits: wgpu::Limits::default(),
+                    required_limits,
                 },
                 None,
             )
             .await
             .map_err(|err| EthornellError::Other(format!("request device failed: {err}")))?;
+        let gpu_fault = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let lost_fault = gpu_fault.clone();
+        device.set_device_lost_callback(move |reason, message| {
+            if let Ok(mut fault) = lost_fault.lock() {
+                *fault = Some(format!("device lost ({reason:?}): {message}"));
+            }
+        });
+        let validation_fault = gpu_fault.clone();
+        device.on_uncaptured_error(Box::new(move |error| {
+            if let Ok(mut fault) = validation_fault.lock() {
+                *fault = Some(format!("GPU error: {error}"));
+            }
+        }));
         let caps = surface.get_capabilities(&adapter);
-        let format = caps
-            .formats
-            .iter()
-            .copied()
-            .find(|format| format.is_srgb())
-            .unwrap_or(caps.formats[0]);
-        let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format,
-            width: size.width.max(1),
-            height: size.height.max(1),
-            present_mode: caps.present_modes[0],
-            alpha_mode: caps.alpha_modes[0],
-            view_formats: vec![],
-            desired_maximum_frame_latency: 2,
-        };
+        let config = surface_configuration(
+            &caps,
+            width,
+            height,
+            device.limits().max_texture_dimension_2d,
+        )?;
+        let format = config.format;
         surface.configure(&device, &config);
 
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -344,7 +448,7 @@ impl<'w> Renderer<'w> {
             ..Default::default()
         });
 
-        Ok(Self {
+        let renderer = Self {
             surface,
             device,
             queue,
@@ -367,10 +471,55 @@ impl<'w> Renderer<'w> {
             text_cache: BTreeMap::new(),
             next_texture_id: 1,
             commands: Vec::new(),
-            font: load_system_cjk_font()?,
+            font,
             virtual_width: 1280.0,
             virtual_height: 720.0,
-        })
+            surface_suspended: false,
+            gpu_fault,
+        };
+        renderer.check_gpu()?;
+        Ok(renderer)
+    }
+
+    /// Borrows an ANativeWindow; no activity glue or acquire/release is used.
+    ///
+    /// # Safety
+    /// `window_ptr` must be a valid ANativeWindow, kept alive and usable for the
+    /// entire renderer lifetime. Serialize all calls on the owning engine thread.
+    /// Before surfaceDestroyed returns, drop the renderer, then release the JNI
+    /// window reference. A replacement surface needs a fresh renderer and fresh
+    /// texture handles (re-upload CPU images); old handles are not transferable.
+    #[cfg(target_os = "android")]
+    pub async unsafe fn new_android(
+        window_ptr: *mut std::ffi::c_void,
+        width: u32,
+        height: u32,
+        backend: wgpu::Backends,
+        font: FontArc,
+    ) -> Result<Self> {
+        let window = std::ptr::NonNull::new(window_ptr)
+            .ok_or_else(|| EthornellError::Other("null ANativeWindow".into()))?;
+        validate_surface_size(width, height, u32::MAX)?;
+        if backend.is_empty() {
+            return Err(EthornellError::Other("no GPU backend selected".into()));
+        }
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: backend,
+            ..Default::default()
+        });
+        // SAFETY: the host guarantees the raw window lifetime as documented.
+        let surface = unsafe {
+            instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
+                raw_display_handle: raw_window_handle::RawDisplayHandle::Android(
+                    raw_window_handle::AndroidDisplayHandle::new(),
+                ),
+                raw_window_handle: raw_window_handle::RawWindowHandle::AndroidNdk(
+                    raw_window_handle::AndroidNdkWindowHandle::new(window),
+                ),
+            })
+        }
+        .map_err(|err| EthornellError::Other(format!("create Android surface failed: {err}")))?;
+        Self::from_surface(&instance, surface, width, height, font).await
     }
 
     pub fn set_virtual_size(&mut self, width: f32, height: f32) {
@@ -423,9 +572,14 @@ impl<'w> Renderer<'w> {
     }
 
     pub fn insert_rgba(&mut self, image: &DecodedImage) -> Result<TextureHandle> {
+        self.check_gpu()?;
         validate_rgba(image)?;
+        self.validate_texture_size(image)?;
         let id = self.next_texture_id;
-        self.next_texture_id += 1;
+        self.next_texture_id = self
+            .next_texture_id
+            .checked_add(1)
+            .ok_or_else(|| EthornellError::Other("texture ID space exhausted".into()))?;
         let record = self.create_texture_record(image);
         self.textures.insert(id, record);
         Ok(TextureHandle {
@@ -440,7 +594,9 @@ impl<'w> Renderer<'w> {
         handle: &TextureHandle,
         image: &DecodedImage,
     ) -> Result<TextureHandle> {
+        self.check_gpu()?;
         validate_rgba(image)?;
+        self.validate_texture_size(image)?;
         let same_dimensions = self
             .textures
             .get(&handle.id)
@@ -473,6 +629,28 @@ impl<'w> Renderer<'w> {
     pub fn remove_texture(&mut self, texture: TextureId) {
         self.textures.remove(&texture);
         self.text_cache.retain(|_, handle| handle.id != texture);
+    }
+
+    fn validate_texture_size(&self, image: &DecodedImage) -> Result<()> {
+        validate_surface_size(
+            image.width,
+            image.height,
+            self.device.limits().max_texture_dimension_2d,
+        )
+    }
+
+    /// A lost device/validation/OOM fault is terminal for this renderer. The
+    /// host must report it and stop, or drop/rebuild and re-upload all textures.
+    pub fn check_gpu(&self) -> Result<()> {
+        self.device.poll(wgpu::Maintain::Poll);
+        let fault = self
+            .gpu_fault
+            .lock()
+            .map_err(|_| EthornellError::Other("GPU fault state poisoned".into()))?;
+        if let Some(message) = fault.as_ref() {
+            return Err(EthornellError::Other(message.clone()));
+        }
+        Ok(())
     }
 
     fn create_texture_record(&self, image: &DecodedImage) -> TextureRecord {
@@ -552,12 +730,23 @@ impl<'w> Renderer<'w> {
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
-        if width == 0 || height == 0 {
-            return;
+        if let Err(err) = self.try_resize(width, height) {
+            tracing::warn!(%err, "renderer resize rejected");
         }
+    }
+
+    pub fn try_resize(&mut self, width: u32, height: u32) -> Result<()> {
+        self.check_gpu()?;
+        if width == 0 || height == 0 {
+            self.surface_suspended = true;
+            return Ok(());
+        }
+        validate_surface_size(width, height, self.device.limits().max_texture_dimension_2d)?;
         self.config.width = width;
         self.config.height = height;
         self.surface.configure(&self.device, &self.config);
+        self.surface_suspended = false;
+        Ok(())
     }
 
     pub fn submit(&mut self, commands: &[RenderCommand]) {
@@ -576,6 +765,10 @@ impl<'w> Renderer<'w> {
     }
 
     pub fn render(&mut self) -> Result<()> {
+        self.check_gpu()?;
+        if self.surface_suspended {
+            return Ok(());
+        }
         let frame = match self.surface.get_current_texture() {
             Ok(frame) => frame,
             Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
@@ -671,6 +864,7 @@ impl<'w> Renderer<'w> {
                     clip,
                     ..
                 } => {
+                    FontProvider::require_coverage(&self.font, &text)?;
                     let key = TextCacheKey::new(&text, size, color, &styles);
                     active_text_keys.insert(key.clone());
                     let handle = if let Some(handle) = self.text_cache.get(&key).cloned() {
@@ -994,18 +1188,7 @@ mod viewport_tests {
 }
 
 pub fn load_system_cjk_font() -> Result<FontArc> {
-    for path in SYSTEM_CJK_FONT_CANDIDATES {
-        let Ok(bytes) = std::fs::read(path) else {
-            continue;
-        };
-        if let Ok(font) = FontArc::try_from_vec(bytes) {
-            tracing::info!(path, "loaded text font");
-            return Ok(font);
-        }
-    }
-    Err(EthornellError::Other(
-        "no usable system font found for text rendering".into(),
-    ))
+    FontProvider::load_system_cjk_font()
 }
 
 fn rasterize_text(
@@ -1122,7 +1305,12 @@ fn measure_line(font: &FontArc, text: &str, px_height: f32) -> u32 {
         .max(1.0) as u32
 }
 
-const SYSTEM_CJK_FONT_CANDIDATES: &[&str] = &[
+pub(crate) const SYSTEM_CJK_FONT_CANDIDATES: &[&str] = &[
+    "/system/fonts/NotoSansCJK-Regular.ttc",
+    "/system/fonts/NotoSerifCJK-Regular.ttc",
+    "/system/fonts/NotoSansJP-Regular.otf",
+    "/system/fonts/NotoSansSC-Regular.otf",
+    "/system/fonts/DroidSansFallback.ttf",
     "/System/Library/Fonts/ヒラギノ角ゴシック W8.ttc",
     "/System/Library/Fonts/AppleSDGothicNeo.ttc",
     "/System/Library/Fonts/Hiragino Sans GB.ttc",
@@ -1178,11 +1366,108 @@ mod font_tests {
     }
 }
 
+#[cfg(test)]
+mod surface_tests {
+    use super::*;
+
+    fn capabilities() -> wgpu::SurfaceCapabilities {
+        wgpu::SurfaceCapabilities {
+            formats: vec![
+                wgpu::TextureFormat::Rgba8Unorm,
+                wgpu::TextureFormat::Bgra8UnormSrgb,
+            ],
+            present_modes: vec![wgpu::PresentMode::Immediate, wgpu::PresentMode::Fifo],
+            alpha_modes: vec![
+                wgpu::CompositeAlphaMode::PreMultiplied,
+                wgpu::CompositeAlphaMode::Opaque,
+            ],
+            usages: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        }
+    }
+
+    #[test]
+    fn surface_prefers_srgb_fifo_and_opaque() {
+        let config = surface_configuration(&capabilities(), 800, 600, 2048).unwrap();
+        assert_eq!(config.format, wgpu::TextureFormat::Bgra8UnormSrgb);
+        assert_eq!(config.present_mode, wgpu::PresentMode::Fifo);
+        assert_eq!(config.alpha_mode, wgpu::CompositeAlphaMode::Opaque);
+    }
+
+    #[test]
+    fn empty_capabilities_and_invalid_dimensions_return_errors() {
+        let mut caps = capabilities();
+        caps.formats.clear();
+        assert!(surface_configuration(&caps, 800, 600, 2048).is_err());
+        caps = capabilities();
+        caps.present_modes.clear();
+        assert!(surface_configuration(&caps, 800, 600, 2048).is_err());
+        caps = capabilities();
+        caps.alpha_modes.clear();
+        assert!(surface_configuration(&caps, 800, 600, 2048).is_err());
+        caps = capabilities();
+        caps.usages = wgpu::TextureUsages::empty();
+        assert!(surface_configuration(&caps, 800, 600, 2048).is_err());
+        for (width, height) in [(0, 600), (800, 0), (2049, 600), (800, 2049)] {
+            assert!(surface_configuration(&capabilities(), width, height, 2048).is_err());
+        }
+    }
+
+    #[test]
+    fn nonpreferred_capabilities_are_valid_fallbacks() {
+        let mut caps = capabilities();
+        caps.formats.truncate(1);
+        caps.present_modes.truncate(1);
+        caps.alpha_modes.truncate(1);
+        assert!(surface_configuration(&caps, 800, 600, 2048).is_ok());
+    }
+
+    #[test]
+    fn malformed_texture_size_fails_without_overflow() {
+        assert!(
+            validate_rgba(&DecodedImage {
+                width: u32::MAX,
+                height: u32::MAX,
+                rgba: vec![]
+            })
+            .is_err()
+        );
+        assert!(
+            validate_rgba(&DecodedImage {
+                width: 1,
+                height: 1,
+                rgba: vec![0; 3]
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn mobile_limits_use_adapter_resolution_alignment_and_report_failure() {
+        let mut adapter = wgpu::Limits::downlevel_defaults();
+        adapter.max_texture_dimension_2d = 4096;
+        adapter.min_uniform_buffer_offset_alignment = 512;
+        let required = renderer_limits(&adapter).unwrap();
+        assert_eq!(required.max_texture_dimension_2d, 4096);
+        assert_eq!(required.min_uniform_buffer_offset_alignment, 512);
+        assert!(required.check_limits(&adapter));
+        adapter.max_vertex_attributes = 1;
+        assert!(
+            renderer_limits(&adapter)
+                .unwrap_err()
+                .to_string()
+                .contains("max_vertex_attributes")
+        );
+    }
+}
+
 fn validate_rgba(image: &DecodedImage) -> Result<()> {
     if image.width == 0 || image.height == 0 {
         return Err(EthornellError::Parse("zero-sized texture".into()));
     }
-    if image.rgba.len() != image.width as usize * image.height as usize * 4 {
+    let expected_len = (image.width as usize)
+        .checked_mul(image.height as usize)
+        .and_then(|pixels| pixels.checked_mul(4));
+    if expected_len != Some(image.rgba.len()) {
         return Err(EthornellError::Parse("texture RGBA size mismatch".into()));
     }
     Ok(())
