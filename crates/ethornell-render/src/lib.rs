@@ -737,12 +737,16 @@ impl<'w> Renderer<'w> {
                 quad.map(|[game_x, game_y]| [offset_x + game_x * scale, offset_y + game_y * scale])
             });
             let (x, y, width, height) = self.game_to_surface_rect(x, y, width, height);
-            let scissor = match clip {
-                Some(rect) => match self.game_clip_to_scissor(rect) {
-                    Some(scissor) => Some(scissor),
-                    None => continue,
-                },
-                None => None,
+            // Every draw stays inside the game frame, so the letterbox bars
+            // stay black even where an image is larger than the screen.
+            let scissor = match self.game_clip_to_scissor(clip.unwrap_or([
+                0.0,
+                0.0,
+                self.virtual_width,
+                self.virtual_height,
+            ])) {
+                Some(scissor) => Some(scissor),
+                None => continue,
             };
             let texture_opaque = self
                 .textures
@@ -890,13 +894,51 @@ impl<'w> Renderer<'w> {
     }
 
     fn game_clip_to_scissor(&self, clip: [f32; 4]) -> Option<(u32, u32, u32, u32)> {
-        let (x, y, width, height) = self.game_to_surface_rect(clip[0], clip[1], clip[2], clip[3]);
-        let x0 = x.floor().max(0.0).min(self.config.width as f32) as u32;
-        let y0 = y.floor().max(0.0).min(self.config.height as f32) as u32;
-        let x1 = (x + width).ceil().max(0.0).min(self.config.width as f32) as u32;
-        let y1 = (y + height).ceil().max(0.0).min(self.config.height as f32) as u32;
-        (x1 > x0 && y1 > y0).then_some((x0, y0, x1 - x0, y1 - y0))
+        game_clip_to_scissor(
+            clip,
+            self.config.width as f32,
+            self.config.height as f32,
+            self.virtual_width,
+            self.virtual_height,
+        )
     }
+}
+
+/// A clip rectangle in game coordinates as a surface scissor, cut to the
+/// game frame: nothing is drawn into the letterbox bars.
+fn game_clip_to_scissor(
+    clip: [f32; 4],
+    surface_width: f32,
+    surface_height: f32,
+    virtual_width: f32,
+    virtual_height: f32,
+) -> Option<(u32, u32, u32, u32)> {
+    let left = clip[0].max(0.0);
+    let top = clip[1].max(0.0);
+    let right = (clip[0] + clip[2]).min(virtual_width);
+    let bottom = (clip[1] + clip[3]).min(virtual_height);
+    if right <= left || bottom <= top {
+        return None;
+    }
+    let (scale, offset_x, offset_y) =
+        viewport_transform(surface_width, surface_height, virtual_width, virtual_height);
+    let x0 = (offset_x + left * scale)
+        .floor()
+        .max(0.0)
+        .min(surface_width) as u32;
+    let y0 = (offset_y + top * scale)
+        .floor()
+        .max(0.0)
+        .min(surface_height) as u32;
+    let x1 = (offset_x + right * scale)
+        .ceil()
+        .max(0.0)
+        .min(surface_width) as u32;
+    let y1 = (offset_y + bottom * scale)
+        .ceil()
+        .max(0.0)
+        .min(surface_height) as u32;
+    (x1 > x0 && y1 > y0).then_some((x0, y0, x1 - x0, y1 - y0))
 }
 
 fn viewport_transform(
@@ -979,7 +1021,22 @@ mod native_blend_tests {
 
 #[cfg(test)]
 mod viewport_tests {
-    use super::{surface_to_virtual_point, viewport_transform};
+    use super::{game_clip_to_scissor, surface_to_virtual_point, viewport_transform};
+
+    #[test]
+    fn scissors_stay_inside_the_letterboxed_game_frame() {
+        // A 4:3 game in a 16:10 surface: bars of 120 at the sides.
+        let frame = game_clip_to_scissor([0.0, 0.0, 1280.0, 960.0], 1440.0, 900.0, 1280.0, 960.0);
+        assert_eq!(frame, Some((120, 0, 1200, 900)));
+        // An image wider than the game is cut at the frame.
+        let wide = game_clip_to_scissor([-200.0, 0.0, 1680.0, 960.0], 1440.0, 900.0, 1280.0, 960.0);
+        assert_eq!(wide, frame);
+        // A clip entirely in the bar draws nothing.
+        assert_eq!(
+            game_clip_to_scissor([-200.0, 0.0, 100.0, 960.0], 1440.0, 900.0, 1280.0, 960.0),
+            None
+        );
+    }
 
     #[test]
     fn hdpi_surface_uses_the_physical_device_scale() {
