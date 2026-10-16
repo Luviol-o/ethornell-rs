@@ -18,6 +18,8 @@ struct Graphics {
     window: Arc<dyn Window>,
     texture: Option<TextureHandle>,
     graph_textures: BTreeMap<String, CachedGraphTexture>,
+    /// The game size the window was last fitted to.
+    fitted_game_size: Option<(i32, i32)>,
 }
 
 struct WindowApp {
@@ -83,6 +85,7 @@ impl ApplicationHandler for WindowApp {
             window,
             texture,
             graph_textures,
+            fitted_game_size,
         }) = graphics.as_mut()
         else {
             return;
@@ -347,6 +350,35 @@ impl ApplicationHandler for WindowApp {
                             runtime.api.screen_width as f32,
                             runtime.api.screen_height as f32,
                         );
+                        // A window, not full screen: size it to the game once
+                        // per game size (the target's window is the game's
+                        // size), shrunk to fit the screen. The player may
+                        // resize it afterwards.
+                        let game_size = (runtime.api.screen_width, runtime.api.screen_height);
+                        if runtime.api.window_mode == 0 && *fitted_game_size != Some(game_size) {
+                            *fitted_game_size = Some(game_size);
+                            let screen = window.current_monitor().and_then(|monitor| {
+                                let scale = monitor.scale_factor();
+                                let mode = monitor.current_video_mode()?;
+                                Some((
+                                    f64::from(mode.size().width) / scale,
+                                    f64::from(mode.size().height) / scale,
+                                ))
+                            });
+                            let (width, height) = fitted_window_size(
+                                (game_size.0 as u32, game_size.1 as u32),
+                                screen,
+                            );
+                            if let Some(size) = window.request_surface_size(
+                                winit::dpi::LogicalSize::new(width, height).into(),
+                            ) {
+                                renderer.resize(size.width, size.height);
+                                runtime.api.window_surface_width =
+                                    size.width.min(i32::MAX as u32) as i32;
+                                runtime.api.window_surface_height =
+                                    size.height.min(i32::MAX as u32) as i32;
+                            }
+                        }
                     }
                     let last_report = frame_report.last_report;
                     if std::mem::take(&mut runtime.api.pending_window_close_request)
@@ -822,7 +854,46 @@ impl WindowApp {
             window,
             texture,
             graph_textures: BTreeMap::new(),
+            fitted_game_size: None,
         })
+    }
+}
+
+/// The window size, in points, for a game of `game` pixels: the game's own
+/// size, or, when that doesn't fit a screen of `screen` points with room
+/// left for the menu bar, the title bar and the Dock, the largest size of the
+/// same aspect that does.
+fn fitted_window_size(game: (u32, u32), screen: Option<(f64, f64)>) -> (f64, f64) {
+    let (width, height) = (f64::from(game.0.max(1)), f64::from(game.1.max(1)));
+    let Some((screen_width, screen_height)) = screen else {
+        return (width, height);
+    };
+    let scale = (screen_width * 0.95 / width)
+        .min(screen_height * 0.85 / height)
+        .min(1.0);
+    ((width * scale).floor(), (height * scale).floor())
+}
+
+#[cfg(test)]
+mod fitted_window_tests {
+    use super::fitted_window_size;
+
+    #[test]
+    fn the_window_takes_the_game_size_when_it_fits() {
+        assert_eq!(
+            fitted_window_size((1280, 960), Some((1920.0, 1200.0))),
+            (1280.0, 960.0)
+        );
+        assert_eq!(fitted_window_size((1280, 960), None), (1280.0, 960.0));
+    }
+
+    #[test]
+    fn a_smaller_screen_gets_the_largest_window_of_the_game_aspect() {
+        // A 13-inch MacBook Air: 1440x900 points.
+        assert_eq!(
+            fitted_window_size((1280, 960), Some((1440.0, 900.0))),
+            (1020.0, 765.0)
+        );
     }
 }
 
