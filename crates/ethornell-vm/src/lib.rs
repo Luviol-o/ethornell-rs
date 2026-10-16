@@ -11477,6 +11477,19 @@ impl Vm {
                     }
                     output.push_str(&rendered);
                 }
+                'c' => {
+                    // sub_474720 hands the values to the C runtime's sprintf:
+                    // the low byte as one character. A byte that is no
+                    // character on its own (a Shift-JIS lead byte) is left out.
+                    let byte = [self.pop_int().unwrap_or_default() as u8];
+                    let (text, _, malformed) = encoding_rs::SHIFT_JIS.decode(&byte);
+                    if !malformed {
+                        if width > 1 {
+                            output.extend(std::iter::repeat_n(' ', width - 1));
+                        }
+                        output.push_str(&text);
+                    }
+                }
                 's' => {
                     let value = self.pop_string_lossy().unwrap_or_default();
                     output.push_str(&value);
@@ -13746,6 +13759,41 @@ mod tests {
 
         assert_eq!(vm.stack.last(), Some(&Value::Int(b'B' as i32)));
         assert_eq!(vm.script_records.len(), 1);
+    }
+
+    #[test]
+    fn sprintf_c_writes_the_low_byte_of_its_value() {
+        // Wonderful Everyday's scrmsg._bp prefixes a line that opens with a
+        // bracket with an indent code: sprintf(buffer, "%c%s", code, text).
+        // Without %c the code was read as the %s pointer and the text was
+        // left on the stack.
+        let destination = 0x2300u32;
+        let mut vm = Vm::new();
+        let mut api = SchedulingApi::default();
+        let sprintf = test_instruction(0, 0x6f, "sprintf", vec![0x6f], Vec::new());
+        vm.stack.extend([
+            Value::Str("「Hello」".into()),
+            Value::Int(0x107),
+            Value::Ptr(destination),
+            Value::Str("%c%s".into()),
+        ]);
+
+        vm.dispatch(&sprintf, &mut api).unwrap();
+
+        assert_eq!(vm.read_c_string(destination).unwrap(), "\u{7}「Hello」");
+        assert!(vm.stack.is_empty());
+
+        // A single-byte Shift-JIS character (half-width katakana), padded.
+        vm.stack.extend([
+            Value::Int(0xB1),
+            Value::Ptr(destination),
+            Value::Str("[%2c]".into()),
+        ]);
+
+        vm.dispatch(&sprintf, &mut api).unwrap();
+
+        assert_eq!(vm.read_c_string(destination).unwrap(), "[ ｱ]");
+        assert!(vm.stack.is_empty());
     }
 
     #[test]
