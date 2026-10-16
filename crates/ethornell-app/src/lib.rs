@@ -3932,6 +3932,14 @@ impl RuntimeTraceApi {
         let backing_key = format!("runtime:surface:{surface}:backing");
         self.graph_images.remove(&backing_key);
         self.graph_image_revisions.remove(&backing_key);
+        // So are its composited pixels (Graph92:89, icon batches). Window
+        // handles are reused slots: the next Window in this slot must start
+        // empty, as a new CDspObjWindow does, not under the old picture.
+        let composite_key = format!("runtime:bitmap:{surface}");
+        let derived_prefix = format!("{composite_key}:");
+        let is_composite = |key: &String| *key == composite_key || key.starts_with(&derived_prefix);
+        self.graph_images.retain(|key, _| !is_composite(key));
+        self.graph_image_revisions.retain(|key, _| !is_composite(key));
         self.surface_text_states.remove(&surface);
         self.surface_text_buffers.remove(&surface);
         self.graph_object_layers.remove(&surface);
@@ -13426,6 +13434,67 @@ mod input_tests {
         call_graph(&mut api, 0x91, 0x3f, &mut detach).unwrap();
         call_graph(&mut api, 0x90, 0x81, &mut vec![Value::Int(child)]).unwrap();
         assert!(call_graph(&mut api, 0x90, 0x81, &mut vec![Value::Int(child)]).is_err());
+    }
+
+    #[test]
+    fn a_window_in_a_reused_slot_starts_without_the_old_composite() {
+        // Wonderful Everyday's yesnownd._bp creates a Window per question,
+        // composites the question image into it (Graph92:89) and releases
+        // it. The next question's Window usually gets the same slot; it was
+        // drawn over the previous question, which showed around the new one.
+        let manager =
+            ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let mut api = super::RuntimeTraceApi::new(manager);
+        for (bitmap, key) in [(201, "test:question-a"), (202, "test:question-b")] {
+            api.store_graph_image(
+                key.to_string(),
+                DecodedImage {
+                    width: 2,
+                    height: 2,
+                    rgba: vec![255; 2 * 2 * 4],
+                },
+            );
+            api.graph_resources
+                .insert(bitmap, RuntimeGraphResource::whole(key.to_string()));
+        }
+        let create = |api: &mut super::RuntimeTraceApi| {
+            let mut args = vec![Value::Int(8), Value::Int(4)];
+            match call_graph(api, 0x90, 0x80, &mut args).unwrap() {
+                Value::Int(handle) => handle,
+                value => panic!("unexpected window handle {value:?}"),
+            }
+        };
+        let composite = |api: &mut super::RuntimeTraceApi, window, x, bitmap| {
+            let mut args = [window, x, 0, bitmap, 1, 0].map(Value::Int).to_vec();
+            call_graph(api, 0x92, 0x89, &mut args).unwrap();
+        };
+
+        let release = |api: &mut super::RuntimeTraceApi, window| {
+            call_graph(api, 0x90, 0x81, &mut vec![Value::Int(window)]).unwrap();
+        };
+        let composite_of = |api: &super::RuntimeTraceApi, window: i32| {
+            api.graph_images[&format!("runtime:bitmap:{window}")].clone()
+        };
+
+        // The second question in a slot that never held another one.
+        let reference_window = create(&mut api);
+        composite(&mut api, reference_window, 4, 202);
+        let reference = composite_of(&api, reference_window);
+        release(&mut api, reference_window);
+
+        let first = create(&mut api);
+        assert_eq!(first, reference_window, "the released slot is reused");
+        composite(&mut api, first, 0, 201);
+        release(&mut api, first);
+        let second = create(&mut api);
+        assert_eq!(second, first, "the released slot is reused");
+        composite(&mut api, second, 4, 202);
+
+        assert_eq!(
+            composite_of(&api, second).rgba,
+            reference.rgba,
+            "nothing of the first question is left"
+        );
     }
 
     #[test]
