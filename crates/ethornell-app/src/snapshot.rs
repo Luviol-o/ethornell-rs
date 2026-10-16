@@ -167,7 +167,7 @@ pub(crate) fn compose_runtime_frame_through_priority(
                     &mut out,
                     &positioned,
                     api.formatted_text_layout(&positioned),
-                    api.graph_defaults.shadow_parameters(),
+                    api.text_node_shadow(&positioned),
                     clip,
                 );
             }
@@ -336,7 +336,7 @@ pub(crate) fn compose_graph_object(
             &mut out,
             &positioned,
             api.formatted_text_layout(&positioned),
-            api.graph_defaults.shadow_parameters(),
+            api.text_node_shadow(&positioned),
             clip,
         );
     }
@@ -452,12 +452,16 @@ pub(crate) fn draw_text_node(
     dst: &mut DecodedImage,
     node: &crate::text::RuntimeTextNode,
     layout: crate::text::RuntimeFormattedTextLayout,
-    shadow: Option<(i32, i32, i32)>,
+    shadow: TextNodeShadow,
     clip: Option<crate::graph::RuntimeClipRect>,
 ) {
     let Some(font) = snapshot_font() else {
         draw_fallback_text(dst, node, clip);
         return;
+    };
+    let (default_shadow, message_effect) = match shadow {
+        TextNodeShadow::Default(shadow) => (shadow, None),
+        TextNodeShadow::Message(effect) => (None, effect),
     };
     let scale = PxScale::from(node.size.max(12.0));
     let scaled = font.as_scaled(scale);
@@ -484,8 +488,48 @@ pub(crate) fn draw_text_node(
             x = node.x;
             y += line_height;
         }
+        if let Some(effect) = message_effect.filter(|effect| effect.mode == 2) {
+            let placed = crate::text_layout::PlacedGlyph {
+                ch,
+                index: char_index,
+                x,
+                y: y - scaled.ascent(),
+            };
+            rasterize_placed_glyph_records(
+                dst,
+                1,
+                &[placed],
+                node.size.max(12.0),
+                color,
+                &|_| None,
+                Some(effect),
+            );
+            x += advance;
+            char_index += 1;
+            continue;
+        }
         let glyph = glyph_id.with_scale_and_position(scale, point(x, y));
-        if let Some((shadow_x, shadow_y, shadow_alpha)) = resolve_text_shadow(shadow, node.size) {
+        if let Some(effect) = message_effect {
+            let shadow_color = [
+                ((effect.rgb >> 16) & 0xff) as f32 / 255.0,
+                ((effect.rgb >> 8) & 0xff) as f32 / 255.0,
+                (effect.rgb & 0xff) as f32 / 255.0,
+                color[3] * effect.concentration as f32 / 256.0,
+            ];
+            draw_glyph(
+                dst,
+                font,
+                glyph.clone(),
+                shadow_color,
+                effect.dx,
+                effect.dy,
+                bold,
+                italic,
+                clip,
+            );
+        } else if let Some((shadow_x, shadow_y, shadow_alpha)) =
+            resolve_text_shadow(default_shadow, node.size)
+        {
             draw_glyph(
                 dst,
                 font,
@@ -504,7 +548,17 @@ pub(crate) fn draw_text_node(
     }
 
     for (ruby, x, y, size) in crate::text::ruby_draw_runs(node, layout) {
-        draw_text_run(dst, font, &ruby, x, y, size, node.color, shadow, clip);
+        draw_text_run(
+            dst,
+            font,
+            &ruby,
+            x,
+            y,
+            size,
+            node.color,
+            default_shadow,
+            clip,
+        );
     }
 }
 
@@ -842,6 +896,15 @@ pub(crate) fn rasterize_placed_glyphs(
             ),
         }
     }
+}
+
+/// How a text node's shadow is drawn: the process-wide drop shadow (x and y
+/// as percent of the font size, concentration), or the style that a
+/// 92:90/92:91 message call gave the node's window (`None`: no shadow).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TextNodeShadow {
+    Default(Option<(i32, i32, i32)>),
+    Message(Option<TextShadow>),
 }
 
 /// The shadow style of the target text layout (`sub_434E30`): `mode` 1 is a
@@ -1524,10 +1587,55 @@ mod native_compositor_tests {
 
 #[cfg(test)]
 mod styled_text_snapshot_tests {
-    use super::draw_text_node;
+    use super::{TextNodeShadow, TextShadow, draw_text_node};
     use crate::text::{RuntimeFormattedTextLayout, RuntimeTextNode};
     use crate::text_anim::{RuntimeTextStyle, RuntimeTextStyleSpan};
     use ethornell_image::DecodedImage;
+
+    #[test]
+    fn message_glow_draws_a_light_halo_around_dark_text() {
+        let node = RuntimeTextNode {
+            text: "AB".into(),
+            enabled: true,
+            owner_object: None,
+            screen_attached: true,
+            target_surface: None,
+            x: 8.0,
+            y: 8.0,
+            size: 32.0,
+            line_height: 40.0,
+            formatted_layout: false,
+            color: [0.0, 0.0, 0.0, 1.0],
+            z: 0,
+            ruby_spans: Vec::new(),
+            style_spans: Vec::new(),
+        };
+        let layout = RuntimeFormattedTextLayout::plain(&node);
+        let mut image = DecodedImage {
+            width: 128,
+            height: 64,
+            rgba: [128, 128, 128, 255].repeat(128 * 64),
+        };
+        let glow = TextShadow {
+            mode: 2,
+            dx: 1,
+            dy: 1,
+            rgb: 0xffffff,
+            concentration: 192,
+        };
+
+        draw_text_node(
+            &mut image,
+            &node,
+            layout,
+            TextNodeShadow::Message(Some(glow)),
+            None,
+        );
+
+        let pixels = || image.rgba.chunks_exact(4);
+        assert!(pixels().any(|pixel| pixel[0] < 40), "dark glyphs");
+        assert!(pixels().any(|pixel| pixel[0] > 200), "light halo");
+    }
 
     #[test]
     fn cpu_framebuffer_applies_the_same_per_character_color_span() {
@@ -1561,7 +1669,13 @@ mod styled_text_snapshot_tests {
             height: 64,
             rgba: vec![0; 128 * 64 * 4],
         };
-        draw_text_node(&mut image, &node, layout, None, None);
+        draw_text_node(
+            &mut image,
+            &node,
+            layout,
+            TextNodeShadow::Default(None),
+            None,
+        );
         assert!(
             image
                 .rgba
