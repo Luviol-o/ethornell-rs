@@ -993,7 +993,32 @@ mod viewport_tests {
     }
 }
 
+/// Loads the text font: the file named by `ETHORNELL_FONT` when it is set
+/// and usable, else the first usable system font of the candidate list.
+/// Games ask for fonts such as MS Gothic by name, which other systems lack;
+/// a port can point this at a substitute with the same metrics.
 pub fn load_system_cjk_font() -> Result<FontArc> {
+    load_text_font(std::env::var_os("ETHORNELL_FONT"))
+}
+
+fn load_text_font(requested: Option<std::ffi::OsString>) -> Result<FontArc> {
+    if let Some(path) = requested {
+        let path = std::path::PathBuf::from(path);
+        match std::fs::read(&path)
+            .map_err(|err| err.to_string())
+            .and_then(|bytes| FontArc::try_from_vec(bytes).map_err(|err| err.to_string()))
+        {
+            Ok(font) => {
+                tracing::info!(path = %path.display(), "loaded text font from ETHORNELL_FONT");
+                return Ok(font);
+            }
+            Err(err) => tracing::warn!(
+                path = %path.display(),
+                %err,
+                "ETHORNELL_FONT is unusable; using a system font"
+            ),
+        }
+    }
     for path in SYSTEM_CJK_FONT_CANDIDATES {
         let Ok(bytes) = std::fs::read(path) else {
             continue;
@@ -1140,6 +1165,20 @@ const SYSTEM_CJK_FONT_CANDIDATES: &[&str] = &[
 #[cfg(test)]
 mod font_tests {
     use super::*;
+
+    #[test]
+    fn requested_font_file_is_used_and_an_unusable_one_falls_back() {
+        let system = SYSTEM_CJK_FONT_CANDIDATES
+            .iter()
+            .find(|path| std::path::Path::new(path).exists())
+            .expect("a system font");
+        let requested = load_text_font(Some((*system).into())).expect("requested font");
+        assert_ne!(requested.glyph_id('A').0, 0);
+
+        let missing = std::env::temp_dir().join("ethornell-no-such-font.ttf");
+        let fallback = load_text_font(Some(missing.into_os_string())).expect("fallback font");
+        assert_ne!(fallback.glyph_id('\u{65e5}').0, 0);
+    }
 
     #[test]
     fn selected_system_font_contains_japanese_glyphs() {
