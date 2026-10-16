@@ -209,12 +209,7 @@ impl<'w> Renderer<'w> {
             .await
             .map_err(|err| EthornellError::Other(format!("request device failed: {err}")))?;
         let caps = surface.get_capabilities(&adapter);
-        let format = caps
-            .formats
-            .iter()
-            .copied()
-            .find(|format| format.is_srgb())
-            .unwrap_or(caps.formats[0]);
+        let format = gamma_space_surface_format(&caps.formats);
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
@@ -486,7 +481,8 @@ impl<'w> Renderer<'w> {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            // Stored values, not sRGB: see gamma_space_surface_format.
+            format: wgpu::TextureFormat::Rgba8Unorm,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
@@ -874,6 +870,21 @@ impl<'w> Renderer<'w> {
     }
 }
 
+/// The target composites in gamma space: its blends act on the stored 8-bit
+/// values, as the CPU compositor here does. With an sRGB surface and sRGB
+/// textures the GPU blended in linear light instead, which brightens every
+/// partial blend: half-transparent windows over dark scenes, fades and
+/// layered images came out lighter than in the target and than the CPU
+/// captures of the same frames. So the surface and the textures are not
+/// sRGB.
+fn gamma_space_surface_format(formats: &[wgpu::TextureFormat]) -> wgpu::TextureFormat {
+    formats
+        .iter()
+        .copied()
+        .find(|format| !format.is_srgb())
+        .unwrap_or(formats[0])
+}
+
 fn viewport_transform(
     surface_width: f32,
     surface_height: f32,
@@ -954,7 +965,19 @@ mod native_blend_tests {
 
 #[cfg(test)]
 mod viewport_tests {
-    use super::{surface_to_virtual_point, viewport_transform};
+    use super::{gamma_space_surface_format, surface_to_virtual_point, viewport_transform};
+
+    #[test]
+    fn the_surface_format_stores_values_without_srgb_encoding() {
+        let formats = [
+            wgpu::TextureFormat::Bgra8UnormSrgb,
+            wgpu::TextureFormat::Bgra8Unorm,
+        ];
+        assert_eq!(
+            gamma_space_surface_format(&formats),
+            wgpu::TextureFormat::Bgra8Unorm
+        );
+    }
 
     #[test]
     fn hdpi_surface_uses_the_physical_device_scale() {
