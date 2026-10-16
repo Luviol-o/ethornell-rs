@@ -10351,6 +10351,38 @@ mod input_tests {
     }
 
     #[test]
+    fn graph92_89_takes_mode_then_parameter_like_graph90_18() {
+        let manager =
+            ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let mut api = super::RuntimeTraceApi::new(manager);
+        // A half-transparent window background and a copy of a patch of it,
+        // as Wonderful Everyday's scrmsg._bp makes for the name area of a
+        // line without a speaker.
+        let pixel = [90, 100, 110, 128];
+        for (bitmap, key) in [(1086, "test:window-background"), (1084, "test:name-patch")] {
+            api.store_graph_image(
+                key.to_string(),
+                DecodedImage {
+                    width: 4,
+                    height: 2,
+                    rgba: pixel.repeat(4 * 2),
+                },
+            );
+            api.graph_resources
+                .insert(bitmap, RuntimeGraphResource::whole(key.to_string()));
+            api.bitmap_formats.insert(bitmap, 2);
+        }
+
+        let mut copy = [1086, 0, 0, 1084, 128, 0].map(Value::Int).to_vec();
+        call_graph(&mut api, 0x92, 0x89, &mut copy).unwrap();
+
+        assert_eq!(
+            api.graph_images["runtime:bitmap:1086"].rgba,
+            pixel.repeat(4 * 2)
+        );
+    }
+
+    #[test]
     fn graph90_43_materializes_backf_layer_and_motion_fades_it_in() {
         let manager =
             ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
@@ -23246,14 +23278,20 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                 );
             }
             (0x92, 0x89) => {
-                let blend_mode = pop_int_value(stack).unwrap_or_default();
-                let opacity = pop_int_value(stack).unwrap_or_default();
+                // Source order `(object, x, y, resource, mode, parameter)`,
+                // the final pair as in Graph90:18: the system scripts pass
+                // `(1, 0)` to blend and `(128, 0)` to copy. scrmsg._bp
+                // restores the name area with a copy of the window
+                // background under it; blended, that copy doubled the
+                // background's coverage there.
+                let parameter = pop_int_value(stack).unwrap_or_default();
+                let mode = pop_int_value(stack).unwrap_or_default();
                 let resource = pop_int_value(stack).unwrap_or_default();
                 let y = pop_int_value(stack).unwrap_or_default();
                 let x = pop_int_value(stack).unwrap_or_default();
                 let work_surface = pop_int_value(stack).unwrap_or_default();
                 let composited = self
-                    .composite_graph_bitmap(work_surface, resource, x, y, blend_mode, opacity)
+                    .composite_graph_bitmap(work_surface, resource, x, y, mode, parameter)
                     .is_some();
                 if composited {
                     self.refresh_bitmap_nodes(work_surface);
@@ -23267,8 +23305,8 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                     x,
                     y,
                     resource,
-                    opacity,
-                    blend_mode,
+                    mode,
+                    parameter,
                     composited,
                     "GraphDrawResourceToSurface"
                 );
