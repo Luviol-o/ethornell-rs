@@ -8361,25 +8361,134 @@ fn parse_env_point(x_key: &str, y_key: &str) -> Option<(f32, f32)> {
     Some((x, y))
 }
 
+/// The target's WndProc hands every WM_KEYDOWN/WM_KEYUP to its input records
+/// (sub_46DA80/sub_46DB00) with the Windows virtual-key code as descriptor,
+/// and scripts bind input classes to those codes with Sys80:1B (Wonderful
+/// Everyday: Ctrl and Space hold the skip gate, Escape cancels, Page Up/Down
+/// scroll).
 fn input_descriptor_for_keycode(code: KeyCode) -> Option<i32> {
-    match code {
-        KeyCode::ArrowLeft => Some(INPUT_DESCRIPTOR_LEFT),
-        KeyCode::ArrowUp => Some(INPUT_DESCRIPTOR_UP),
-        KeyCode::ArrowRight => Some(INPUT_DESCRIPTOR_RIGHT),
-        KeyCode::ArrowDown => Some(INPUT_DESCRIPTOR_DOWN),
-        KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::Space => Some(INPUT_DESCRIPTOR_ENTER),
-        _ => None,
-    }
+    let descriptor = match code {
+        KeyCode::Backspace => 0x08,
+        KeyCode::Tab => 0x09,
+        KeyCode::Enter | KeyCode::NumpadEnter => INPUT_DESCRIPTOR_ENTER,
+        KeyCode::ShiftLeft | KeyCode::ShiftRight => 0x10,
+        KeyCode::ControlLeft | KeyCode::ControlRight => 0x11,
+        KeyCode::AltLeft | KeyCode::AltRight => 0x12,
+        KeyCode::Pause => 0x13,
+        KeyCode::CapsLock => 0x14,
+        KeyCode::Escape => 0x1B,
+        KeyCode::Space => 0x20,
+        KeyCode::PageUp => 0x21,
+        KeyCode::PageDown => 0x22,
+        KeyCode::End => 0x23,
+        KeyCode::Home => 0x24,
+        KeyCode::ArrowLeft => INPUT_DESCRIPTOR_LEFT,
+        KeyCode::ArrowUp => INPUT_DESCRIPTOR_UP,
+        KeyCode::ArrowRight => INPUT_DESCRIPTOR_RIGHT,
+        KeyCode::ArrowDown => INPUT_DESCRIPTOR_DOWN,
+        KeyCode::Insert => 0x2D,
+        KeyCode::Delete => 0x2E,
+        KeyCode::KeyA => 0x41,
+        KeyCode::KeyB => 0x42,
+        KeyCode::KeyC => 0x43,
+        KeyCode::KeyD => 0x44,
+        KeyCode::KeyE => 0x45,
+        KeyCode::KeyF => 0x46,
+        KeyCode::KeyG => 0x47,
+        KeyCode::KeyH => 0x48,
+        KeyCode::KeyI => 0x49,
+        KeyCode::KeyJ => 0x4A,
+        KeyCode::KeyK => 0x4B,
+        KeyCode::KeyL => 0x4C,
+        KeyCode::KeyM => 0x4D,
+        KeyCode::KeyN => 0x4E,
+        KeyCode::KeyO => 0x4F,
+        KeyCode::KeyP => 0x50,
+        KeyCode::KeyQ => 0x51,
+        KeyCode::KeyR => 0x52,
+        KeyCode::KeyS => 0x53,
+        KeyCode::KeyT => 0x54,
+        KeyCode::KeyU => 0x55,
+        KeyCode::KeyV => 0x56,
+        KeyCode::KeyW => 0x57,
+        KeyCode::KeyX => 0x58,
+        KeyCode::KeyY => 0x59,
+        KeyCode::KeyZ => 0x5A,
+        KeyCode::Digit0 => 0x30,
+        KeyCode::Digit1 => 0x31,
+        KeyCode::Digit2 => 0x32,
+        KeyCode::Digit3 => 0x33,
+        KeyCode::Digit4 => 0x34,
+        KeyCode::Digit5 => 0x35,
+        KeyCode::Digit6 => 0x36,
+        KeyCode::Digit7 => 0x37,
+        KeyCode::Digit8 => 0x38,
+        KeyCode::Digit9 => 0x39,
+        KeyCode::Numpad0 => 0x60,
+        KeyCode::Numpad1 => 0x61,
+        KeyCode::Numpad2 => 0x62,
+        KeyCode::Numpad3 => 0x63,
+        KeyCode::Numpad4 => 0x64,
+        KeyCode::Numpad5 => 0x65,
+        KeyCode::Numpad6 => 0x66,
+        KeyCode::Numpad7 => 0x67,
+        KeyCode::Numpad8 => 0x68,
+        KeyCode::Numpad9 => 0x69,
+        KeyCode::F1 => 0x70,
+        KeyCode::F2 => 0x71,
+        KeyCode::F3 => 0x72,
+        KeyCode::F4 => 0x73,
+        KeyCode::F5 => 0x74,
+        KeyCode::F6 => 0x75,
+        KeyCode::F7 => 0x76,
+        KeyCode::F8 => 0x77,
+        KeyCode::F9 => 0x78,
+        KeyCode::F10 => 0x79,
+        KeyCode::F11 => 0x7A,
+        KeyCode::F12 => 0x7B,
+        KeyCode::NumpadMultiply => 0x6A,
+        KeyCode::NumpadAdd => 0x6B,
+        KeyCode::NumpadSubtract => 0x6D,
+        KeyCode::NumpadDecimal => 0x6E,
+        KeyCode::NumpadDivide => 0x6F,
+        KeyCode::NumLock => 0x90,
+        KeyCode::ScrollLock => 0x91,
+        KeyCode::Semicolon => 0xBA,
+        KeyCode::Equal => 0xBB,
+        KeyCode::Comma => 0xBC,
+        KeyCode::Minus => 0xBD,
+        KeyCode::Period => 0xBE,
+        KeyCode::Slash => 0xBF,
+        KeyCode::Backquote => 0xC0,
+        KeyCode::BracketLeft => 0xDB,
+        KeyCode::Backslash => 0xDC,
+        KeyCode::BracketRight => 0xDD,
+        KeyCode::Quote => 0xDE,
+        _ => return None,
+    };
+    Some(descriptor)
 }
 
+/// Headless key names: the arrows, enter, space, ctrl, shift, escape, tab,
+/// pageup, pagedown, or one letter or digit.
 fn input_descriptor_for_headless_key(key: &str) -> Option<i32> {
     match key {
         "left" | "arrowleft" => Some(INPUT_DESCRIPTOR_LEFT),
         "up" | "arrowup" => Some(INPUT_DESCRIPTOR_UP),
         "right" | "arrowright" => Some(INPUT_DESCRIPTOR_RIGHT),
         "down" | "arrowdown" => Some(INPUT_DESCRIPTOR_DOWN),
-        "enter" | "return" | "space" => Some(INPUT_DESCRIPTOR_ENTER),
-        _ => None,
+        "enter" | "return" => Some(INPUT_DESCRIPTOR_ENTER),
+        "space" => Some(0x20),
+        "ctrl" | "control" => Some(0x11),
+        "shift" => Some(0x10),
+        "escape" | "esc" => Some(0x1B),
+        "tab" => Some(0x09),
+        "pageup" => Some(0x21),
+        "pagedown" => Some(0x22),
+        _ => match key.as_bytes() {
+            [byte @ (b'a'..=b'z' | b'0'..=b'9')] => Some(i32::from(byte.to_ascii_uppercase())),
+            _ => None,
+        },
     }
 }
 
@@ -8896,6 +9005,50 @@ mod input_tests {
 
         SysApi::set_input_latched_state(&mut api, 0);
         assert_eq!(SysApi::query_input_event_bits(&mut api, 1808), 0);
+    }
+
+    #[test]
+    fn keys_reach_the_scripts_as_windows_virtual_keys() {
+        use winit::keyboard::KeyCode;
+
+        for (code, descriptor) in [
+            (KeyCode::Enter, 0x0D),
+            (KeyCode::ControlLeft, 0x11),
+            (KeyCode::ControlRight, 0x11),
+            (KeyCode::Escape, 0x1B),
+            (KeyCode::Space, 0x20),
+            (KeyCode::PageUp, 0x21),
+            (KeyCode::PageDown, 0x22),
+            (KeyCode::ArrowDown, 0x28),
+            (KeyCode::Digit1, 0x31),
+            (KeyCode::KeyA, 0x41),
+            (KeyCode::KeyZ, 0x5A),
+            (KeyCode::F1, 0x70),
+        ] {
+            assert_eq!(super::input_descriptor_for_keycode(code), Some(descriptor));
+        }
+
+        // Wonderful Everyday binds the skip gate to Ctrl and Space (Sys80:1B).
+        let manager =
+            ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let mut api = super::RuntimeTraceApi::new(manager);
+        api.window_focused = true;
+        SysApi::register_input_class_descriptors(&mut api, i32::MIN, &[0x11, 0x20]);
+        SysApi::set_input_master_gate(&mut api, 1);
+        for code in [KeyCode::ControlLeft, KeyCode::Space] {
+            let descriptor = super::input_descriptor_for_keycode(code).unwrap();
+            assert_eq!(SysApi::query_configured_input_gate(&mut api), 0);
+            super::apply_runtime_input_event(
+                &mut api,
+                super::RuntimeInputEvent::KeyPress { descriptor },
+            );
+            assert_eq!(SysApi::query_configured_input_gate(&mut api), 1);
+            super::apply_runtime_input_event(
+                &mut api,
+                super::RuntimeInputEvent::KeyRelease { descriptor },
+            );
+            assert_eq!(SysApi::query_configured_input_gate(&mut api), 0);
+        }
     }
 
     #[test]

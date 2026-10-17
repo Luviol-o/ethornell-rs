@@ -22,6 +22,8 @@ enum HeadlessInputAction {
     Click { x: f32, y: f32 },
     MouseWheel { delta_y: f32 },
     KeyPress { key: String },
+    KeyDown { key: String },
+    KeyUp { key: String },
     ButtonClick { button: i32, x: f32, y: f32 },
 }
 
@@ -90,6 +92,13 @@ impl HeadlessInputScript {
                 ["key", key] if !key.trim().is_empty() => HeadlessInputAction::KeyPress {
                     key: key.trim().to_ascii_lowercase(),
                 },
+                // A key held over the waits between `keydown` and `keyup`.
+                ["keydown", key] if !key.trim().is_empty() => HeadlessInputAction::KeyDown {
+                    key: key.trim().to_ascii_lowercase(),
+                },
+                ["keyup", key] if !key.trim().is_empty() => HeadlessInputAction::KeyUp {
+                    key: key.trim().to_ascii_lowercase(),
+                },
                 _ => return Err(format!("unsupported token `{token}`")),
             };
             actions.push_back(action);
@@ -135,6 +144,12 @@ impl HeadlessInputScript {
                     self.queued_release = Some(HeadlessInputEvent::KeyRelease { key: key.clone() });
                     return Some(HeadlessInputEvent::KeyPress { key });
                 }
+                HeadlessInputAction::KeyDown { key } => {
+                    return Some(HeadlessInputEvent::KeyPress { key });
+                }
+                HeadlessInputAction::KeyUp { key } => {
+                    return Some(HeadlessInputEvent::KeyRelease { key });
+                }
                 HeadlessInputAction::ButtonClick { button, x, y } => {
                     self.queued_release = Some(HeadlessInputEvent::ButtonRelease { button, x, y });
                     return Some(HeadlessInputEvent::ButtonPress { button, x, y });
@@ -159,6 +174,24 @@ mod tests {
         assert!(matches!(
             script.tick(),
             Some(HeadlessInputEvent::KeyRelease { key }) if key == "enter"
+        ));
+        assert!(script.tick().is_none());
+    }
+
+    #[test]
+    fn keydown_and_keyup_hold_a_key_over_the_waits_between_them() {
+        let mut script = HeadlessInputScript::parse("keydown:ctrl,wait:2,keyup:ctrl")
+            .expect("parse input script");
+
+        assert!(matches!(
+            script.tick(),
+            Some(HeadlessInputEvent::KeyPress { key }) if key == "ctrl"
+        ));
+        assert!(script.tick().is_none());
+        assert!(script.tick().is_none());
+        assert!(matches!(
+            script.tick(),
+            Some(HeadlessInputEvent::KeyRelease { key }) if key == "ctrl"
         ));
         assert!(script.tick().is_none());
     }
