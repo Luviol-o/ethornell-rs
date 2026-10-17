@@ -175,6 +175,15 @@ pub(crate) fn compose_runtime_frame_through_priority(
         }
     }
 
+    // A playing DirectShow movie covers the whole frame, text included. It
+    // is not part of the object list, so a bounded capture leaves it out.
+    if maximum_priority.is_none()
+        && let Some(item) = api.directshow_movie_draw_item()
+        && let Some(src) = api.graph_images.get(&item.key)
+    {
+        composite_runtime_item(&mut out, src, &item);
+    }
+
     out
 }
 

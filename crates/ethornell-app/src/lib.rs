@@ -588,6 +588,9 @@ struct RuntimeTraceApi {
     /// Target Sprite input-target list used by Graph90:F8/FA-FD.
     graph_sprite_targets: GraphSpriteTargetRegistry,
     global_movie_handle: Option<i32>,
+    /// Width and height the script gave Graph90:F0 / Graph92:F0 for the
+    /// movie in `global_movie_handle`.
+    global_movie_size: (i32, i32),
     global_movie_volume: i32,
     graph_blob_cache: BTreeMap<(String, String), Vec<u8>>,
     /// Target System91:0B gate: bind the screen bitmap context around each BP tick.
@@ -939,6 +942,7 @@ impl RuntimeTraceApi {
             graph_buriko_movies: BurikoMovieRegistry::default(),
             graph_sprite_targets: GraphSpriteTargetRegistry::default(),
             global_movie_handle: None,
+            global_movie_size: (0, 0),
             global_movie_volume: 128,
             graph_blob_cache: BTreeMap::new(),
             graph91_script_bitmap_context_binding_enabled: false,
@@ -1180,7 +1184,12 @@ impl RuntimeTraceApi {
         self.refresh_bitmap_nodes(bitmap);
     }
 
-    fn open_runtime_movie(&mut self, archive: &str, resource: &str) -> Option<(i32, i32)> {
+    fn open_runtime_movie(
+        &mut self,
+        archive: &str,
+        resource: &str,
+        size: (i32, i32),
+    ) -> Option<(i32, i32)> {
         let bytes = read_runtime_bytes(&self.manager, archive, resource)?;
         let handle = self.alloc_object();
         if self.graph_effects.configure_media(
@@ -1202,7 +1211,52 @@ impl RuntimeTraceApi {
             .set_volume(handle, self.global_movie_volume);
         self.graph_process_handles.insert(handle);
         self.global_movie_handle = Some(handle);
+        self.global_movie_size = size;
         Some((handle, invocation.duration_ms))
+    }
+
+    /// The DirectShow movie of Graph90:F0 / Graph92:F0 while it plays.
+    /// sub_480160 hands the movie to DirectShow, which shows it in the game
+    /// window at the size the script asks for, over everything the game
+    /// draws; it is not an object of the display list (the scripts also stop
+    /// the graph scheduler while it plays). Its frames are decoded into
+    /// `runtime:movie:<handle>`, and the renderers draw them through this
+    /// item on top of the frame. Once the movie has ended the scripts don't
+    /// always close it, so a finished movie is not drawn.
+    pub(crate) fn directshow_movie_draw_item(&self) -> Option<RuntimeGraphDrawItem> {
+        let handle = self.global_movie_handle?;
+        if self.graph_effects.state(handle) != 0 {
+            return None;
+        }
+        let key = format!("runtime:movie:{handle}");
+        let image = self.graph_images.get(&key)?;
+        let (width, height) = match self.global_movie_size {
+            (width, height) if width > 0 && height > 0 => (width as f32, height as f32),
+            _ => (self.screen_width as f32, self.screen_height as f32),
+        };
+        Some(RuntimeGraphDrawItem {
+            owner_object: None,
+            key,
+            x: 0.0,
+            y: 0.0,
+            width,
+            height,
+            src_x: 0.0,
+            src_y: 0.0,
+            src_width: image.width as f32,
+            src_height: image.height as f32,
+            opacity: 1.0,
+            ignore_source_alpha: true,
+            rotation_degrees: 0.0,
+            destination_quad: None,
+            linear_sampling: true,
+            clip: None,
+            // Above every object and text node (renderers add 2 to graph z).
+            z: i32::MAX - 2,
+            blend_mode: 0,
+            order_serial: u64::MAX,
+            hit_id: 0,
+        })
     }
 
     fn create_native_work_bitmap(&mut self, bitmap: i32, priority: Option<i32>) -> bool {
@@ -8628,6 +8682,89 @@ fn native_bitmap_clear_color(color: i32) -> [u8; 4] {
         (value & 0xff) as u8,
         ((value >> 24) & 0xff) as u8,
     ]
+}
+
+#[cfg(test)]
+mod directshow_movie_tests {
+    use super::{DecodedImage, RuntimeTraceApi, graph_effect, snapshot};
+
+    /// A minimal MPEG-1 program stream: one video packet (a sequence header).
+    fn tiny_movie() -> Vec<u8> {
+        let mut stream = vec![0, 0, 1, 0xBA, 0x21, 0, 1, 0, 1, 0x80, 0, 1];
+        let payload = [0, 0, 1, 0xB3, 0x14, 0x00, 0xF0, 0x13];
+        stream.extend_from_slice(&[0, 0, 1, 0xE0]);
+        stream.extend_from_slice(&(payload.len() as u16 + 1).to_be_bytes());
+        stream.push(0x0F);
+        stream.extend_from_slice(&payload);
+        stream.extend_from_slice(&[0, 0, 1, 0xB9]);
+        stream
+    }
+
+    /// Graph90:F0 hands a movie to DirectShow, which shows it over the whole
+    /// game window while it plays. Wonderful Everyday's first movie ran its
+    /// 98 seconds behind a frozen frame because nothing drew it.
+    #[test]
+    fn a_playing_directshow_movie_covers_the_frame() {
+        let manager =
+            ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let mut api = RuntimeTraceApi::new(manager);
+        // The state open_runtime_movie leaves: playing in the global slot,
+        // at the size the script asked for.
+        let handle = api.alloc_object();
+        assert_eq!(
+            api.graph_effects
+                .configure_media(handle, String::new(), "m".into(), &tiny_movie()),
+            0
+        );
+        assert_eq!(api.graph_effects.invoke(handle).status, 0);
+        api.global_movie_handle = Some(handle);
+        api.global_movie_size = (1280, 960);
+        assert!(
+            api.directshow_movie_draw_item().is_none(),
+            "no frame decoded yet"
+        );
+
+        api.store_movie_frame(graph_effect::MovieFrameUpdate {
+            bitmap: handle,
+            image: DecodedImage {
+                width: 4,
+                height: 3,
+                rgba: [200, 100, 50, 255].repeat(12),
+            },
+        });
+        let item = api.directshow_movie_draw_item().expect("the playing movie");
+        assert_eq!(
+            (item.x, item.y, item.width, item.height),
+            (0.0, 0.0, 1280.0, 960.0)
+        );
+        assert_eq!((item.src_width, item.src_height), (4.0, 3.0));
+        let center = |frame: &DecodedImage| {
+            let index = ((frame.height / 2 * frame.width + frame.width / 2) * 4) as usize;
+            frame.rgba[index..index + 3].to_vec()
+        };
+        assert_eq!(
+            center(&snapshot::compose_runtime_frame(&api, true)),
+            [200, 100, 50]
+        );
+        // Not an object of the display list: bounded captures leave it out.
+        assert_eq!(
+            center(&snapshot::compose_runtime_frame_through_priority(
+                &api,
+                true,
+                Some(0)
+            )),
+            [0, 0, 0]
+        );
+
+        // The scripts poll Graph90:F2 until the movie ends and don't always
+        // close it afterwards; a finished movie is not drawn.
+        assert_eq!(api.graph_effects.cancel(handle), 0);
+        assert!(api.directshow_movie_draw_item().is_none());
+        assert_eq!(
+            center(&snapshot::compose_runtime_frame(&api, true)),
+            [0, 0, 0]
+        );
+    }
 }
 
 #[cfg(test)]
@@ -22069,7 +22206,7 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                         "Graph90:F0 invalid movie size {width}x{height}"
                     )));
                 }
-                let opened = self.open_runtime_movie("", &resource);
+                let opened = self.open_runtime_movie("", &resource, (width, height));
                 let duration = opened.map(|(_, duration)| duration).unwrap_or_default();
                 tracing::info!(
                     args = ?summarize_values(&args),
@@ -22156,7 +22293,7 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                         "Graph92:F0 invalid movie size {width}x{height}"
                     )));
                 }
-                let opened = self.open_runtime_movie(&archive, &resource);
+                let opened = self.open_runtime_movie(&archive, &resource, (width, height));
                 let duration = opened.map(|(_, duration)| duration).unwrap_or_default();
                 tracing::info!(
                     args = ?summarize_values(&args),

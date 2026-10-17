@@ -479,6 +479,7 @@ impl ApplicationHandler for WindowApp {
                         return;
                     }
                     frame_draw_items = runtime.api.graph_output_draw_items();
+                    frame_draw_items.extend(runtime.api.directshow_movie_draw_item());
                     for key in frame_draw_items
                         .iter()
                         .map(|item| item.key.as_str())
