@@ -13615,6 +13615,71 @@ mod input_tests {
     }
 
     #[test]
+    fn text_in_a_window_with_a_bold_font_is_drawn_bold() {
+        use super::text_anim::{RuntimeTextStyle, RuntimeTextStyleSpan};
+
+        let manager =
+            ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let mut api = super::RuntimeTraceApi::new(manager);
+        let window = -1_342_177_280;
+        api.graph_surfaces
+            .insert(window, RuntimeSurface::display(window, 640.0, 200.0));
+        let red = RuntimeTextStyle {
+            packed_rgb: Some(0xff_0000),
+            ..RuntimeTextStyle::default()
+        };
+        let node = RuntimeTextNode {
+            text: "abcd".into(),
+            enabled: true,
+            owner_object: Some(window),
+            screen_attached: false,
+            target_surface: Some(window),
+            x: 0.0,
+            y: 0.0,
+            size: 28.0,
+            line_height: 28.0,
+            formatted_layout: false,
+            color: [0.0, 0.0, 0.0, 1.0],
+            z: 0,
+            ruby_spans: Vec::new(),
+            style_spans: vec![RuntimeTextStyleSpan {
+                start_char: 1,
+                end_char: 2,
+                style: red,
+            }],
+        };
+        let span = |start_char, end_char, style| RuntimeTextStyleSpan {
+            start_char,
+            end_char,
+            style,
+        };
+
+        api.surface_text_states
+            .entry(window)
+            .or_default()
+            .font_style = 0;
+        assert_eq!(api.text_node_style_spans(&node), node.style_spans);
+
+        // Wonderful Everyday's message window: font 0, size 28, style 1.
+        api.surface_text_states
+            .entry(window)
+            .or_default()
+            .font_style = 1;
+        let bold = RuntimeTextStyle {
+            bold: true,
+            ..RuntimeTextStyle::default()
+        };
+        assert_eq!(
+            api.text_node_style_spans(&node),
+            [
+                span(0, 1, bold),
+                span(1, 2, RuntimeTextStyle { bold: true, ..red }),
+                span(2, 4, bold),
+            ]
+        );
+    }
+
+    #[test]
     fn formatted_ruby_reserves_the_target_band_without_moving_plain_text() {
         let manager =
             ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();

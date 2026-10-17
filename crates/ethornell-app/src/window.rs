@@ -602,8 +602,9 @@ impl ApplicationHandler for WindowApp {
                         let size = node.size.max(12.0);
                         let mut color = node.color;
                         color[3] *= parent.2;
-                        let styles = node
-                            .style_spans
+                        let styles = runtime
+                            .api
+                            .text_node_style_spans(node)
                             .iter()
                             .map(|span| TextStyleSpan {
                                 start_char: span.start_char,
