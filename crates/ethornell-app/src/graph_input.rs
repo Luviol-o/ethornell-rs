@@ -397,6 +397,15 @@ impl RuntimeGraphInputObject {
         }
     }
 
+    /// sub_448690, after a clicked item is activated (vtable+0x30): with
+    /// DCIPIcon+0x50 set (descriptor root+0x1C, copied by sub_447C10 and
+    /// sub_44A900) the item also becomes its group's current item through
+    /// vtable+0x24, so a chosen option shows as chosen. Returns whether the
+    /// item visuals must be rebuilt.
+    pub(crate) fn select_activated_item(&mut self, region: GraphInputRegion) -> bool {
+        self.descriptor.flags[4] != 0 && self.message_select_item(region.group, region.index)
+    }
+
     pub(crate) fn is_running(&self) -> bool {
         self.active && self.running && self.enabled != 0
     }
