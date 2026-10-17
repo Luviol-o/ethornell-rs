@@ -3,13 +3,15 @@ use kira::dsp::Frame;
 use kira::manager::backend::{Backend, DefaultBackend};
 use kira::manager::{AudioManager, AudioManagerSettings};
 use kira::sound::{
-    PlaybackPosition, PlaybackState,
+    FromFileError, PlaybackPosition, PlaybackState,
     static_sound::{StaticSoundData, StaticSoundHandle, StaticSoundSettings},
+    streaming::{StreamingSoundData, StreamingSoundHandle, StreamingSoundSettings},
 };
 use kira::tween::Tween;
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::io::Cursor;
+use std::sync::Arc;
 use std::time::Duration;
 
 #[derive(Debug, Clone, Serialize)]
@@ -113,6 +115,9 @@ pub struct AudioSystem<B: Backend = DefaultBackend> {
     manager: AudioManager<B>,
     volume: f64,
     channels: BTreeMap<i32, StaticSoundHandle>,
+    /// Channels playing a sound that is decoded while it plays (movie
+    /// soundtracks). A channel is in at most one of the two maps.
+    streams: BTreeMap<i32, StreamingSoundHandle<FromFileError>>,
     next_unmanaged_channel: i32,
     host_suspended: bool,
 }
@@ -137,6 +142,7 @@ impl<B: Backend> AudioSystem<B> {
             manager,
             volume: 1.0,
             channels: BTreeMap::new(),
+            streams: BTreeMap::new(),
             next_unmanaged_channel: i32::MIN,
             host_suspended: false,
         })
@@ -315,7 +321,43 @@ impl<B: Backend> AudioSystem<B> {
         if let Some(mut previous) = self.channels.insert(channel, handle) {
             let _ = previous.stop(Tween::default());
         }
+        if let Some(mut previous) = self.streams.remove(&channel) {
+            let _ = previous.stop(Tween::default());
+        }
         Ok(true)
+    }
+
+    /// Plays `bytes` (any stream Symphonia can probe, such as a movie's MPEG
+    /// audio elementary stream) on `channel`, replacing what the channel
+    /// played. Decoding happens on kira's streaming thread, so a long
+    /// soundtrack neither stalls the caller nor is held decoded in memory.
+    pub fn play_stream_on_channel(
+        &mut self,
+        channel: i32,
+        bytes: Arc<[u8]>,
+        looped: bool,
+        volume: f64,
+        start_ms: u64,
+    ) -> Result<()> {
+        let mut settings = StreamingSoundSettings::default()
+            .volume(volume.clamp(0.0, 1.0))
+            .playback_region(Duration::from_millis(start_ms).as_secs_f64()..);
+        if looped {
+            settings = settings.loop_region(..);
+        }
+        let data = StreamingSoundData::from_cursor(Cursor::new(bytes), settings)
+            .map_err(|err| EthornellError::Other(format!("load audio stream failed: {err}")))?;
+        let handle = self
+            .manager
+            .play(data)
+            .map_err(|err| EthornellError::Other(format!("play audio stream failed: {err}")))?;
+        if let Some(mut previous) = self.channels.remove(&channel) {
+            let _ = previous.stop(Tween::default());
+        }
+        if let Some(mut previous) = self.streams.insert(channel, handle) {
+            let _ = previous.stop(Tween::default());
+        }
+        Ok(())
     }
 
     pub fn stop_all(&mut self) {
@@ -323,9 +365,20 @@ impl<B: Backend> AudioSystem<B> {
             let _ = handle.stop(Tween::default());
         }
         self.channels.clear();
+        for handle in self.streams.values_mut() {
+            let _ = handle.stop(Tween::default());
+        }
+        self.streams.clear();
     }
 
     pub fn stop_channel(&mut self, channel: i32, fade_out_ms: u64) {
+        if let Some(handle) = self.streams.get_mut(&channel) {
+            let _ = handle.stop(Tween {
+                duration: Duration::from_millis(fade_out_ms),
+                ..Tween::default()
+            });
+            return;
+        }
         let Some(handle) = self.channels.get_mut(&channel) else {
             return;
         };
@@ -340,22 +393,39 @@ impl<B: Backend> AudioSystem<B> {
     }
 
     pub fn try_pause_channel(&mut self, channel: i32, paused: bool, fade_ms: u64) -> Result<()> {
-        let Some(handle) = self.channels.get_mut(&channel) else {
-            return Ok(());
-        };
         let tween = Tween {
             duration: Duration::from_millis(fade_ms),
             ..Tween::default()
         };
-        let result = if paused {
-            handle.pause(tween)
+        let result = if let Some(handle) = self.streams.get_mut(&channel) {
+            if paused {
+                handle.pause(tween)
+            } else {
+                handle.resume(tween)
+            }
+        } else if let Some(handle) = self.channels.get_mut(&channel) {
+            if paused {
+                handle.pause(tween)
+            } else {
+                handle.resume(tween)
+            }
         } else {
-            handle.resume(tween)
+            return Ok(());
         };
         result.map_err(|err| EthornellError::Other(format!("audio channel pause failed: {err}")))
     }
 
     pub fn set_channel_volume(&mut self, channel: i32, volume: f64, fade_ms: u64) {
+        if let Some(handle) = self.streams.get_mut(&channel) {
+            let _ = handle.set_volume(
+                volume.clamp(0.0, 1.0),
+                Tween {
+                    duration: Duration::from_millis(fade_ms),
+                    ..Tween::default()
+                },
+            );
+            return;
+        }
         let Some(handle) = self.channels.get_mut(&channel) else {
             return;
         };
@@ -369,6 +439,16 @@ impl<B: Backend> AudioSystem<B> {
     }
 
     pub fn set_channel_panning(&mut self, channel: i32, panning: f64, fade_ms: u64) {
+        if let Some(handle) = self.streams.get_mut(&channel) {
+            let _ = handle.set_panning(
+                panning.clamp(0.0, 1.0),
+                Tween {
+                    duration: Duration::from_millis(fade_ms),
+                    ..Tween::default()
+                },
+            );
+            return;
+        }
         let Some(handle) = self.channels.get_mut(&channel) else {
             return;
         };
@@ -382,6 +462,9 @@ impl<B: Backend> AudioSystem<B> {
     }
 
     pub fn channel_is_active(&self, channel: i32) -> bool {
+        if let Some(handle) = self.streams.get(&channel) {
+            return handle.state() != PlaybackState::Stopped;
+        }
         self.channels
             .get(&channel)
             .is_some_and(|handle| handle.state() != PlaybackState::Stopped)
