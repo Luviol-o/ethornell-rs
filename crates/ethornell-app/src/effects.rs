@@ -165,6 +165,7 @@ impl RuntimeEffects {
                 let direction_x = effect.direction[0] as f32 / 256.0;
                 let direction_y = effect.direction[1] as f32 / 256.0;
                 instances.push(RainDrawInstance {
+                    handle: effect.handle,
                     resource_id: effect.texture,
                     x: effect.display[0] as f32
                         + effect.origin[0] as f32 / 256.0
@@ -879,6 +880,7 @@ pub(crate) enum EffectCall {
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct RainDrawInstance {
+    pub(crate) handle: i32,
     pub(crate) resource_id: i32,
     pub(crate) x: f32,
     pub(crate) y: f32,

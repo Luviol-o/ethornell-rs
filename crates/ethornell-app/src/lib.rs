@@ -7248,6 +7248,14 @@ impl RuntimeTraceApi {
             let Some((key, region)) = self.resource_image_region(rain.resource_id) else {
                 continue;
             };
+            // A rain screen is a display object: Graph90 fades (90:22) and
+            // priority changes (90:3A) act on its object state.
+            let opacity = self
+                .graph_object_properties
+                .get(&rain.handle)
+                .map(RuntimeGraphObjectProperties::opacity)
+                .unwrap_or(rain.opacity);
+            let z = self.display_tree.chain_depth(rain.handle).unwrap_or(rain.z);
             let Some(image) = self.graph_images.get(key) else {
                 continue;
             };
@@ -7263,7 +7271,7 @@ impl RuntimeTraceApi {
                 .min(region.height)
                 .min(image.height as f32 - src_y)
                 .max(0.0);
-            if src_width <= 0.0 || src_height <= 0.0 || rain.opacity <= 0.001 {
+            if src_width <= 0.0 || src_height <= 0.0 || opacity <= 0.001 {
                 continue;
             }
             items.push(RuntimeGraphDrawItem {
@@ -7277,13 +7285,13 @@ impl RuntimeTraceApi {
                 src_y,
                 src_width,
                 src_height,
-                opacity: rain.opacity,
+                opacity,
                 ignore_source_alpha: false,
                 rotation_degrees: 0.0,
                 destination_quad: None,
                 linear_sampling: true,
                 clip: None,
-                z: rain.z,
+                z,
                 blend_mode: rain.blend_mode,
                 order_serial: rain.order_serial,
                 hit_id: 0,
@@ -8495,6 +8503,101 @@ fn native_bitmap_clear_color(color: i32) -> [u8; 4] {
         (value & 0xff) as u8,
         ((value >> 24) & 0xff) as u8,
     ]
+}
+
+#[cfg(test)]
+mod rain_screen_tests {
+    use super::graph::RuntimeGraphResource;
+    use super::{DecodedImage, RuntimeTraceApi};
+    use ethornell_vm::{NativeCallFrame, NativeOpcode, Value};
+
+    /// One native call with its arguments in script order.
+    fn call(
+        api: &mut RuntimeTraceApi,
+        group: u8,
+        id: u16,
+        args: &[i32],
+    ) -> ethornell_vm::VmResult<Option<Value>> {
+        let mut call = NativeCallFrame::new(
+            NativeOpcode { group, id },
+            args.iter().copied().map(Value::Int).collect(),
+        );
+        if group == 0x90 {
+            ethornell_vm::GraphApi::call_graph(api, &mut call).map(Some)
+        } else {
+            ethornell_vm::SoundApi::call_user(api, &mut call)
+        }
+    }
+
+    /// (opacity, z) of every rain drop drawn.
+    fn rain_drops(api: &RuntimeTraceApi) -> Vec<(f32, i32)> {
+        api.graph_draw_items()
+            .iter()
+            .filter(|item| item.key == "test:rain-drop")
+            .map(|item| (item.opacity, item.z))
+            .collect()
+    }
+
+    /// Wonderful Everyday's scene scripts (`scrgrp1._bp`) create a rain
+    /// screen, fade it in and out with Graph90:22 and reorder it with
+    /// Graph90:3A. The rain screen was no object for Graph90, so the first
+    /// rain scene stopped the VM ("object #-1056964608 is not registered").
+    #[test]
+    fn a_rain_screen_takes_graph90_fades_and_priority() {
+        let manager =
+            ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let mut api = RuntimeTraceApi::new(manager);
+        api.store_graph_image(
+            "test:rain-drop".to_string(),
+            DecodedImage {
+                width: 4,
+                height: 16,
+                rgba: vec![255; 4 * 16 * 4],
+            },
+        );
+        api.graph_resources.insert(
+            30_001,
+            RuntimeGraphResource::whole("test:rain-drop".to_string()),
+        );
+
+        // As `rainfall._bp`: create, initialise, drop size, texture, enable,
+        // then ConfigureRainDisplay(x, y, z, blend, alpha) fully transparent.
+        let rain = match call(&mut api, 0xC0, 0x40, &[1280, 960]).unwrap() {
+            Some(Value::Int(handle)) => handle,
+            other => panic!("rain screen not created: {other:?}"),
+        };
+        assert_eq!(rain as u32, 0xC100_0000);
+        call(&mut api, 0xC0, 0x42, &[rain, 16]).unwrap();
+        call(&mut api, 0xC0, 0x47, &[rain, 4]).unwrap();
+        call(&mut api, 0xC0, 0x48, &[rain, 16]).unwrap();
+        call(&mut api, 0xC0, 0x43, &[rain, 30_001]).unwrap();
+        call(&mut api, 0xC0, 0x44, &[rain, 1]).unwrap();
+        call(&mut api, 0xC0, 0x45, &[rain, 0, 0, 40, 1, 256]).unwrap();
+        assert!(rain_drops(&api).is_empty(), "transparent rain is not drawn");
+
+        call(&mut api, 0x90, 0x3A, &[rain, 70]).unwrap();
+        // Fade in: object, alpha, duration, update denominator and
+        // numerator, input enabled, input scope.
+        call(&mut api, 0x90, 0x22, &[rain, 0, 250, 250, 0, 0, 113]).unwrap();
+        let control_id = *api.native_control_last_poll_ms.keys().max().unwrap();
+        api.engine_time_ms += 1000;
+        ethornell_vm::GraphApi::poll_native_graph_control_procedure(
+            &mut api,
+            NativeOpcode {
+                group: 0x90,
+                id: 0x22,
+            },
+            rain,
+            control_id,
+        );
+        let drops = rain_drops(&api);
+        assert!(!drops.is_empty(), "faded-in rain is drawn");
+        assert!(drops.iter().all(|&(opacity, z)| opacity == 1.0 && z == 70));
+
+        call(&mut api, 0xC0, 0x41, &[rain]).unwrap();
+        assert!(rain_drops(&api).is_empty());
+        assert!(!api.graph_handle_exists(rain));
+    }
 }
 
 #[cfg(test)]

@@ -424,12 +424,14 @@ impl RuntimeTraceApi {
                     _ => unreachable!(),
                 };
                 let args = pop_args(stack, count);
-                match self.effects.call(group, id, &args) {
-                    crate::effects::EffectCall::Handled(result) => result
-                        .map(ethornell_vm::Value::Int)
-                        .unwrap_or(ethornell_vm::Value::None),
-                    crate::effects::EffectCall::Unhandled => ethornell_vm::Value::None,
-                }
+                let result = match self.effects.call(group, id, &args) {
+                    crate::effects::EffectCall::Handled(result) => result,
+                    crate::effects::EffectCall::Unhandled => None,
+                };
+                self.sync_rain_screen_object(id, &args, result);
+                result
+                    .map(ethornell_vm::Value::Int)
+                    .unwrap_or(ethornell_vm::Value::None)
             }
             0xC0 => ethornell_vm::Value::Int(self.native_effect.create_spline()),
             0xC1 => {
@@ -454,6 +456,52 @@ impl RuntimeTraceApi {
             _ => return None,
         };
         Some(Ok(value))
+    }
+
+    /// A rain screen (UserC0:40, tag 0xC1) is a display object like a
+    /// particle screen (UserC0:00): scripts fade it with Graph90:22 and
+    /// reorder it with Graph90:3A, so it is registered with the display tree
+    /// and its enabled state, depth, blend mode and alpha live in the object
+    /// state those calls act on. `popped` is in reverse-pop order, so the
+    /// handle (the first script argument) is last.
+    fn sync_rain_screen_object(
+        &mut self,
+        id: u16,
+        popped: &[ethornell_vm::Value],
+        created: Option<i32>,
+    ) {
+        let handle = popped.last().map(value_to_i32).unwrap_or_default();
+        match id {
+            0x40 => {
+                if let Some(handle) = created.filter(|handle| *handle != 0) {
+                    self.display_tree.register_inferred(handle);
+                    self.graph_object_enabled.insert(handle, true);
+                    self.graph_object_properties.entry(handle).or_default();
+                }
+            }
+            _ if NativeDisplayKind::from_handle(handle) != NativeDisplayKind::RainScreen
+                || !self.display_tree.contains(handle) => {}
+            0x41 => {
+                self.remove_graph_object(handle);
+            }
+            0x44 => {
+                let enabled = popped.first().map(value_to_i32).unwrap_or_default() != 0;
+                self.set_graph_object_enabled(handle, enabled);
+            }
+            0x45 => {
+                let values = popped.iter().rev().map(value_to_i32).collect::<Vec<_>>();
+                if let [_, _, _, z, blend, alpha] = values.as_slice()
+                    && is_native_blend_mode(*blend)
+                    && (0..=256).contains(alpha)
+                {
+                    let properties = self.graph_object_properties.entry(handle).or_default();
+                    properties.blend_mode = *blend;
+                    properties.set_alpha_parameter(*alpha);
+                    self.display_tree.set_chain_depth(handle, *z);
+                }
+            }
+            _ => {}
+        }
     }
 }
 
