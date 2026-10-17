@@ -7475,12 +7475,11 @@ impl Vm {
     fn alloc_heap(&mut self, size: u32) -> u32 {
         let size = size.max(4).saturating_add(3) & !3;
         let previous_heap_ptr = self.heap_ptr;
-        let offset = if let Some(index) =
-            self.heap_free_blocks
-                .iter()
-                .position(|(offset, available)| {
-                    *available >= size && Self::heap_block_fits_segment(*offset, size)
-                }) {
+        let offset = if let Some(index) = self
+            .heap_free_blocks
+            .iter()
+            .position(|&(offset, available)| Self::heap_free_block_takes(offset, available, size))
+        {
             let (offset, available) = self.heap_free_blocks[index];
             if available == size {
                 self.heap_free_blocks.remove(index);
@@ -7502,16 +7501,16 @@ impl Vm {
                     .checked_add(*next)
                     .is_some_and(|physical_end| physical_end as usize <= MAX_MEMORY_SIZE)
             }) else {
-                if std::env::var_os("TRACE_HEAP").is_some() {
-                    tracing::warn!(
-                        thread = self.thread.thread_id(),
-                        requested = size,
-                        heap_ptr = format_args!("0x{:08X}", self.heap_ptr),
-                        allocation_count = self.heap_allocations.len(),
-                        free_block_count = self.heap_free_blocks.len(),
-                        "VM heap allocation exhausted the tagged address space"
-                    );
-                }
+                // Scripts written for the target's process heap don't check
+                // for a null block, so this is worth seeing in any log.
+                tracing::warn!(
+                    thread = self.thread.thread_id(),
+                    requested = size,
+                    heap_ptr = format_args!("0x{:08X}", self.heap_ptr),
+                    allocation_count = self.heap_allocations.len(),
+                    free_block_count = self.heap_free_blocks.len(),
+                    "VM heap allocation exhausted the tagged address space"
+                );
                 return 0;
             };
             self.heap_ptr = next;
@@ -7580,6 +7579,29 @@ impl Vm {
             );
         }
         true
+    }
+
+    /// Whether the free block at `offset` can take a request of `size`.
+    /// A request larger than a segment starts on a segment boundary, as a
+    /// new one does (`heap_block_fits_segment` never holds for it), so it
+    /// can take a free block of that kind. Such blocks are kept for such
+    /// requests: a small block carved from their start would leave no
+    /// aligned space, and each large request would then take new address
+    /// space. Wonderful Everyday's save routine allocates (400 + 1) * 88124
+    /// bytes, a little over a segment, and frees it every time; without the
+    /// reuse each save took two more segments and the fourth one got a null
+    /// block, which the script then filled from address 0 over the globals.
+    fn heap_free_block_takes(offset: u32, available: u32, size: u32) -> bool {
+        if available < size {
+            return false;
+        }
+        let large_aligned =
+            available > AUX_MEMORY_SEGMENT_SIZE && offset % AUX_MEMORY_SEGMENT_SIZE == 0;
+        if size > AUX_MEMORY_SEGMENT_SIZE {
+            large_aligned
+        } else {
+            !large_aligned && Self::heap_block_fits_segment(offset, size)
+        }
     }
 
     fn heap_block_fits_segment(offset: u32, size: u32) -> bool {
@@ -14852,6 +14874,30 @@ mod tests {
         assert_eq!(combined, first);
         assert!(!vm.free_heap(second));
         assert!(vm.free_heap(combined));
+    }
+
+    #[test]
+    fn native_heap_reuses_a_freed_block_larger_than_a_segment() {
+        // Wonderful Everyday's userdata._bp allocates this block for every
+        // save and frees it afterwards.
+        const SAVE_HISTORY: u32 = (400 + 1) * 88124;
+        let mut vm = Vm::new();
+        let first = vm.alloc_heap(SAVE_HISTORY);
+        assert_ne!(first, 0);
+        assert_eq!(first & ADDRESS_MASK, 0);
+        let heap_ptr = vm.heap_ptr;
+        assert!(vm.free_heap(first));
+        // Small blocks don't take the freed large one apart.
+        let small = vm.alloc_heap(64);
+        assert_ne!(small, first);
+
+        for _ in 0..16 {
+            let block = vm.alloc_heap(SAVE_HISTORY);
+            assert_eq!(block, first);
+            assert!(vm.free_heap(block));
+        }
+        assert_eq!(vm.heap_ptr, heap_ptr + 64);
+        assert!(vm.free_heap(small));
     }
 
     #[test]
