@@ -673,6 +673,15 @@ struct RuntimeTraceApi {
     scenario_bootstrapped: bool,
     native_message_active: bool,
     native_message_surface_target: Option<i32>,
+    /// Port option (`ETHORNELL_SKIP_HIDES_MESSAGE_WINDOW`): hide the message
+    /// window while the skip key is held and lines are being skipped.
+    skip_hides_message_window: bool,
+    /// The window the last line was drawn into at once (Graph92:91, how the
+    /// scripts show a skipped line), until a line is typed out again or the
+    /// skip key is let go.
+    skipped_line_window: Option<i32>,
+    /// Surfaces hidden this frame for skipping.
+    skip_hidden_surfaces: BTreeSet<i32>,
     pending_scenario_bootstrap: Option<(String, String, Vec<u8>)>,
     scenario_playback: Option<ScenarioPlayback>,
     scenario_input_latched: bool,
@@ -1000,6 +1009,10 @@ impl RuntimeTraceApi {
             scenario_bootstrapped: false,
             native_message_active: false,
             native_message_surface_target: None,
+            skip_hides_message_window: std::env::var_os("ETHORNELL_SKIP_HIDES_MESSAGE_WINDOW")
+                .is_some(),
+            skipped_line_window: None,
+            skip_hidden_surfaces: BTreeSet::new(),
             pending_scenario_bootstrap: None,
             scenario_playback: None,
             scenario_input_latched: false,
@@ -5374,7 +5387,53 @@ impl RuntimeTraceApi {
         self.audio_requests.extend(commands);
     }
 
+    /// Port option: while the skip key is held and lines go by drawn at
+    /// once, the message window and the windows grouped with it are hidden
+    /// (Wonderful Everyday draws the speaker's name into the window), so a
+    /// skipped scene shows its pictures rather than a window flashing with
+    /// every line. The window comes back when the key is let go or a line is
+    /// typed out again (skipping stopped at an unread line).
+    fn update_skip_hidden_surfaces(&mut self) {
+        self.skip_hidden_surfaces.clear();
+        if !self.skip_hides_message_window {
+            return;
+        }
+        if !self.skip_key_held() {
+            self.skipped_line_window = None;
+            return;
+        }
+        let Some(window) = self.skipped_line_window else {
+            return;
+        };
+        match self
+            .graph_native_owners
+            .get(&window)
+            .and_then(|group| self.graph_groups.get(group))
+        {
+            Some(group) => self.skip_hidden_surfaces.extend(group.members.keys()),
+            None => {
+                self.skip_hidden_surfaces.insert(window);
+            }
+        }
+    }
+
+    /// Whether a key of the configured skip class (Sys80:1B class i32::MIN,
+    /// the one Sys80:17 polls) is down.
+    fn skip_key_held(&self) -> bool {
+        self.window_focused
+            && self.input_configuration_enabled != 0
+            && self
+                .configured_input_classes
+                .get(&i32::MIN)
+                .is_some_and(|descriptors| {
+                    descriptors
+                        .iter()
+                        .any(|descriptor| self.input_down_descriptors.contains(descriptor))
+                })
+    }
+
     fn tick_timelines(&mut self, elapsed_ms: u64) {
+        self.update_skip_hidden_surfaces();
         self.graph_flash_controls.tick(elapsed_ms);
         self.tick_native_user_state(elapsed_ms);
         self.tick_native_effect_state(elapsed_ms);
@@ -7504,7 +7563,7 @@ impl RuntimeTraceApi {
         let mut current = Some(surface);
         let mut visited = BTreeSet::new();
         while let Some(id) = current {
-            if !visited.insert(id) {
+            if !visited.insert(id) || self.skip_hidden_surfaces.contains(&id) {
                 return 0.0;
             }
             let Some(record) = self.graph_surfaces.get(&id) else {
@@ -13765,6 +13824,53 @@ mod input_tests {
         let plain_layout = api.formatted_text_layout(&node);
         assert_eq!(plain_layout.body_y_offset, 0.0);
         assert!(ruby_draw_runs(&node, plain_layout).is_empty());
+    }
+
+    #[test]
+    fn skipping_hides_the_message_window_when_the_option_is_on() {
+        let manager =
+            ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let mut api = super::RuntimeTraceApi::new(manager);
+        api.skip_hides_message_window = true;
+        let window = 12_346;
+        api.graph_surfaces
+            .insert(window, RuntimeSurface::display(window, 400.0, 100.0));
+        let ctrl = 0x11;
+        api.configured_input_classes.insert(i32::MIN, vec![ctrl]);
+        let draw_line_at_once = |api: &mut super::RuntimeTraceApi| {
+            let mut args = vec![Value::Int(window), Value::Str("line".into())];
+            args.extend((0..9).map(|_| Value::Int(0)));
+            call_graph(api, 0x92, 0x91, &mut args).unwrap();
+        };
+        let shown = |api: &super::RuntimeTraceApi| {
+            api.surface_display_chain_visible(window, &api.graph_surfaces[&window])
+        };
+
+        draw_line_at_once(&mut api);
+        api.tick_timelines(16);
+        assert!(shown(&api), "a line drawn at once without the skip key");
+
+        api.input_down_descriptors.insert(ctrl);
+        draw_line_at_once(&mut api);
+        api.tick_timelines(16);
+        assert!(!shown(&api), "skipping");
+
+        api.start_native_message("typed".into(), Some(window));
+        api.tick_timelines(16);
+        assert!(shown(&api), "a typed line: skipping stopped");
+
+        draw_line_at_once(&mut api);
+        api.tick_timelines(16);
+        assert!(!shown(&api));
+        api.input_down_descriptors.remove(&ctrl);
+        api.tick_timelines(16);
+        assert!(shown(&api), "skip key let go");
+
+        api.skip_hides_message_window = false;
+        api.input_down_descriptors.insert(ctrl);
+        draw_line_at_once(&mut api);
+        api.tick_timelines(16);
+        assert!(shown(&api), "option off");
     }
 
     #[test]
@@ -23214,6 +23320,7 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                     let parsed = text::parse_and_wrap_styled_message(text, &state);
                     let x = state.x;
                     let y = state.y;
+                    self.skipped_line_window = Some(target);
                     self.store_bitmap_text_run(
                         target,
                         RuntimeTextNode {
