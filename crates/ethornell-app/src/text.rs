@@ -1018,6 +1018,7 @@ impl RuntimeTraceApi {
     ) -> i32 {
         let state = self.window_text_state(target_surface);
         let parsed = self.parse_message_with_registry(&text, &state);
+        self.skipped_line_window = None;
         // The target wrapper installs CProcDspMsg even for an empty or
         // control-only string. In particular, a lone 0x0A is a zero-delay
         // layout control, not a synthetic one-glyph message.
