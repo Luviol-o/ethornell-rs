@@ -562,6 +562,9 @@ struct RuntimeTraceApi {
     graph_groups: BTreeMap<i32, GraphGroupState>,
     graph_native_owners: BTreeMap<i32, i32>,
     surface_controls: SurfaceControlRegistry,
+    /// Frames run so far (RuntimeEngine::run_frame); dates released icon
+    /// processor items, see `release_graph_input_control_layers`.
+    control_frame: u64,
     graph_default_priority: i32,
     graph_driver_mode: i32,
     /// Target 90:0A globals: enable automatic redraw after object updates and
@@ -932,6 +935,7 @@ impl RuntimeTraceApi {
             graph_groups: BTreeMap::new(),
             graph_native_owners: BTreeMap::new(),
             surface_controls: SurfaceControlRegistry::default(),
+            control_frame: 0,
             graph_default_priority: 0,
             graph_driver_mode: 0,
             graph_object_update_redraw_enabled: false,
@@ -6223,6 +6227,12 @@ impl RuntimeTraceApi {
         surface: i32,
         descriptor: &ethornell_vm::GraphInputDescriptor,
     ) -> usize {
+        // A new layout on the window replaces the items a released processor
+        // left there (release_graph_input_control_layers).
+        for layer in self.surface_controls.take_released_on_surface(surface) {
+            self.graph_layers.remove(&layer);
+            self.release_screen_text_node(layer);
+        }
         // A descriptor can be installed before every referenced bitmap has
         // become materializable in the portable resource cache. Target
         // sub_447C10/sub_44A900 keeps the logical item records even when one
@@ -6427,6 +6437,29 @@ impl RuntimeTraceApi {
         for layer in self
             .surface_controls
             .remove_owner(SurfaceControlOwner::InputObject(object))
+        {
+            self.graph_layers.remove(&layer);
+            self.release_screen_text_node(layer);
+        }
+    }
+
+    /// Graph90:B9 deletes the processor and its item Sprites (sub_44A8A0).
+    /// Port behaviour, not the target's: the items stay drawn, no longer
+    /// hit-tested, until their window gets a new layout or the next frame's
+    /// script pass ends. Scripts rebuild a processor by releasing it,
+    /// yielding a frame and configuring a new one on the same window
+    /// (Wonderful Everyday's message button bar after every click and line),
+    /// and that frame showed the window without its buttons.
+    fn release_graph_input_control_layers(&mut self, object: i32) {
+        self.surface_controls
+            .release_owner(SurfaceControlOwner::InputObject(object), self.control_frame);
+    }
+
+    /// Ends the frame's grace for items released before this frame.
+    fn expire_released_control_layers(&mut self) {
+        for layer in self
+            .surface_controls
+            .take_released_before(self.control_frame)
         {
             self.graph_layers.remove(&layer);
             self.release_screen_text_node(layer);
@@ -8478,7 +8511,9 @@ impl RuntimeEngine {
             };
         }
 
+        self.api.control_frame = self.api.control_frame.wrapping_add(1);
         let report = self.run_native_pass(pacing, elapsed_ms);
+        self.api.expire_released_control_layers();
         // Input edges are visible for one cooperative main-loop pass.
         self.api.finish_native_tick_input();
         self.api.sync_display_tree_from_runtime();
@@ -17117,6 +17152,103 @@ mod input_tests {
     }
 
     #[test]
+    fn released_icon_items_stay_drawn_until_a_new_layout_or_the_next_frame() {
+        // Wonderful Everyday's message button bar: after a click the script
+        // releases the processor (Graph90:B9), yields a frame and configures
+        // a new one on the same window.
+        let manager =
+            ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let mut api = super::RuntimeTraceApi::new(manager);
+        let surface = 20_031;
+        let bitmap = 1925;
+        api.store_graph_image(
+            "test:bar-button".to_string(),
+            DecodedImage {
+                width: 40,
+                height: 24,
+                rgba: vec![255; 40 * 24 * 4],
+            },
+        );
+        api.graph_resources.insert(
+            bitmap,
+            RuntimeGraphResource::whole("test:bar-button".to_string()),
+        );
+        api.graph_surfaces
+            .insert(surface, RuntimeSurface::display(surface, 320.0, 120.0));
+        let button = |index: i32, x: i32| GraphInputRegion {
+            group: 0,
+            index,
+            ordinal: index,
+            enabled_depth: 1,
+            selected: false,
+            x,
+            y: 20,
+            width: 40,
+            height: 24,
+            normal_resource: bitmap,
+            selected_resource: bitmap,
+            hover_resource: -1,
+            hover_selected_resource: -1,
+            mask_resource: -1,
+            current_selection_hit_excluded: false,
+            flags: 0,
+        };
+        let configure = |api: &mut super::RuntimeTraceApi, object: i32| {
+            api.graph_input_objects.insert(
+                object,
+                super::graph_input::RuntimeGraphInputObject::new_extended(surface),
+            );
+            GraphApi::configure_graph_input_object(
+                api,
+                object,
+                GraphInputDescriptor {
+                    groups: vec![GraphInputGroup {
+                        index: 0,
+                        initial_current_item: -1,
+                        selection_enabled: true,
+                        pointer_selection_enabled: true,
+                        pointer_activation_enabled: false,
+                        selection_exclusion_key: -1,
+                        extended_flags: 0,
+                    }],
+                    regions: vec![button(0, 10), button(1, 100)],
+                    ..GraphInputDescriptor::default()
+                },
+            );
+        };
+        let drawn = |api: &super::RuntimeTraceApi| {
+            api.graph_layers
+                .iter()
+                .filter(|(id, layer)| {
+                    layer.target_surface == Some(surface)
+                        && api.surface_controls.contains_layer(**id)
+                })
+                .count()
+        };
+
+        // Released and not rebuilt: drawn for the rest of the frame, not hit.
+        configure(&mut api, 102);
+        assert_eq!(drawn(&api), 2);
+        api.control_frame = 1;
+        call_graph(&mut api, 0x90, 0xb9, &mut vec![Value::Int(102)]).unwrap();
+        assert_eq!(drawn(&api), 2);
+        assert!(api.hit_test_graph_input_object(102, (30.0, 30.0)).is_none());
+        api.expire_released_control_layers();
+        assert_eq!(drawn(&api), 2);
+        api.control_frame = 2;
+        api.expire_released_control_layers();
+        assert_eq!(drawn(&api), 0);
+
+        // Released and rebuilt on the same window: the new items replace them.
+        configure(&mut api, 103);
+        call_graph(&mut api, 0x90, 0xb9, &mut vec![Value::Int(103)]).unwrap();
+        assert_eq!(drawn(&api), 2);
+        configure(&mut api, 104);
+        assert_eq!(drawn(&api), 2);
+        assert!(api.hit_test_graph_input_object(104, (30.0, 30.0)).is_some());
+    }
+
+    #[test]
     fn base_icon_hover_bf_event_is_destructive_and_press_uses_bc_state() {
         let manager =
             ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
@@ -23575,7 +23707,7 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                 let object_id = object.as_ref().map(value_to_i32).unwrap_or_default();
                 let removed = self.graph_input_objects.remove(&object_id);
                 if removed.is_some() {
-                    self.remove_graph_input_control_layers(object_id);
+                    self.release_graph_input_control_layers(object_id);
                 }
                 tracing::info!(?object, "GraphReleaseIconInputProcessor");
                 return Ok(ethornell_vm::Value::Int(i32::from(removed.is_some())));
