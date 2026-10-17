@@ -17089,6 +17089,34 @@ mod input_tests {
     }
 
     #[test]
+    fn graph90_97_sets_the_auto_advance_a_waiting_message_reads() {
+        let manager =
+            ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let mut api = super::RuntimeTraceApi::new(manager);
+        // Wonderful Everyday starts each line with Graph90:97(auto, speed);
+        // its auto button calls Graph90:97(1, 0) while a line waits.
+        let mut line_start = vec![Value::Int(0), Value::Int(1350)];
+        call_graph(&mut api, 0x90, 0x97, &mut line_start).unwrap();
+        assert_eq!(
+            GraphApi::native_message_auto_advance_delay_ms(&api, None),
+            None
+        );
+        let mut switched_on = vec![Value::Int(1), Value::Int(0)];
+        call_graph(&mut api, 0x90, 0x97, &mut switched_on).unwrap();
+        assert_eq!(
+            GraphApi::native_message_auto_advance_delay_ms(&api, None),
+            Some(0)
+        );
+        // The setting as it is now wins over the one a procedure captured.
+        let mut switched_off = vec![Value::Int(0), Value::Int(0)];
+        call_graph(&mut api, 0x90, 0x97, &mut switched_off).unwrap();
+        assert_eq!(
+            GraphApi::native_message_auto_advance_delay_ms(&api, Some(1350)),
+            None
+        );
+    }
+
+    #[test]
     fn base_icon_hover_bf_event_is_destructive_and_press_uses_bc_state() {
         let manager =
             ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
@@ -21477,6 +21505,13 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
 
     fn native_message_is_animating(&self) -> bool {
         self.native_message_active && self.text_runtime.is_animating()
+    }
+
+    fn native_message_auto_advance_delay_ms(&self, _configured: Option<i32>) -> Option<i32> {
+        let animation = &self.graph_defaults.text_animation;
+        animation
+            .auto_advance_enabled
+            .then_some(animation.auto_advance_delay_ms.max(0))
     }
 
     fn reveal_native_message(&mut self) -> bool {

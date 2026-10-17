@@ -992,6 +992,16 @@ pub trait GraphApi {
         false
     }
 
+    /// The text auto-advance setting as it is now (Graph90:97, the target's
+    /// MessageConfig_SetAutoCompletion at 0x00433510): `Some(delay_ms)` while
+    /// enabled. CProcDspMsg arms and keeps its +0x5c deadline from it, so a
+    /// toggle while a line waits applies to that line. `configured` is the
+    /// value captured when the procedure was built; hosts that don't track
+    /// the setting return it.
+    fn native_message_auto_advance_delay_ms(&self, configured: Option<i32>) -> Option<i32> {
+        configured
+    }
+
     /// Whether the host still has work associated with an EXE-confirmed graph
     /// procedure installed for `opcode`. This is intentionally selector-aware
     /// even though the current renderer may share one animation registry.
@@ -6129,8 +6139,16 @@ impl Vm {
                 }
 
                 // Target +0x5c is armed only after the text processor reaches
-                // the end, not at construction time.
-                if let Some(delay) = procedure.config.auto_advance_delay_ms {
+                // the end, not at construction time, from the setting as it is
+                // then: auto mode switched on while a line waits ends that
+                // line, and switched off drops an armed deadline.
+                let auto_advance_delay_ms = api
+                    .native_message_auto_advance_delay_ms(procedure.config.auto_advance_delay_ms);
+                if auto_advance_delay_ms.is_none() {
+                    procedure.auto_deadline_tick = None;
+                    procedure.native.auto_deadline_tick = 0;
+                }
+                if let Some(delay) = auto_advance_delay_ms {
                     if !api.native_message_is_animating() {
                         let deadline = *procedure
                             .auto_deadline_tick
@@ -12897,6 +12915,7 @@ mod tests {
         window_valid_region: Option<[i32; 4]>,
         caret_frame_call: Option<(u32, i32, Vec<i32>)>,
         message_animating: bool,
+        message_auto_advance: Option<Option<i32>>,
         message_reveals: usize,
         message_finishes: usize,
         window_message_serial: i32,
@@ -13083,6 +13102,10 @@ mod tests {
     impl GraphApi for SchedulingApi {
         fn native_message_is_animating(&self) -> bool {
             self.message_animating
+        }
+
+        fn native_message_auto_advance_delay_ms(&self, configured: Option<i32>) -> Option<i32> {
+            self.message_auto_advance.unwrap_or(configured)
         }
 
         fn reveal_native_message(&mut self) -> bool {
@@ -16190,6 +16213,93 @@ mod tests {
         vm.advance_time_ms(1);
         assert_eq!(vm.poll_current_procedure(&mut api, false), None);
         assert_eq!(api.message_reveals, 0);
+        assert_eq!(api.message_finishes, 1);
+    }
+
+    fn install_message_procedure_with_auto_advance(
+        vm: &mut Vm,
+        auto_advance_delay_ms: Option<i32>,
+    ) {
+        vm.install_cprocedure(
+            super::native_thread::InstalledCProcedure::dsp_msg(
+                vm.thread.thread_id(),
+                NativeOpcode {
+                    group: 0x90,
+                    id: 0x90,
+                },
+                0,
+                super::NativeMessageProcedureConfig {
+                    class: super::NativeMessageProcedureClass::DspMsg,
+                    initial_delay_enabled: false,
+                    initial_delay_ms: 0,
+                    reveal_duration_ms: 0,
+                    reveal_steps: 0,
+                    reveal_step_delay_ms: 0,
+                    settle_steps: 0,
+                    settle_step_delay_ms: 0,
+                    auto_advance_delay_ms,
+                    input_scope: 2,
+                    completion_control: 0,
+                    end_wait_policy: 1,
+                    allow_high_bit_input: true,
+                    allow_auxiliary_input: true,
+                    auxiliary_input_mask: 0,
+                    input_forces_completion: false,
+                },
+            ),
+            false,
+        );
+    }
+
+    #[test]
+    fn message_auto_mode_switched_on_while_a_line_waits_ends_that_line() {
+        // Wonderful Everyday's auto button calls Graph90:97(1, 0) while the
+        // line it was clicked on waits for input; the line started with auto
+        // mode off.
+        let mut vm = Vm::new();
+        install_message_procedure_with_auto_advance(&mut vm, None);
+        let mut api = SchedulingApi::default();
+
+        vm.advance_time_ms(500);
+        assert_eq!(
+            vm.poll_current_procedure(&mut api, false),
+            Some(VmStopReason::WaitingForInputOrTime)
+        );
+        api.message_auto_advance = Some(Some(0));
+        assert_eq!(vm.poll_current_procedure(&mut api, false), None);
+        assert_eq!(api.message_finishes, 1);
+    }
+
+    #[test]
+    fn message_auto_mode_switched_off_drops_an_armed_deadline() {
+        let mut vm = Vm::new();
+        install_message_procedure_with_auto_advance(&mut vm, Some(30));
+        let mut api = SchedulingApi::default();
+
+        // Armed at the first poll after the text ends: due at 30 ms.
+        assert_eq!(
+            vm.poll_current_procedure(&mut api, false),
+            Some(VmStopReason::WaitingForInputOrTime)
+        );
+        api.message_auto_advance = Some(None);
+        vm.advance_time_ms(40);
+        assert_eq!(
+            vm.poll_current_procedure(&mut api, false),
+            Some(VmStopReason::WaitingForInputOrTime)
+        );
+        // Switched on again: armed anew from now, not from the old deadline.
+        api.message_auto_advance = Some(Some(30));
+        assert_eq!(
+            vm.poll_current_procedure(&mut api, false),
+            Some(VmStopReason::WaitingForInputOrTime)
+        );
+        vm.advance_time_ms(29);
+        assert_eq!(
+            vm.poll_current_procedure(&mut api, false),
+            Some(VmStopReason::WaitingForInputOrTime)
+        );
+        vm.advance_time_ms(1);
+        assert_eq!(vm.poll_current_procedure(&mut api, false), None);
         assert_eq!(api.message_finishes, 1);
     }
 
