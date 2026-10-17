@@ -399,6 +399,10 @@ impl NativeDisplayTree {
 
     /// Mirrors `DisplayChain_ReinsertByDepth`: remove the object and insert it
     /// after all existing objects with the same depth.
+    pub(crate) fn chain_depth(&self, handle: i32) -> Option<i32> {
+        self.objects.get(&handle).map(|object| object.chain_depth)
+    }
+
     pub(crate) fn set_chain_depth(&mut self, handle: i32, depth: i32) {
         self.register_inferred(handle);
         let changed = self
