@@ -3999,6 +3999,14 @@ impl RuntimeTraceApi {
         self.graph_image_revisions.retain(|key, _| !is_composite(key));
         self.surface_text_states.remove(&surface);
         self.surface_text_buffers.remove(&surface);
+        // Text drawn into the window (Graph92:91 runs) goes with it, as in
+        // the target, where it is part of the window's bitmap. Its text node
+        // is keyed by the handle, so leaving it also kept the slot reserved
+        // (graph_handle_exists): Wonderful Everyday releases and creates its
+        // message window again whenever a scene switches between the two
+        // window layouts, and after 16 such switches GraphCreateWindowObject
+        // returned 0.
+        self.clear_bitmap_text(surface);
         self.graph_object_layers.remove(&surface);
         self.graph_object_enabled.remove(&surface);
         self.graph_object_draw_enabled.remove(&surface);
@@ -17060,6 +17068,48 @@ fn queue_runtime_input_event(queue: &mut VecDeque<RuntimeInputEvent>, event: Run
         queue.pop_back();
     }
     queue.push_back(event);
+}
+
+#[cfg(test)]
+mod window_release_tests {
+    use super::RuntimeTraceApi;
+    use super::text::RuntimeTextNode;
+
+    /// The message window is released and created again over and over; a
+    /// released window with text in it must leave its slot free.
+    #[test]
+    fn a_released_window_takes_its_text_and_frees_its_slot() {
+        let manager =
+            ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let mut api = RuntimeTraceApi::new(manager);
+        for _ in 0..20 {
+            let window = api
+                .alloc_window_surface(1248, 880)
+                .expect("a free Window slot");
+            assert_eq!(window, 0xB000_0000_u32 as i32);
+            api.store_bitmap_text_run(
+                window,
+                RuntimeTextNode {
+                    text: "line".into(),
+                    enabled: true,
+                    owner_object: Some(window),
+                    screen_attached: false,
+                    target_surface: Some(window),
+                    x: 0.0,
+                    y: 0.0,
+                    size: 28.0,
+                    line_height: 35.0,
+                    formatted_layout: true,
+                    color: [1.0; 4],
+                    z: window,
+                    ruby_spans: Vec::new(),
+                    style_spans: Vec::new(),
+                },
+            );
+            assert!(api.remove_graph_surface(window));
+            assert!(!api.text_nodes.contains_key(&window));
+        }
+    }
 }
 
 #[cfg(test)]
