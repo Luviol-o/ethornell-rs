@@ -655,6 +655,8 @@ impl RuntimeGraphInputObject {
             .iter()
             .filter(|region| region.enabled_depth != 0)
             .filter(|region| self.pointer_hit_eligible(**region))
+            // Mask -2: a Virtual that is never hit (sub_41BDD0).
+            .filter(|region| region.mask_resource != -2)
             .filter_map(|region| {
                 let left = region.x as f32;
                 let top = region.y as f32;
