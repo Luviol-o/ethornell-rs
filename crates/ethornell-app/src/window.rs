@@ -5,7 +5,7 @@ use winit::application::ApplicationHandler;
 use winit::data_transfer::TypeHint;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::{
-    ButtonSource, ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent,
+    ButtonSource, ElementState, KeyEvent, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent,
 };
 use winit::event_loop::DndAction;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
@@ -40,7 +40,60 @@ struct WindowApp {
     last_audio_clock_ms: u64,
     frame_index: usize,
     input_script: Option<HeadlessInputScript>,
+    trackpad_scroll: TrackpadScroll,
     failure: Arc<Mutex<Option<String>>>,
+}
+
+/// Logical points of trackpad travel that make one wheel notch.
+const TRACKPAD_POINTS_PER_NOTCH: f64 = 32.0;
+/// macOS starts the momentum of a swipe right after the fingers lift, and
+/// winit reports both a touch and a momentum as `Started`: a start this
+/// soon after a lift is momentum.
+const TRACKPAD_MOMENTUM_START: Duration = Duration::from_millis(60);
+
+/// Turns trackpad scrolling into wheel notches. The target takes each
+/// WM_MOUSEWHEEL as one step (a line, a log entry), while a trackpad sends
+/// a stream of small pixel deltas and, after the fingers lift, momentum.
+/// Counting every event as a notch made a short swipe scroll the log by
+/// dozens of entries, and its momentum ran on past the end of the log,
+/// which the game takes as closing it. Finger travel now adds up to one
+/// notch per `TRACKPAD_POINTS_PER_NOTCH`, and momentum is left out.
+#[derive(Debug, Default)]
+struct TrackpadScroll {
+    travel: f64,
+    momentum: bool,
+    lifted_at: Option<Instant>,
+}
+
+impl TrackpadScroll {
+    /// Wheel notches for one pixel delta of `points` logical points
+    /// (positive up, like a wheel), signed.
+    fn notches(&mut self, points: f64, phase: TouchPhase, now: Instant) -> i32 {
+        match phase {
+            TouchPhase::Started => {
+                self.momentum = self.lifted_at.take().is_some_and(|lifted| {
+                    now.saturating_duration_since(lifted) <= TRACKPAD_MOMENTUM_START
+                });
+                self.travel = 0.0;
+            }
+            TouchPhase::Ended | TouchPhase::Cancelled => {
+                if !self.momentum {
+                    self.lifted_at = Some(now);
+                }
+                self.momentum = false;
+                self.travel = 0.0;
+                return 0;
+            }
+            TouchPhase::Moved => {}
+        }
+        if self.momentum {
+            return 0;
+        }
+        self.travel += points;
+        let notches = (self.travel / TRACKPAD_POINTS_PER_NOTCH).trunc();
+        self.travel -= notches * TRACKPAD_POINTS_PER_NOTCH;
+        notches as i32
+    }
 }
 
 impl ApplicationHandler for WindowApp {
@@ -77,6 +130,7 @@ impl ApplicationHandler for WindowApp {
             last_audio_clock_ms,
             frame_index,
             input_script,
+            trackpad_scroll,
             failure,
             ..
         } = self;
@@ -222,17 +276,23 @@ impl ApplicationHandler for WindowApp {
                     );
                 }
             }
-            WindowEvent::MouseWheel { delta, .. } => {
-                let delta_y = match delta {
-                    MouseScrollDelta::LineDelta(_, y) => y,
-                    MouseScrollDelta::PixelDelta(position) => position.y as f32,
+            WindowEvent::MouseWheel { delta, phase, .. } => {
+                let (delta_y, count) = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => (y, 1),
+                    MouseScrollDelta::PixelDelta(position) => {
+                        let points = position.y / window.scale_factor();
+                        let notches = trackpad_scroll.notches(points, phase, Instant::now());
+                        (notches.signum() as f32, notches.unsigned_abs())
+                    }
                     _ => return,
                 };
                 if delta_y != 0.0 && runtime.is_some() {
-                    queue_runtime_input_event(
-                        pending_input_events,
-                        RuntimeInputEvent::MouseWheel { delta_y },
-                    );
+                    for _ in 0..count {
+                        queue_runtime_input_event(
+                            pending_input_events,
+                            RuntimeInputEvent::MouseWheel { delta_y },
+                        );
+                    }
                 }
             }
             WindowEvent::PointerButton {
@@ -975,6 +1035,7 @@ pub(super) fn run_window(
         last_audio_clock_ms: 0,
         frame_index: 0,
         input_script: HeadlessInputScript::from_env(),
+        trackpad_scroll: TrackpadScroll::default(),
         failure: failure.clone(),
     };
     event_loop
@@ -989,6 +1050,9 @@ pub(super) fn run_window(
 #[cfg(test)]
 mod tests {
     use super::{graph_render_z, text_render_z};
+    use super::{TRACKPAD_POINTS_PER_NOTCH, TrackpadScroll};
+    use std::time::{Duration, Instant};
+    use winit::event::TouchPhase;
 
     #[test]
     fn window_text_is_drawn_over_its_window_and_under_higher_priorities() {
@@ -1003,5 +1067,34 @@ mod tests {
         assert_eq!(text, background);
         assert!(text > graph_render_z(window_priority - 1));
         assert!(text < graph_render_z(window_priority + 1));
+    }
+
+    #[test]
+    fn trackpad_travel_adds_up_to_notches_and_momentum_is_left_out() {
+        let mut scroll = TrackpadScroll::default();
+        let start = Instant::now();
+        let at = |ms| start + Duration::from_millis(ms);
+        let step = TRACKPAD_POINTS_PER_NOTCH / 4.0;
+
+        assert_eq!(scroll.notches(0.0, TouchPhase::Started, at(0)), 0);
+        let swipe = (1..=10)
+            .map(|ms| scroll.notches(-step, TouchPhase::Moved, at(ms)))
+            .collect::<Vec<_>>();
+        assert_eq!(swipe, [0, 0, 0, -1, 0, 0, 0, -1, 0, 0]);
+        assert_eq!(scroll.notches(0.0, TouchPhase::Ended, at(11)), 0);
+
+        // The swipe's momentum: started right after the lift.
+        assert_eq!(scroll.notches(-step, TouchPhase::Started, at(12)), 0);
+        for ms in 13..40 {
+            assert_eq!(scroll.notches(-step * 3.0, TouchPhase::Moved, at(ms)), 0);
+        }
+        assert_eq!(scroll.notches(0.0, TouchPhase::Ended, at(40)), 0);
+
+        // A new touch later counts again, from zero, upwards.
+        assert_eq!(scroll.notches(0.0, TouchPhase::Started, at(500)), 0);
+        assert_eq!(
+            scroll.notches(TRACKPAD_POINTS_PER_NOTCH * 2.5, TouchPhase::Moved, at(501)),
+            2
+        );
     }
 }
