@@ -7,6 +7,7 @@ use native_thread::{
     CProcWaitTimingExLayout32, CProcWaitWndMsgLayout32, CProcedure, CProcedureLayout32, CThread,
     CThreadLayout32, InstalledCProcedure,
 };
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::{
     Arc, Mutex, OnceLock,
@@ -7635,6 +7636,11 @@ impl Vm {
         encoding: &'static encoding_rs::Encoding,
     ) -> VmResult<String> {
         let bytes = self.read_c_string_bytes(ptr)?;
+        let bytes = if encoding == encoding_rs::SHIFT_JIS {
+            engine_shift_jis_bytes(&bytes)
+        } else {
+            Cow::Borrowed(bytes.as_slice())
+        };
         let (text, _, _) = encoding.decode(&bytes);
         Ok(text.into_owned())
     }
@@ -11743,6 +11749,50 @@ fn is_plausible_text_payload(text: &str) -> bool {
         .any(|ch| !ch.is_control() || ch == '\n' || ch == '\r' || ch == '\t')
 }
 
+/// Shift-JIS as the target's glyph routine reads it. sub_42F790 draws 0x7F
+/// as U+2014, 0xEF40 as two U+2014 (a dash filling its cell) and nothing for
+/// the other codes from 0xEF40 up, which code page 932 leaves unassigned or
+/// to user-defined characters. Those are rewritten to the Shift-JIS code
+/// that looks the same (U+2015; U+2500, a dash without side bearings) or
+/// dropped: the decoder would turn them into replacement characters, which
+/// make the whole string implausible text (a message line was drawn as its
+/// address).
+fn engine_shift_jis_bytes(bytes: &[u8]) -> Cow<'_, [u8]> {
+    let mut output: Option<Vec<u8>> = None;
+    let mut index = 0;
+    while index < bytes.len() {
+        let lead = bytes[index];
+        let width = if matches!(lead, 0x81..=0x9F | 0xE0..=0xFC) && index + 1 < bytes.len() {
+            2
+        } else {
+            1
+        };
+        let code = if width == 2 {
+            u16::from_be_bytes([lead, bytes[index + 1]])
+        } else {
+            u16::from(lead)
+        };
+        let replacement: Option<&[u8]> = match code {
+            0x7F => Some(&[0x81, 0x5C]),
+            0xEF40 => Some(&[0x84, 0x9F]),
+            0xEF41.. => Some(&[]),
+            _ => None,
+        };
+        match (replacement, output.as_mut()) {
+            (Some(replacement), Some(output)) => output.extend_from_slice(replacement),
+            (Some(replacement), None) => {
+                let mut rewritten = bytes[..index].to_vec();
+                rewritten.extend_from_slice(replacement);
+                output = Some(rewritten);
+            }
+            (None, Some(output)) => output.extend_from_slice(&bytes[index..index + width]),
+            (None, None) => {}
+        }
+        index += width;
+    }
+    output.map_or(Cow::Borrowed(bytes), Cow::Owned)
+}
+
 fn is_damaged_text_payload(text: &str) -> bool {
     text.contains('\u{fffd}') || text.contains("&#65533;") || text.contains("&#xFFFD;")
 }
@@ -15344,6 +15394,35 @@ mod tests {
         vm.normalize_graph_string_args(0x92, 0x91).unwrap();
 
         assert_eq!(vm.stack[text_index], Value::Str("formatted text".into()));
+    }
+
+    #[test]
+    fn message_text_with_the_engine_glyph_codes_is_text() {
+        let mut vm = Vm::new();
+        let text_pointer = 0x1200_3000;
+        // "A", the dash code 0xEF40 twice, "B", the codes 0xEF41 and 0xF040,
+        // "!" and 0x7F.
+        let bytes = [
+            b'A', 0xEF, 0x40, 0xEF, 0x40, b'B', 0xEF, 0x41, 0xF0, 0x40, b'!', 0x7F, 0,
+        ];
+        let at = Vm::memory_addr(text_pointer) as usize;
+        vm.memory[at..at + bytes.len()].copy_from_slice(&bytes);
+        vm.stack.extend((0..11).map(Value::Int));
+        let text_index = vm.stack.len() - 1 - 9;
+        vm.stack[text_index] = Value::Int(text_pointer as i32);
+
+        vm.normalize_graph_string_args(0x92, 0x91).unwrap();
+
+        let expected = "A\u{2500}\u{2500}B!\u{2015}";
+        assert_eq!(vm.stack[text_index], Value::Str(expected.into()));
+
+        // A line formatted with sprintf keeps them.
+        let formatted = 0x1200_3100;
+        vm.stack.clear();
+        vm.stack.push(Value::Ptr(text_pointer));
+        let rendered = vm.render_sprintf("%s");
+        vm.write_c_string(formatted, &rendered).unwrap();
+        assert_eq!(vm.read_c_string(formatted).unwrap(), expected);
     }
 
     #[test]
