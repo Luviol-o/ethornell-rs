@@ -248,11 +248,23 @@ pub fn run(config: AppConfig) -> Result<()> {
     let text = config
         .force_text_test
         .then(|| "こんにちは\nHello Ethornell".to_string());
+    let title = initial_window_title(std::env::var_os("ETHORNELL_WINDOW_TITLE"));
     if headless {
-        run_headless("ethornell-rs runtime", image, text, bgm.ok(), runtime)
+        run_headless(&title, image, text, bgm.ok(), runtime)
     } else {
-        run_window("ethornell-rs runtime", image, text, bgm.ok(), runtime)
+        run_window(&title, image, text, bgm.ok(), runtime)
     }
+}
+
+/// The window's title until the game names it (Sys80:66, SetWindowTitle),
+/// which the boot scripts do only after a second or two. A port's launcher
+/// knows the game's name: ETHORNELL_WINDOW_TITLE gives it from the start.
+fn initial_window_title(configured: Option<std::ffi::OsString>) -> String {
+    configured
+        .and_then(|title| title.into_string().ok())
+        .map(|title| title.trim().to_string())
+        .filter(|title| !title.is_empty())
+        .unwrap_or_else(|| "ethornell-rs runtime".to_string())
 }
 
 pub fn view_image_file(path: &Path) -> Result<()> {
@@ -16107,6 +16119,19 @@ mod input_tests {
         assert_eq!(api.pending_click, Some((640.0, 650.0)));
         assert_eq!(api.pending_input_state, Some(0x1000_0006));
         assert!(!api.scenario_mode_release_pending);
+    }
+
+    #[test]
+    fn the_window_starts_with_the_configured_title() {
+        assert_eq!(super::initial_window_title(None), "ethornell-rs runtime");
+        assert_eq!(
+            super::initial_window_title(Some("Wonderful Everyday".into())),
+            "Wonderful Everyday"
+        );
+        assert_eq!(
+            super::initial_window_title(Some("  ".into())),
+            "ethornell-rs runtime"
+        );
     }
 
     #[test]
