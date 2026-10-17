@@ -56,6 +56,16 @@ const HEAP_MEMORY_BASE: usize = (LOCAL_MEMORY_BASE + HEAP_OFFSET_BASE) as usize;
 const INITIAL_MEMORY_SIZE: usize = 16 * 1024 * 1024;
 const MAX_MEMORY_SIZE: usize = 256 * 1024 * 1024;
 const OPERAND_STACK_CAPACITY: usize = 4096;
+
+/// Where an operand found by `Vm::operand_from_top` is held.
+#[derive(Debug, Clone, Copy)]
+enum Operand {
+    /// `stack[index]`.
+    Stack(usize),
+    /// `operand_slots[slot]`, pushed before the ring last wrapped.
+    Wrapped(usize),
+}
+
 /// Target per-CThread interpreter quantum recovered from `sub_48CD70`.
 /// The native scheduler executes at most 0x100000 BP instructions for one
 /// CThread before continuing with the next scheduler entry.
@@ -6847,6 +6857,38 @@ impl Vm {
         }
     }
 
+    /// The operand `from_top` values below the top of the stack, as the
+    /// native's pops will find it. The operand stack is a ring of
+    /// OPERAND_STACK_CAPACITY slots, as in the target: a push into the last
+    /// slot starts `stack` again from empty while the values pushed before
+    /// stay in `operand_slots`, where `pop_value` reads them back. Scripts
+    /// leave unused results on the stack, so the ring wraps all the time and
+    /// a native call's arguments can straddle the wrap; their conversions
+    /// must reach the ones below it too (a text argument left unconverted is
+    /// drawn as "0x...").
+    fn operand_from_top(&self, from_top: usize) -> Option<Operand> {
+        let depth = self.stack.len();
+        if let Some(index) = depth.checked_sub(1 + from_top) {
+            return Some(Operand::Stack(index));
+        }
+        let slot = (OPERAND_STACK_CAPACITY + depth).checked_sub(1 + from_top)?;
+        (slot >= depth && slot < self.operand_slots.len()).then_some(Operand::Wrapped(slot))
+    }
+
+    fn operand_value(&self, operand: Operand) -> Value {
+        match operand {
+            Operand::Stack(index) => self.stack[index].clone(),
+            Operand::Wrapped(slot) => self.operand_slots[slot].clone(),
+        }
+    }
+
+    fn replace_operand(&mut self, operand: Operand, value: Value) {
+        match operand {
+            Operand::Stack(index) => self.replace_stack_value(index, value),
+            Operand::Wrapped(slot) => self.operand_slots[slot] = value,
+        }
+    }
+
     fn pop_int(&mut self) -> VmResult<i32> {
         Ok(self.pop_value()?.as_i32())
     }
@@ -10829,11 +10871,11 @@ impl Vm {
             _ => return Ok(()),
         };
         for &from_top in positions_from_top {
-            let Some(index) = self.stack.len().checked_sub(1 + from_top) else {
+            let Some(operand) = self.operand_from_top(from_top) else {
                 continue;
             };
-            let text = self.value_as_string_lossy(self.stack[index].clone())?;
-            self.replace_stack_value(index, Value::Str(text));
+            let text = self.value_as_string_lossy(self.operand_value(operand))?;
+            self.replace_operand(operand, Value::Str(text));
         }
         Ok(())
     }
@@ -10854,21 +10896,21 @@ impl Vm {
             _ => return Ok(()),
         };
         for &from_top in positions_from_top {
-            let Some(index) = self.stack.len().checked_sub(1 + from_top) else {
+            let Some(operand) = self.operand_from_top(from_top) else {
                 continue;
             };
             if std::env::var_os("TRACE_SOUND_ARGS").is_some() {
-                self.trace_sound_arg(group, id, from_top, index);
+                self.trace_sound_arg(group, id, from_top, self.operand_value(operand));
             }
             let text = if matches!(
                 (group, id, from_top),
                 (0xa0, 0x11, 2) | (0xa0, 0x12, 3 | 4) | (0xa0, 0x21, 2)
             ) {
-                self.value_as_sound_file_string(self.stack[index].clone())?
+                self.value_as_sound_file_string(self.operand_value(operand))?
             } else {
-                self.value_as_string_lossy(self.stack[index].clone())?
+                self.value_as_string_lossy(self.operand_value(operand))?
             };
-            self.replace_stack_value(index, Value::Str(text));
+            self.replace_operand(operand, Value::Str(text));
         }
         Ok(())
     }
@@ -10884,15 +10926,15 @@ impl Vm {
             _ => None,
         };
         if let Some(from_top) = dword_pointer_from_top {
-            if let Some(index) = self.stack.len().checked_sub(1 + from_top) {
-                let pointer = match self.stack[index] {
+            if let Some(operand) = self.operand_from_top(from_top) {
+                let pointer = match self.operand_value(operand) {
                     Value::Int(value) => value as u32,
                     Value::Ptr(pointer) => pointer,
                     _ => 0,
                 };
                 if pointer != 0 {
                     let value = self.read_int(pointer, 2)? as i32;
-                    self.replace_stack_value(index, Value::Int(value));
+                    self.replace_operand(operand, Value::Int(value));
                 }
             }
         }
@@ -10919,11 +10961,11 @@ impl Vm {
             _ => return Ok(()),
         };
         for &from_top in positions_from_top {
-            let Some(index) = self.stack.len().checked_sub(1 + from_top) else {
+            let Some(operand) = self.operand_from_top(from_top) else {
                 continue;
             };
-            let text = self.value_as_string_lossy(self.stack[index].clone())?;
-            self.replace_stack_value(index, Value::Str(text));
+            let text = self.value_as_string_lossy(self.operand_value(operand))?;
+            self.replace_operand(operand, Value::Str(text));
         }
         Ok(())
     }
@@ -10985,10 +11027,10 @@ impl Vm {
             _ => return Ok(()),
         };
         for &from_top in positions_from_top {
-            let Some(index) = self.stack.len().checked_sub(1 + from_top) else {
+            let Some(operand) = self.operand_from_top(from_top) else {
                 continue;
             };
-            let original = self.stack[index].clone();
+            let original = self.operand_value(operand);
             let text_slot = matches!(
                 (group, id),
                 (0x90, 0x90)
@@ -11012,7 +11054,7 @@ impl Vm {
                     .is_ok_and(|bytes| bytes.is_empty())
                 && self.shadow_string_at(value as u32).is_none()
             {
-                self.replace_stack_value(index, Value::Str(String::new()));
+                self.replace_operand(operand, Value::Str(String::new()));
                 continue;
             }
             // sub_48DF50 turns a script pointer into a native `char *`; it does
@@ -11062,9 +11104,9 @@ impl Vm {
             let non_null_pointer = matches!(original, Value::Ptr(ptr) if ptr != 0);
             if non_null_pointer && !text.starts_with("0x") {
                 let cleaned = text.trim_matches('\0').trim_end_matches('\u{fffd}');
-                self.replace_stack_value(index, Value::Str(cleaned.to_string()));
+                self.replace_operand(operand, Value::Str(cleaned.to_string()));
             } else if is_plausible_text_payload(&text) {
-                self.replace_stack_value(index, Value::Str(text));
+                self.replace_operand(operand, Value::Str(text));
             } else if let Value::Int(value) = original
                 && value != 0
                 && self
@@ -11077,24 +11119,20 @@ impl Vm {
                 // speakers and passes its address, computed with `add`, as
                 // an integer). sub_48DF50 converts it to an empty `char *`;
                 // left as an integer, the renderer draws it as "0x...".
-                self.replace_stack_value(index, Value::Str(String::new()));
+                self.replace_operand(operand, Value::Str(String::new()));
             }
         }
         Ok(())
     }
 
-    fn trace_sound_arg(&self, group: u8, id: u16, from_top: usize, index: usize) {
-        let value = self.stack.get(index).cloned().unwrap_or(Value::None);
+    fn trace_sound_arg(&self, group: u8, id: u16, from_top: usize, value: Value) {
         let ptr = match value {
             Value::Int(value) => Some(value as u32),
             Value::Ptr(ptr) => Some(ptr),
             _ => None,
         };
         let direct = self
-            .stack
-            .get(index)
-            .cloned()
-            .and_then(|value| self.value_as_string_lossy(value).ok())
+            .value_as_string_lossy(value.clone())
             .unwrap_or_default();
         let dump = ptr
             .map(|ptr| self.memory_preview(ptr, 96))
@@ -11103,8 +11141,7 @@ impl Vm {
             group = format_args!("0x{group:02X}"),
             id = format_args!("0x{id:02X}"),
             from_top,
-            index,
-            value = ?self.stack.get(index),
+            value = ?value,
             direct,
             dump,
             "TRACE_SOUND_ARG"
@@ -15318,6 +15355,37 @@ mod tests {
             vm.stack[auxiliary_index],
             Value::Str("auxiliary text".into())
         );
+    }
+
+    #[test]
+    fn native_text_arguments_across_an_operand_stack_wrap_are_converted() {
+        let mut vm = Vm::new();
+        let primary = 0x1200_3000;
+        let auxiliary = 0x1200_3100;
+        vm.write_c_string(primary, "main text").unwrap();
+        vm.write_c_string(auxiliary, "auxiliary text").unwrap();
+        // Results nobody popped fill the ring up to ten slots before its end,
+        // so the push of the call's tenth argument wraps it.
+        for _ in 0..crate::OPERAND_STACK_CAPACITY - 10 {
+            vm.push_value(Value::Int(-1));
+        }
+        for index in 0..21 {
+            vm.push_value(match index {
+                3 => Value::Ptr(primary),
+                6 => Value::Ptr(auxiliary),
+                _ => Value::Int(index),
+            });
+        }
+        assert_eq!(vm.stack.len(), 11);
+
+        vm.normalize_graph_string_args(0x92, 0x9c).unwrap();
+
+        let mut args = (0..21).map(|_| vm.pop_value().unwrap()).collect::<Vec<_>>();
+        args.reverse();
+        assert_eq!(args[3], Value::Str("main text".into()));
+        assert_eq!(args[6], Value::Str("auxiliary text".into()));
+        assert_eq!(args[20], Value::Int(20));
+        assert_eq!(args[0], Value::Int(0));
     }
 
     #[test]
