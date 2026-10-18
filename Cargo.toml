@@ -41,7 +41,8 @@ encoding_rs = "0.8"
 # both makes wasm-bindgen reject the duplicate WebGPU enums).
 wgpu = { version = "0.19", default-features = false, features = ["wgsl"] }
 winit = "0.31.0-beta.3"
-kira = "0.8"
+# Probe branch (port regression suite): no cpal backend, so no audio device.
+kira = { version = "0.8", default-features = false, features = ["mp3", "ogg", "flac", "wav"] }
 pollster = "0.3"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp"] }
 bytemuck = { version = "1", features = ["derive"] }

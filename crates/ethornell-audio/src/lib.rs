@@ -1,5 +1,6 @@
 use ethornell_core::{EthornellError, Result};
 use kira::dsp::Frame;
+use kira::manager::backend::mock::{MockBackend, MockBackendSettings};
 use kira::manager::backend::Backend;
 #[cfg(not(any(target_arch="wasm32",target_os="vita",target_os="horizon")))]
 use kira::manager::backend::DefaultBackend;
@@ -131,8 +132,32 @@ fn read_u32(data: &[u8], offset: usize) -> Option<u32> {
     Some(u32::from_le_bytes(bytes))
 }
 
+/// Port regression probe (branch probe/regress, never built into the app):
+/// kira is built without its cpal backend, so the audio system has no
+/// device and can't be heard (its `DefaultBackend` is the mock one). Sounds
+/// still decode and play inside kira; the headless loop renders the mix in
+/// VM time with `probe_render`.
+pub const PROBE_SAMPLE_RATE: u32 = 44_100;
+
+/// What the probe's silent mix did, for its numbers-only log.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ProbeMixStats {
+    /// Script sounds started: static ones, and those decoded while they play
+    /// (intro/loop pairs, long sounds).
+    pub plays: u64,
+    /// Streamed sounds started (movie soundtracks).
+    pub streams: u64,
+    /// Mix frames rendered, and those with a sample above -60 dB.
+    pub frames: u64,
+    pub audible_frames: u64,
+    pub peak: f32,
+    pub sum_squares: f64,
+}
+
 pub struct AudioSystem<B: Backend = PlatformBackend> {
     manager: AudioManager<B>,
+    probe: ProbeMixStats,
+    probe_carry: u64,
     volume: f64,
     channels: BTreeMap<i32, StaticSoundHandle>,
     /// Channels playing a sound that is decoded while it plays (movie
@@ -144,7 +169,12 @@ pub struct AudioSystem<B: Backend = PlatformBackend> {
 
 impl AudioSystem {
     pub fn new() -> Result<Self> {
-        Self::with_settings(AudioManagerSettings::default())
+        Self::with_settings(AudioManagerSettings {
+            backend_settings: MockBackendSettings {
+                sample_rate: PROBE_SAMPLE_RATE,
+            },
+            ..AudioManagerSettings::default()
+        })
     }
 }
 
@@ -160,6 +190,8 @@ impl<B: Backend> AudioSystem<B> {
             .map_err(|err| EthornellError::Other(format!("audio init failed: {err:?}")))?;
         Ok(Self {
             manager,
+            probe: ProbeMixStats::default(),
+            probe_carry: 0,
             volume: 1.0,
             channels: BTreeMap::new(),
             streams: BTreeMap::new(),
@@ -382,6 +414,7 @@ impl<B: Backend> AudioSystem<B> {
             .manager
             .play(StreamingSoundData::from_decoder(decoder, settings))
             .map_err(|err| EthornellError::Other(format!("play audio stream failed: {err}")))?;
+        self.probe.plays += 1;
         if let Some(mut previous) = self.channels.remove(&channel) {
             let _ = previous.stop(Tween::default());
         }
@@ -398,6 +431,7 @@ impl<B: Backend> AudioSystem<B> {
             .manager
             .play(data)
             .map_err(|err| EthornellError::Other(format!("play audio bytes failed: {err}")))?;
+        self.probe.plays += 1;
         if let Some(mut previous) = self.channels.insert(channel, handle) {
             let _ = previous.stop(Tween::default());
         }
@@ -435,6 +469,7 @@ impl<B: Backend> AudioSystem<B> {
             .manager
             .play(data)
             .map_err(|err| EthornellError::Other(format!("play audio stream failed: {err}")))?;
+        self.probe.streams += 1;
         if let Some(mut previous) = self.channels.remove(&channel) {
             let _ = previous.stop(Tween::default());
         }
@@ -575,6 +610,32 @@ impl<B: Backend> AudioSystem<B> {
     pub fn volume(&self) -> f64 {
         self.volume
     }
+
+    pub fn probe_stats(&self) -> ProbeMixStats {
+        self.probe
+    }
+}
+
+impl AudioSystem<MockBackend> {
+    /// Renders `elapsed_ms` of the mix (the caller's clock) into nothing,
+    /// keeping its peak and energy.
+    pub fn probe_render(&mut self, elapsed_ms: u64) {
+        let total = elapsed_ms * u64::from(PROBE_SAMPLE_RATE) + self.probe_carry;
+        self.probe_carry = total % 1000;
+        let backend = self.manager.backend_mut();
+        backend.on_start_processing();
+        for _ in 0..total / 1000 {
+            let frame = backend.process();
+            let level = frame.left.abs().max(frame.right.abs());
+            self.probe.frames += 1;
+            if level > 0.001 {
+                self.probe.audible_frames += 1;
+            }
+            self.probe.peak = self.probe.peak.max(level);
+            self.probe.sum_squares +=
+                f64::from(frame.left) * f64::from(frame.left) + f64::from(frame.right) * f64::from(frame.right);
+        }
+    }
 }
 
 fn immediate_tween() -> Tween {
@@ -607,7 +668,7 @@ fn buriko_wave_loop_start(bytes: &[u8]) -> u64 {
     }
 }
 
-fn decode_static_sound(bytes: &[u8], settings: StaticSoundSettings) -> Result<StaticSoundData> {
+pub fn decode_static_sound(bytes: &[u8], settings: StaticSoundSettings) -> Result<StaticSoundData> {
     let payload = unwrap_buriko_wave_ogg(bytes).unwrap_or(bytes);
     let mut data = StaticSoundData::from_cursor(Cursor::new(payload.to_vec()), settings)
         .map_err(|err| EthornellError::Other(format!("load audio bytes failed: {err}")))?;
