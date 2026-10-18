@@ -1415,6 +1415,42 @@ impl RuntimeTraceApi {
         false
     }
 
+    /// Graph90:F6: decode one BF_Movie frame over a destination bitmap's
+    /// pixels. A frame codes only the blocks that change, so it is drawn over
+    /// whatever the bitmap holds (the target decodes into the bitmap itself).
+    fn decode_buriko_movie_frame(
+        &mut self,
+        destination: i32,
+        source: i32,
+        frame_index: i32,
+    ) -> i32 {
+        let destination_info = self
+            .bitmap_dimensions
+            .get(&destination)
+            .map(|&(width, height)| {
+                let format = self
+                    .bitmap_formats
+                    .get(&destination)
+                    .copied()
+                    .unwrap_or_default();
+                (width, height, format)
+            });
+        let mut pixels = self.graph_bitmap_image(destination);
+        let status = self.graph_buriko_movies.decode_frame(
+            destination_info,
+            pixels.as_mut(),
+            source,
+            frame_index,
+        );
+        if status == 0
+            && let Some(pixels) = pixels
+            && !self.replace_graph_bitmap_pixels(destination, pixels)
+        {
+            return 6;
+        }
+        status
+    }
+
     fn rasterize_graph_bitmap_text(
         &mut self,
         bitmap: i32,
@@ -12846,6 +12882,45 @@ mod input_tests {
     }
 
     #[test]
+    fn graph90_f6_draws_a_buriko_movie_frame_into_its_destination_bitmap() {
+        let manager =
+            ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let mut api = super::RuntimeTraceApi::new(manager);
+        let (movie, _) = api
+            .graph_buriko_movies
+            .load(
+                String::new(),
+                "movie.bmv".into(),
+                crate::graph_movie::decodable_test_movie(),
+            )
+            .unwrap();
+        let bitmap = 1700;
+        api.recreate_native_bitmap(bitmap, 8, 8, 2);
+        let key = format!("runtime:bitmap:{bitmap}");
+
+        // Source order [destination bitmap, BF_Movie handle, frame].
+        let mut args = vec![Value::Int(bitmap), Value::Int(movie), Value::Int(1)];
+        assert_eq!(
+            call_graph(&mut api, 0x90, 0xf6, &mut args).unwrap(),
+            Value::Int(4)
+        );
+        assert!(api.graph_images[&key].rgba.iter().all(|&byte| byte == 0));
+
+        let mut args = vec![Value::Int(bitmap), Value::Int(movie), Value::Int(0)];
+        assert_eq!(
+            call_graph(&mut api, 0x90, 0xf6, &mut args).unwrap(),
+            Value::Int(0)
+        );
+        assert!(
+            api.graph_images[&key]
+                .rgba
+                .chunks_exact(4)
+                .all(|pixel| pixel == [178, 178, 178, 255]),
+            "the decoded frame must be the bitmap's pixels"
+        );
+    }
+
+    #[test]
     fn native_group_uses_tagged_handle_and_preserves_member_ownership() {
         let manager =
             ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
@@ -20536,19 +20611,7 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
         source: i32,
         frame_index: i32,
     ) -> i32 {
-        let destination_info = self
-            .bitmap_dimensions
-            .get(&destination)
-            .map(|&(width, height)| {
-                let format = self
-                    .bitmap_formats
-                    .get(&destination)
-                    .copied()
-                    .unwrap_or_default();
-                (width, height, format)
-            });
-        self.graph_buriko_movies
-            .validate_decode(destination_info, source, frame_index)
+        self.decode_buriko_movie_frame(destination, source, frame_index)
     }
 
     fn set_item_selection_column_layout(&mut self, window: i32, layout: Option<[i32; 16]>) -> bool {
@@ -23671,20 +23734,7 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                 let frame_index = args.first().map(value_to_i32).unwrap_or_default();
                 let source = args.get(1).map(value_to_i32).unwrap_or_default();
                 let destination = args.get(2).map(value_to_i32).unwrap_or_default();
-                let destination_info =
-                    self.bitmap_dimensions
-                        .get(&destination)
-                        .map(|&(width, height)| {
-                            let format = self
-                                .bitmap_formats
-                                .get(&destination)
-                                .copied()
-                                .unwrap_or_default();
-                            (width, height, format)
-                        });
-                let status =
-                    self.graph_buriko_movies
-                        .validate_decode(destination_info, source, frame_index);
+                let status = self.decode_buriko_movie_frame(destination, source, frame_index);
                 tracing::debug!(
                     destination,
                     source,
@@ -23693,10 +23743,10 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                     "DecodeBurikoMovieFrame"
                 );
                 if status == 6 {
-                    // The public contract is valid but the proprietary decoder
-                    // is not implemented. Preserve target status 6 at the
-                    // synchronous boundary, or through DCProcDecodeBMV when the
-                    // VM selected the target asynchronous branch.
+                    // The public contract is valid but the frame failed to
+                    // decode. Preserve target status 6 at the synchronous
+                    // boundary, or through DCProcDecodeBMV when the VM
+                    // selected the target asynchronous branch.
                     call.complete_procedure_with_output(
                         ethornell_vm::native_call::NativeProcedureClass::DecodeBurikoMovie,
                         status,
