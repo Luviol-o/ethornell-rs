@@ -4044,8 +4044,10 @@ impl RuntimeTraceApi {
     /// Target DCIPIcon/DCIPIconEx materialization installs item mask_resource
     /// through sub_41BC70 on the CDspObjVirtual hit wrapper.  The generated
     /// 1-bit mask uses native-format-specific nonzero tests rather than the
-    /// visual Sprite's alpha.  A missing resource (and the target sentinel -2)
-    /// leaves the Virtual rectangle unmasked.
+    /// visual Sprite's alpha.  A missing resource leaves the Virtual rectangle
+    /// unmasked. The sentinel -2 goes through sub_41BDD0 instead, which also
+    /// clears the Virtual's hit flag (+0x108): its hit test (sub_41BDF0,
+    /// reached from sub_42AD90) then fails everywhere.
     fn graph_input_item_mask_accepts(
         &self,
         region: ethornell_vm::GraphInputRegion,
@@ -4053,7 +4055,7 @@ impl RuntimeTraceApi {
         local_y: i32,
     ) -> bool {
         if region.mask_resource == -2 {
-            return true;
+            return false;
         }
         let Some(image) = self.graph_bitmap_image(region.mask_resource) else {
             return true;
@@ -15391,6 +15393,70 @@ mod input_tests {
             .hit_test_graph_input_object(object, (70.0, 20.0))
             .expect("transparent explicit-mask pixel must fall through to lower item");
         assert_eq!((transparent.0.group, transparent.0.index), (0, 0));
+    }
+
+    #[test]
+    fn icon_item_with_mask_minus_two_is_never_hit() {
+        let manager =
+            ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let mut api = super::RuntimeTraceApi::new(manager);
+        let surface = 20_026;
+        let object = 97;
+        let bitmap = 1922;
+        api.store_graph_image(
+            "test:unhittable-item".to_string(),
+            DecodedImage {
+                width: 40,
+                height: 20,
+                rgba: vec![255; 40 * 20 * 4],
+            },
+        );
+        api.graph_resources.insert(
+            bitmap,
+            RuntimeGraphResource::whole("test:unhittable-item".to_string()),
+        );
+        api.graph_surfaces
+            .insert(surface, RuntimeSurface::display(surface, 200.0, 100.0));
+        api.graph_input_objects.insert(
+            object,
+            super::graph_input::RuntimeGraphInputObject::new_extended(surface),
+        );
+        let item = |index: i32, x: i32, mask_resource: i32| GraphInputRegion {
+            group: 0,
+            index,
+            ordinal: index,
+            enabled_depth: 1,
+            selected: false,
+            x,
+            y: 10,
+            width: 0,
+            height: 0,
+            normal_resource: bitmap,
+            selected_resource: -1,
+            hover_resource: -1,
+            hover_selected_resource: -1,
+            mask_resource,
+            current_selection_hit_excluded: false,
+            flags: 0,
+        };
+        GraphApi::configure_graph_input_object(
+            &mut api,
+            object,
+            GraphInputDescriptor {
+                regions: vec![item(0, 10, -1), item(1, 100, -2)],
+                ..GraphInputDescriptor::default()
+            },
+        );
+
+        let hit = api
+            .hit_test_graph_input_object(object, (20.0, 20.0))
+            .expect("an item without a mask is hit");
+        assert_eq!(hit.0.index, 0);
+        assert!(
+            api.hit_test_graph_input_object(object, (110.0, 20.0))
+                .is_none(),
+            "sub_41BDD0 leaves an item with mask -2 unhittable"
+        );
     }
 
     #[test]

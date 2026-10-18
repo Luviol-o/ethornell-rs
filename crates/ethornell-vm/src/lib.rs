@@ -7214,7 +7214,14 @@ impl Vm {
                 let hover_resource = self.read_int(region_ptr.wrapping_add(36), 2)? as i32;
                 let selected_resource = self.read_int(region_ptr.wrapping_add(40), 2)? as i32;
                 let hover_selected_resource = self.read_int(region_ptr.wrapping_add(44), 2)? as i32;
-                let mask_resource = self.read_int(region_ptr.wrapping_add(48), 2)? as i32;
+                // sub_44A900 clears the item Virtual's hit test (sub_41BDD0)
+                // for mask -2 and also when item+0x00 is zero: such an item
+                // is drawn but never hovered or clicked. The log's entries
+                // without a voice are such items.
+                let mask_resource = match self.read_int(region_ptr, 2)? {
+                    0 => -2,
+                    _ => self.read_int(region_ptr.wrapping_add(48), 2)? as i32,
+                };
                 // sub_44C110 reads extended source item+0x34 before the
                 // CDspObjVirtual hit query. A nonzero value excludes the
                 // group's already-current item from fresh pointer hits.
@@ -15506,6 +15513,33 @@ mod tests {
         let rendered = vm.render_sprintf("%s");
         vm.write_c_string(formatted, &rendered).unwrap();
         assert_eq!(vm.read_c_string(formatted).unwrap(), expected);
+    }
+
+    #[test]
+    fn extended_icon_item_with_a_zero_first_word_is_never_hit() {
+        let mut vm = Vm::new();
+        let (root, group, items) = (0x1200_4000_u32, 0x1200_4100_u32, 0x1200_4200_u32);
+        vm.write_int(root, 2, 1).unwrap();
+        vm.write_int(root + 4, 2, group).unwrap();
+        vm.write_int(group, 2, 2).unwrap();
+        vm.write_int(group + 8, 2, items).unwrap();
+        vm.write_int(group + 12, 2, u32::MAX).unwrap();
+        for (index, first_word) in [1_u32, 0].into_iter().enumerate() {
+            let item = items + index as u32 * 196;
+            vm.write_int(item, 2, first_word).unwrap();
+            vm.write_int(item + 4, 2, 1).unwrap();
+            vm.write_int(item + 32, 2, 7).unwrap();
+            vm.write_int(item + 48, 2, u32::MAX).unwrap();
+        }
+
+        let descriptor = vm.read_graph_input_descriptor(root).unwrap();
+
+        let masks = descriptor
+            .regions
+            .iter()
+            .map(|region| region.mask_resource)
+            .collect::<Vec<_>>();
+        assert_eq!(masks, [-1, -2]);
     }
 
     #[test]
