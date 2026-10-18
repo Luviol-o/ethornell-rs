@@ -215,8 +215,8 @@ impl AudioSystem {
             return Ok(false);
         }
 
-        let intro = decode_static_sound(intro_bytes)?;
-        let loop_sound = decode_static_sound(loop_bytes)?;
+        let intro = decode_static_sound(intro_bytes, StaticSoundSettings::default())?;
+        let loop_sound = decode_static_sound(loop_bytes, StaticSoundSettings::default())?;
         if intro.sample_rate != loop_sound.sample_rate {
             return Err(EthornellError::Other(format!(
                 "BGM pair sample-rate mismatch: intro={}Hz loop={}Hz",
@@ -258,13 +258,11 @@ impl AudioSystem {
         if !restart && self.channel_is_active(channel) {
             return Ok(false);
         }
-        let payload = unwrap_buriko_wave_ogg(bytes).unwrap_or(bytes);
         let mut settings = playback_settings(volume, playback_rate, panning, fade_in_ms);
         if looped {
             settings = settings.loop_region(..);
         }
-        let mut data = StaticSoundData::from_cursor(Cursor::new(payload.to_vec()), settings)
-            .map_err(|err| EthornellError::Other(format!("load audio bytes failed: {err}")))?;
+        let mut data = decode_static_sound(bytes, settings)?;
         apply_decode_gain(&mut data, decode_gain);
         self.start_static_sound(channel, data)
     }
@@ -431,13 +429,62 @@ impl AudioSystem {
     }
 }
 
-fn decode_static_sound(bytes: &[u8]) -> Result<StaticSoundData> {
+/// Decodes a whole sound, cut to the length its file declares
+/// (`declared_frame_count`).
+fn decode_static_sound(bytes: &[u8], settings: StaticSoundSettings) -> Result<StaticSoundData> {
     let payload = unwrap_buriko_wave_ogg(bytes).unwrap_or(bytes);
-    StaticSoundData::from_cursor(
-        Cursor::new(payload.to_vec()),
-        StaticSoundSettings::default(),
-    )
-    .map_err(|err| EthornellError::Other(format!("load audio bytes failed: {err}")))
+    let mut data = StaticSoundData::from_cursor(Cursor::new(payload.to_vec()), settings)
+        .map_err(|err| EthornellError::Other(format!("load audio bytes failed: {err}")))?;
+    if let Some(frames) = declared_frame_count(bytes)
+        && data.frames.len() > frames
+    {
+        data.frames = data.frames[..frames].into();
+    }
+    Ok(data)
+}
+
+/// How many frames a sound plays. For a BURIKO wave box, the header's sample
+/// count (+0x0C): the target reads the 64-byte header (sub_4A8330), sizes
+/// the decoded buffer as samples * channels * 2 bytes and asks for that many
+/// samples (sub_4A91F0), and its Ogg reader clamps every request to the
+/// samples left before that count (sub_4A8F40, through vorbisfile's ov_read,
+/// sub_4BCAC0). For a bare Ogg stream, its end position. Symphonia, opened by
+/// kira without gapless mode, decodes the last Vorbis block whole, so a sound
+/// ran past its end position (which the box's count equals) by up to half a
+/// block: 1023 frames with 2048-frame blocks.
+fn declared_frame_count(bytes: &[u8]) -> Option<usize> {
+    let info = probe_audio(bytes);
+    let frames = match info.kind {
+        AudioKind::BurikoWaveBoxOgg => u64::from(info.sample_len?),
+        AudioKind::Ogg => ogg_end_position(bytes)?,
+        _ => return None,
+    };
+    usize::try_from(frames).ok()
+}
+
+/// The granule position of an Ogg stream's last page, if the data ends with
+/// a whole page of the stream the first page starts. For Vorbis that is the
+/// number of frames up to the end of the stream.
+fn ogg_end_position(data: &[u8]) -> Option<u64> {
+    const MAX_PAGE_LEN: usize = 27 + 255 + 255 * 255;
+    let serial = data.get(14..18)?;
+    let first = data.len().saturating_sub(MAX_PAGE_LEN);
+    let page = (first..data.len()).rev().find_map(|start| {
+        let page = &data[start..];
+        let segments = usize::from(*page.get(26)?);
+        let body: usize = page
+            .get(27..27 + segments)?
+            .iter()
+            .map(|&len| usize::from(len))
+            .sum();
+        (page.starts_with(b"OggS") && page[4] == 0 && 27 + segments + body == page.len())
+            .then_some(page)
+    })?;
+    if &page[14..18] != serial {
+        return None;
+    }
+    let granule = u64::from_le_bytes(page[6..14].try_into().ok()?);
+    (granule != u64::MAX).then_some(granule)
 }
 
 fn playback_settings(
@@ -475,4 +522,78 @@ fn apply_decode_gain(data: &mut StaticSoundData, decode_gain: f64) {
         })
         .collect::<Vec<_>>()
         .into();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 10007 frames of a 440 Hz sine at half scale, 44.1 kHz stereo, encoded
+    /// with libvorbis's vorbisenc (VBR quality 0, one audio page). The last
+    /// page's granule position is 10007; the last block ends past it.
+    const TONE_OGG: &[u8] = include_bytes!("../testdata/sine-440hz-10007-frames.ogg");
+    const TONE_FRAMES: usize = 10007;
+
+    /// The 64-byte BURIKO wave box header around an Ogg payload.
+    fn buriko_wave_box(samples: u32, payload: &[u8]) -> Vec<u8> {
+        let mut data = vec![0; 0x40];
+        data[0..4].copy_from_slice(&0x40u32.to_le_bytes());
+        data[4..8].copy_from_slice(b"bw  ");
+        data[8..12].copy_from_slice(&(payload.len() as u32).to_le_bytes());
+        data[12..16].copy_from_slice(&samples.to_le_bytes());
+        data[16..20].copy_from_slice(&44_100u32.to_le_bytes());
+        data[20..24].copy_from_slice(&2u32.to_le_bytes());
+        data.extend_from_slice(payload);
+        data
+    }
+
+    fn untrimmed_tone() -> StaticSoundData {
+        StaticSoundData::from_cursor(Cursor::new(TONE_OGG), StaticSoundSettings::default()).unwrap()
+    }
+
+    #[test]
+    fn a_wave_box_sound_decodes_to_its_header_sample_count() {
+        let untrimmed = untrimmed_tone();
+        assert!(untrimmed.frames.len() > TONE_FRAMES);
+
+        let data = decode_static_sound(
+            &buriko_wave_box(TONE_FRAMES as u32, TONE_OGG),
+            StaticSoundSettings::default(),
+        )
+        .unwrap();
+        assert_eq!(data.frames.len(), TONE_FRAMES);
+        assert_eq!(data.frames[..], untrimmed.frames[..TONE_FRAMES]);
+    }
+
+    #[test]
+    fn the_header_sample_count_bounds_a_wave_box_sound() {
+        let shorter = decode_static_sound(
+            &buriko_wave_box(4_000, TONE_OGG),
+            StaticSoundSettings::default(),
+        )
+        .unwrap();
+        assert_eq!(shorter.frames.len(), 4_000);
+
+        // A count past the decoded frames (a stream with missing pages)
+        // adds nothing.
+        let longer = decode_static_sound(
+            &buriko_wave_box(1_000_000, TONE_OGG),
+            StaticSoundSettings::default(),
+        )
+        .unwrap();
+        assert_eq!(longer.frames.len(), untrimmed_tone().frames.len());
+    }
+
+    #[test]
+    fn a_bare_ogg_sound_decodes_to_its_end_position() {
+        assert_eq!(ogg_end_position(TONE_OGG), Some(TONE_FRAMES as u64));
+        let data = decode_static_sound(TONE_OGG, StaticSoundSettings::default()).unwrap();
+        assert_eq!(data.frames.len(), TONE_FRAMES);
+    }
+
+    #[test]
+    fn an_ogg_stream_without_a_whole_last_page_has_no_end_position() {
+        assert_eq!(ogg_end_position(&TONE_OGG[..TONE_OGG.len() - 1]), None);
+        assert_eq!(ogg_end_position(b"OggS"), None);
+    }
 }
