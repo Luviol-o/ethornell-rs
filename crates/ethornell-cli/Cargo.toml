@@ -22,3 +22,8 @@ ethornell-script = { path = "../ethornell-script" }
 ethornell-vm = { path = "../ethornell-vm" }
 ethornell-audio = { path = "../ethornell-audio" }
 ethornell-app = { path = "../ethornell-app" }
+
+# Probe branch (port regression suite): the decode pass, examples/regress_decode.rs.
+[dev-dependencies]
+kira.workspace = true
+na_mpeg2_decoder = { path = "../na_mpeg2_decoder", default-features = false, features = ["video-only"] }

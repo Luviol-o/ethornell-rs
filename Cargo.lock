@@ -1221,6 +1221,8 @@ dependencies = [
  "ethornell-image",
  "ethornell-script",
  "ethornell-vm",
+ "kira",
+ "na_mpeg2_decoder",
  "serde",
  "serde_json",
 ]
