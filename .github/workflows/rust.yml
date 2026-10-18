@@ -49,10 +49,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install cargo-ndk
         run: cargo install cargo-ndk --locked
-      - name: Build libethornell.so
-        env:
-          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_LATEST_HOME }}
-        run: cargo ndk -t arm64-v8a -t x86_64 -P 26 build -p ethornell-mobile --locked
+      - name: Build libethornell_mobile.so
+        run: |
+          export ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME"
+          cargo ndk -t arm64-v8a -t x86_64 -P 26 build -p ethornell-mobile --locked
 
   ios:
     name: Build (iOS library)
@@ -63,7 +63,7 @@ jobs:
         with:
           targets: aarch64-apple-ios,aarch64-apple-ios-sim
       - uses: Swatinem/rust-cache@v2
-      - name: Build libethornell.a
+      - name: Build libethornell_mobile.a
         env:
           IPHONEOS_DEPLOYMENT_TARGET: '15.0'
         run: |

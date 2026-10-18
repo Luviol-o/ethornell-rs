@@ -1,7 +1,7 @@
 # iOS
 
 A SwiftUI app with a game list and a player, around the engine library
-`libethornell.a` (`crates/ethornell-mobile`). iOS / iPadOS 15 or later.
+`libethornell_mobile.a` (`crates/ethornell-mobile`). iOS / iPadOS 15 or later.
 
 ## Playing
 
@@ -32,7 +32,7 @@ platform/ios/build.sh device   # build/Ethornell-unsigned.ipa
 ```
 
 Needs Xcode, rustup and XcodeGen (`brew install xcodegen`). The script
-builds `libethornell.a` for device and simulator into
+builds `libethornell_mobile.a` for device and simulator into
 `Vendor/Ethornell.xcframework` and generates `Ethornell.xcodeproj` from
 `project.yml`. To run on your own device, open the generated project, pick
 your team under Signing, and run.

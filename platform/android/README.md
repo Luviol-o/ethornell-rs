@@ -1,7 +1,7 @@
 # Android
 
 An app with a game list and a player, around the engine library
-`libethornell.so` (`crates/ethornell-mobile`). Android 8.0 (API 26) or later,
+`libethornell_mobile.so` (`crates/ethornell-mobile`). Android 8.0 (API 26) or later,
 arm64-v8a, and x86_64 for the emulator.
 
 ## Playing
@@ -33,7 +33,7 @@ ABIS=arm64-v8a platform/android/build.sh  # one ABI
 
 Needs rustup, a JDK 17 or 21, and the Android SDK (`ANDROID_HOME`) with an
 NDK (`ANDROID_NDK_HOME`, or the newest under `$ANDROID_HOME/ndk`). The script
-builds `libethornell.so` with cargo-ndk into `app/src/main/jniLibs`, checks
+builds `libethornell_mobile.so` with cargo-ndk into `app/src/main/jniLibs`, checks
 its ELF layout (`verify_elf.py`: 16 KB pages, RELRO, exports), then runs
 Gradle.
 

@@ -32,7 +32,7 @@ android {
 
     packaging {
         jniLibs {
-            // libethornell.so is page-aligned for 16 KB pages; keep it
+            // libethornell_mobile.so is page-aligned for 16 KB pages; keep it
             // uncompressed so it loads straight from the APK.
             useLegacyPackaging = false
         }

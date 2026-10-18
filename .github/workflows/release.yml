@@ -85,11 +85,11 @@ jobs:
           distribution: temurin
           java-version: '17'
       - name: Build APK
-        env:
-          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_LATEST_HOME }}
         # A debug-signed APK: installable as is. Each CI machine has its own
         # debug key, so updating needs an uninstall first (saves are lost).
-        run: platform/android/build.sh
+        run: |
+          export ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME"
+          platform/android/build.sh
       - name: Package
         run: |
           mkdir -p dist

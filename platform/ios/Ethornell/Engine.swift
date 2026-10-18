@@ -1,7 +1,7 @@
 import CoreText
 import Foundation
 
-/// The engine in libethornell.a (crates/ethornell-mobile), through the C ABI
+/// The engine in libethornell_mobile.a (crates/ethornell-mobile), through the C ABI
 /// of platform/ios/include/ethornell_ios.h. Use it from the main thread only.
 final class Engine {
     enum InputKind: UInt32 {

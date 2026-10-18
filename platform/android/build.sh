@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds libethornell.so for each ABI with cargo-ndk, then the APK with Gradle.
+# Builds libethornell_mobile.so for each ABI with cargo-ndk, then the APK with Gradle.
 #
 #   platform/android/build.sh            # debug APK
 #   VARIANT=release platform/android/build.sh
@@ -55,10 +55,10 @@ cd "$ROOT"
 cargo ndk "${abi_args[@]}" -P "$API" -o "$JNI_LIBS" build -p ethornell-mobile --release --locked
 
 for abi in $ABIS; do
-  test -f "$JNI_LIBS/$abi/libethornell.so"
+  test -f "$JNI_LIBS/$abi/libethornell_mobile.so"
 done
 if [[ " $ABIS " == *" arm64-v8a "* ]]; then
-  python3 "$ANDROID_DIR/verify_elf.py" "$JNI_LIBS/arm64-v8a/libethornell.so" "$NDK_BIN/llvm-readelf"
+  python3 "$ANDROID_DIR/verify_elf.py" "$JNI_LIBS/arm64-v8a/libethornell_mobile.so" "$NDK_BIN/llvm-readelf"
 fi
 
 cd "$ANDROID_DIR"

@@ -4,13 +4,13 @@ import android.content.Context;
 import android.view.Surface;
 
 /**
- * The engine in libethornell.so (crates/ethornell-mobile). Every call except
+ * The engine in libethornell_mobile.so (crates/ethornell-mobile). Every call except
  * {@link #nativeInit} and {@link #nativeLastError} runs on the one engine
  * thread that created the handle (platform/android/include/ABI.md).
  */
 final class NativeEngine {
     static {
-        System.loadLibrary("ethornell");
+        System.loadLibrary("ethornell_mobile");
     }
 
     private NativeEngine() {}

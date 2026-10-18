@@ -4,11 +4,11 @@ version = "0.1.0"
 edition.workspace = true
 build = "build.rs"
 
-# The host-driven C ABI of the mobile launchers: `libethornell.so` for the
-# Android app (platform/android) and `libethornell.a` for the iOS app
+# The host-driven C ABI of the mobile launchers: `libethornell_mobile.so` for the
+# Android app (platform/android) and `libethornell_mobile.a` for the iOS app
 # (platform/ios). See platform/android/include and platform/ios/include.
 [lib]
-name = "ethornell"
+name = "ethornell_mobile"
 crate-type = ["cdylib", "staticlib", "rlib"]
 
 [dependencies]
