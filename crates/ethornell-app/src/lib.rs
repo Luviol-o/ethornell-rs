@@ -15921,6 +15921,96 @@ mod input_tests {
     }
 
     #[test]
+    fn clicked_item_becomes_current_when_the_descriptor_asks() {
+        // Wonderful Everyday's settings: a group of choices with selection
+        // enabled but no pointer selection, root+0x1C set.
+        for select_on_activation in [1, 0] {
+            let manager =
+                ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
+            let mut api = super::RuntimeTraceApi::new(manager);
+            let surface = 20_031;
+            let object = 102;
+            let bitmap = 1925;
+            api.store_graph_image(
+                "test:choice-icon".to_string(),
+                DecodedImage {
+                    width: 40,
+                    height: 24,
+                    rgba: vec![255; 40 * 24 * 4],
+                },
+            );
+            api.graph_resources.insert(
+                bitmap,
+                RuntimeGraphResource::whole("test:choice-icon".to_string()),
+            );
+            api.graph_surfaces
+                .insert(surface, RuntimeSurface::display(surface, 320.0, 120.0));
+            api.graph_input_objects.insert(
+                object,
+                super::graph_input::RuntimeGraphInputObject::new_extended(surface),
+            );
+            let choice = |index: i32, x: i32| GraphInputRegion {
+                group: 0,
+                index,
+                ordinal: index,
+                enabled_depth: 1,
+                selected: false,
+                x,
+                y: 20,
+                width: 40,
+                height: 24,
+                normal_resource: bitmap,
+                selected_resource: bitmap,
+                hover_resource: -1,
+                hover_selected_resource: -1,
+                mask_resource: -1,
+                current_selection_hit_excluded: false,
+                flags: 0,
+            };
+            GraphApi::configure_graph_input_object(
+                &mut api,
+                object,
+                GraphInputDescriptor {
+                    flags: [0, 0, 0, 0, select_on_activation, 0, 0],
+                    groups: vec![GraphInputGroup {
+                        index: 0,
+                        initial_current_item: 0,
+                        selection_enabled: true,
+                        pointer_selection_enabled: false,
+                        pointer_activation_enabled: false,
+                        selection_exclusion_key: -1,
+                        extended_flags: 0,
+                    }],
+                    regions: vec![choice(0, 10), choice(1, 100)],
+                    ..GraphInputDescriptor::default()
+                },
+            );
+
+            super::apply_runtime_input_event(
+                &mut api,
+                super::RuntimeInputEvent::MousePress { x: 110.0, y: 30.0 },
+            );
+            super::apply_runtime_input_event(
+                &mut api,
+                super::RuntimeInputEvent::MouseRelease { x: 110.0, y: 30.0 },
+            );
+
+            let input = &api.graph_input_objects[&object];
+            assert!(input.queued_events.contains(&[
+                0x1000_0006,
+                super::graph_input::pack_words(0, 1),
+                1
+            ]));
+            assert_eq!(
+                input.is_current_selection(0, 1),
+                select_on_activation != 0,
+                "root+0x1C = {select_on_activation}"
+            );
+            assert_eq!(input.is_current_selection(0, 0), select_on_activation == 0);
+        }
+    }
+
+    #[test]
     fn extended_release_timed_item_cancels_when_released_outside() {
         let manager =
             ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
@@ -17727,6 +17817,7 @@ impl RuntimeTraceApi {
                 return true;
             }
 
+            let mut reselected = false;
             if let Some(input) = self.graph_input_objects.get_mut(&object) {
                 input.clear_deferred_pointer_activation();
                 input.begin_interaction(region, local_x, local_y);
@@ -17739,6 +17830,10 @@ impl RuntimeTraceApi {
                     ]);
                     input.queue_event([0x1000_0006, payload, 1]);
                 }
+                reselected = input.select_activated_item(region);
+            }
+            if reselected {
+                self.refresh_graph_input_control_layers(object);
             }
             self.last_hit_control = graph_input::pack_words(region.group, region.index);
             self.last_hit_payload = region.index;
@@ -17934,6 +18029,7 @@ impl RuntimeTraceApi {
             .graph_input_objects
             .get(&object)
             .is_some_and(|input| input.extended);
+        let mut reselected = false;
         if let Some(input) = self.graph_input_objects.get_mut(&object) {
             input.begin_interaction(region, local_x, local_y);
             if extended {
@@ -17945,6 +18041,10 @@ impl RuntimeTraceApi {
                 ]);
                 input.queue_event([0x1000_0006, payload, 1]);
             }
+            reselected = input.select_activated_item(region);
+        }
+        if reselected {
+            self.refresh_graph_input_control_layers(object);
         }
         self.last_hit_control = graph_input::pack_words(region.group, region.index);
         self.last_hit_payload = region.index;
