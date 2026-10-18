@@ -2323,7 +2323,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8968f1eda49cdf4f6406fd5ffe590c3ca2778a1b0e50b5684974b138a99dfb2f"
 dependencies = [
  "atomic-arena",
- "cpal",
  "glam",
  "mint",
  "ringbuf 0.3.3",
