@@ -53,9 +53,22 @@ pub(crate) fn load_default_font() -> Result<FontArc> {
     if let Some(font) = SESSION_FONT.with(|session| session.borrow().clone()) {
         return Ok(font);
     }
-    match std::env::var_os("ETHORNELL_SNAPSHOT_FONT") {
+    default_font(
+        std::env::var_os("ETHORNELL_SNAPSHOT_FONT"),
+        std::env::var_os("ETHORNELL_FONT"),
+    )
+}
+
+/// The snapshot font when one is named, else the text font: the file
+/// `ETHORNELL_FONT` names (a substitute for the font the game asks for), else
+/// a system font. The window's renderer draws with this session font too.
+fn default_font(
+    snapshot: Option<std::ffi::OsString>,
+    text: Option<std::ffi::OsString>,
+) -> Result<FontArc> {
+    match snapshot {
         Some(path) => ethornell_render::FontProvider::load_file(path, 0),
-        None => ethornell_render::FontProvider::load_system_cjk_font(),
+        None => ethornell_render::load_text_font(text),
     }
 }
 
@@ -1731,6 +1744,23 @@ mod font_session_tests {
         // Keep the sorted directory intact; zero cmap encoding subtables.
         bytes[cmap_offset + 2..cmap_offset + 4].copy_from_slice(&[0, 0]);
         ethornell_render::FontProvider::load_bytes(bytes, 0).expect("font without cmap")
+    }
+
+    #[test]
+    fn the_session_font_is_the_requested_text_font() {
+        // ETHORNELL_FONT names a substitute for the font a game asks for. The
+        // window draws with the session font, so the request has to reach it.
+        let system =
+            ethornell_render::FontProvider::load_system_cjk_font().expect("system CJK font");
+        assert_ne!(system.glyph_id('A').0, 0);
+        let path = std::env::temp_dir().join(format!(
+            "ethornell-requested-text-font-{}.ttf",
+            std::process::id()
+        ));
+        std::fs::write(&path, missing_font(&system).font_data()).unwrap();
+        let font = default_font(None, Some(path.clone().into_os_string()));
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(font.expect("requested text font").glyph_id('A').0, 0);
     }
 
     #[test]
