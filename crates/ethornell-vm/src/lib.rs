@@ -1190,9 +1190,9 @@ pub trait GraphApi {
         Err(3)
     }
 
-    /// Validate the public Graph90:F6 destination/source/frame contract. The
-    /// portable backend returns status 6 after successful validation while the
-    /// proprietary frame codec remains unavailable.
+    /// Validate the public Graph90:F6 destination/source/frame contract, then
+    /// decode the frame into the destination bitmap. Status 6 is a frame that
+    /// fails to decode.
     fn validate_buriko_movie_decode(
         &mut self,
         _destination: i32,
@@ -13148,6 +13148,7 @@ mod tests {
         memory_sound: Option<(i32, Vec<u8>, i32, f64, f64)>,
         movie_position: Option<i32>,
         buriko_movie_load: Option<Result<(i32, [i32; 5]), i32>>,
+        graph_call_result: Option<i32>,
         graph_object_property: Option<(i32, i32, Result<i32, i32>)>,
         window_valid_region: Option<[i32; 4]>,
         caret_frame_call: Option<(u32, i32, Vec<i32>)>,
@@ -13428,7 +13429,7 @@ mod tests {
 
         fn call_graph(&mut self, call: &mut NativeCallFrame) -> super::VmResult<Value> {
             call.args_mut().clear();
-            Ok(Value::None)
+            Ok(self.graph_call_result.map_or(Value::None, Value::Int))
         }
 
         fn query_bitmap_info(&mut self, bitmap: i32) -> Option<super::BitmapInfo> {
@@ -14811,6 +14812,46 @@ mod tests {
         assert_eq!(report.stop_reason, VmStopReason::Completed);
         assert_eq!(vm.read_int(destination, 2).unwrap(), 0x4411_2233);
         assert_eq!(vm.stack, [Value::Int(0)]);
+    }
+
+    #[test]
+    fn graph90_f6_returns_its_status_or_completes_dcprocdecodebmv_after_sys80_53() {
+        let instruction = test_instruction(0x10, 0x90, "grp1", vec![0x90, 0xf6], Vec::new());
+        let mut api = SchedulingApi {
+            graph_call_result: Some(0),
+            ..SchedulingApi::default()
+        };
+
+        let mut vm = Vm::new();
+        vm.stack
+            .extend([Value::Int(128), Value::Int(73), Value::Int(1)]);
+        vm.dispatch(&instruction, &mut api).unwrap();
+        assert_eq!(vm.stack, [Value::Int(0)]);
+        assert!(vm.thread.current_procedure().is_none());
+
+        let mut vm = Vm::new();
+        assert_eq!(
+            vm.try_builtin_sys_with_api(&mut api, 0x80, 0x53).unwrap(),
+            Some(Value::None)
+        );
+        vm.stack
+            .extend([Value::Int(128), Value::Int(73), Value::Int(1)]);
+        vm.dispatch(&instruction, &mut api).unwrap();
+        assert!(vm.stack.is_empty(), "the status is the procedure's output");
+        assert!(!vm.next_binary_or_bmv_async);
+        let procedure = vm.thread.current_procedure().expect("DCProcDecodeBMV");
+        let super::CProcedure::HostCompleted(completed) = procedure.object else {
+            panic!("Graph90:F6 must complete its procedure on the host");
+        };
+        assert_eq!(completed.target_class_name, "DCProcDecodeBMV");
+        assert_eq!(
+            (
+                completed.terminal_status,
+                completed.outputs,
+                completed.output_count
+            ),
+            (0, [0, 0], 1)
+        );
     }
 
     #[test]

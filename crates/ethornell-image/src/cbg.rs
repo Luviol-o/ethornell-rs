@@ -1,6 +1,8 @@
 use crate::{DecodedImage, parse_cbg_metadata};
 use ethornell_core::{EthornellError, Result};
 
+pub(crate) mod bf_movie;
+
 pub fn decode_cbg(data: &[u8]) -> Result<DecodedImage> {
     let meta = parse_cbg_metadata(data)?;
     let version = meta.version.unwrap_or(0);
