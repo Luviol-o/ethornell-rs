@@ -145,6 +145,18 @@ impl MovieDecoder {
         if packets.is_empty() {
             return None;
         }
+        // A file that isn't a movie (Graph90:F0 names movies by file, so a
+        // script can name an image archive) can still pass the demuxer as one
+        // video elementary stream through stray start codes in its data. Its
+        // first packet doesn't decode: fail the open instead of playing
+        // nothing for the duration the stray codes add up to.
+        let mut decoder = Decoder::new();
+        let first = &packets[0];
+        let pending_frames = decoder
+            .decode_shared(&first.data, first.pts_90k)
+            .ok()?
+            .into_iter()
+            .collect();
         let frame_rate = packets
             .iter()
             .find_map(|packet| sequence_frame_rate(&packet.data))
@@ -152,9 +164,9 @@ impl MovieDecoder {
         Some(Self {
             packets,
             audio: (!audio.is_empty()).then(|| StreamBytes(audio.into())),
-            decoder: Decoder::new(),
-            pending_frames: VecDeque::new(),
-            packet_index: 0,
+            decoder,
+            pending_frames,
+            packet_index: 1,
             frame_index: None,
             current_frame: None,
             frame_interval_ms: (1000.0 / frame_rate).round().max(1.0) as i32,
@@ -812,6 +824,34 @@ mod tests {
             "closing the movie stops its soundtrack"
         );
         assert!(step(&registry).is_empty());
+    }
+
+    /// What an archive of images looks like to the demuxer: no pack header,
+    /// so one video elementary stream, whose compressed data happens to hold
+    /// picture start codes but no sequence header before them.
+    fn image_archive() -> Vec<u8> {
+        let mut bytes = b"BURIKO ARC20".to_vec();
+        for chunk in 0..8u8 {
+            bytes.extend_from_slice(&[0x5A ^ chunk; 61]);
+            bytes.extend_from_slice(&[0, 0, 1, 0x00]);
+        }
+        bytes
+    }
+
+    /// Wonderful Everyday names one movie by an archive of 185 images; the
+    /// stray picture start codes in it added up to a 2,903 ms movie that
+    /// played nothing.
+    #[test]
+    fn a_file_whose_first_video_packet_does_not_decode_is_no_movie() {
+        let bytes = image_archive();
+        assert!(probe_mpeg_duration_ms(&bytes) > 0);
+        let mut registry = GraphEffectRegistry::default();
+        assert_eq!(
+            registry.configure_media(5, String::new(), "m".into(), &bytes),
+            2
+        );
+        assert_eq!(registry.state(5), 4, "no movie process");
+        assert!(registry.movie_audio().is_empty());
     }
 
     #[test]
