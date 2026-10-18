@@ -1062,6 +1062,9 @@ impl RuntimeTraceApi {
         }
         self.native_message_active = true;
         let duration_ms = self.text_runtime.duration_ms();
+        if has_visible_glyph {
+            crate::regress_probe::probe_record_line("typed", &message_text);
+        }
         tracing::info!(target, duration_ms, text = %message_text, "NativeMessage");
         self.trace_graph(format!(
             "native message node #{target} duration={duration_ms}ms {:?}",
