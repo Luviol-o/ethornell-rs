@@ -15,6 +15,18 @@ pub struct TextStyleSpan {
     pub italic: bool,
 }
 
+/// A glow under drawn text: the target's text style mode 2 (`sub_434E30`).
+/// The glyphs move `radius_x`, `radius_y` pixels right and down onto a halo
+/// in `rgb` whose alpha is their coverage summed over a box of twice the
+/// radius (capped at opaque), blended at `concentration / 256`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct TextGlow {
+    pub radius_x: u32,
+    pub radius_y: u32,
+    pub rgb: [u8; 3],
+    pub concentration: u32,
+}
+
 #[derive(Debug, Clone)]
 pub enum RenderCommand {
     Clear {
@@ -56,6 +68,7 @@ pub enum RenderCommand {
         color: [f32; 4],
         size: f32,
         styles: Vec<TextStyleSpan>,
+        glow: Option<TextGlow>,
         clip: Option<[f32; 4]>,
         z: i32,
     },
@@ -83,15 +96,23 @@ struct TextCacheKey {
     size_bits: u32,
     color_bits: [u32; 4],
     styles: Vec<TextStyleSpan>,
+    glow: Option<TextGlow>,
 }
 
 impl TextCacheKey {
-    fn new(text: &str, size: f32, color: [f32; 4], styles: &[TextStyleSpan]) -> Self {
+    fn new(
+        text: &str,
+        size: f32,
+        color: [f32; 4],
+        styles: &[TextStyleSpan],
+        glow: Option<TextGlow>,
+    ) -> Self {
         Self {
             text: text.to_string(),
             size_bits: size.to_bits(),
             color_bits: color.map(f32::to_bits),
             styles: styles.to_vec(),
+            glow,
         }
     }
 }
@@ -668,15 +689,19 @@ impl<'w> Renderer<'w> {
                     color,
                     size,
                     styles,
+                    glow,
                     clip,
                     ..
                 } => {
-                    let key = TextCacheKey::new(&text, size, color, &styles);
+                    let key = TextCacheKey::new(&text, size, color, &styles, glow);
                     active_text_keys.insert(key.clone());
                     let handle = if let Some(handle) = self.text_cache.get(&key).cloned() {
                         handle
                     } else {
-                        let image = rasterize_text(&self.font, &text, size, color, &styles);
+                        let mut image = rasterize_text(&self.font, &text, size, color, &styles);
+                        if let Some(glow) = glow {
+                            image = apply_text_glow(&image, glow);
+                        }
                         let handle = self.insert_rgba(&image)?;
                         self.text_cache.insert(key, handle.clone());
                         handle
@@ -1105,6 +1130,72 @@ fn rasterize_text(
     }
 }
 
+/// Puts rasterized text (straight alpha) on its glow; see [`TextGlow`]. Like
+/// the target's per-glyph records, the halo at (x, y) sums the text's
+/// coverage over x - 2 * radius_x ..= x and y - 2 * radius_y ..= y, and the
+/// text lands at (radius_x, radius_y).
+fn apply_text_glow(text: &DecodedImage, glow: TextGlow) -> DecodedImage {
+    let (text_width, text_height) = (text.width as usize, text.height as usize);
+    let (rx, ry) = (glow.radius_x as usize, glow.radius_y as usize);
+    let (width, height) = (text_width + 2 * rx, text_height + 2 * ry);
+    // Summed-area table of the text's alpha, one extra row and column.
+    let stride = text_width + 1;
+    let mut table = vec![0u32; stride * (text_height + 1)];
+    for y in 0..text_height {
+        let mut row = 0u32;
+        for x in 0..text_width {
+            row += u32::from(text.rgba[(y * text_width + x) * 4 + 3]);
+            table[(y + 1) * stride + x + 1] = table[y * stride + x + 1] + row;
+        }
+    }
+    let box_sum = |x0: usize, y0: usize, x1: usize, y1: usize| {
+        table[y1 * stride + x1] + table[y0 * stride + x0]
+            - table[y0 * stride + x1]
+            - table[y1 * stride + x0]
+    };
+    let concentration = glow.concentration.min(256);
+    let mut rgba = vec![0u8; width * height * 4];
+    for y in 0..height {
+        let (y0, y1) = (
+            y.saturating_sub(2 * ry).min(text_height),
+            (y + 1).min(text_height),
+        );
+        for x in 0..width {
+            let (x0, x1) = (
+                x.saturating_sub(2 * rx).min(text_width),
+                (x + 1).min(text_width),
+            );
+            let sum = box_sum(x0, y0, x1, y1).min(255);
+            let at = (y * width + x) * 4;
+            rgba[at..at + 3].copy_from_slice(&glow.rgb);
+            rgba[at + 3] = (sum * concentration / 256) as u8;
+        }
+    }
+    for y in 0..text_height {
+        for x in 0..text_width {
+            let source = &text.rgba[(y * text_width + x) * 4..][..4];
+            let source_alpha = u32::from(source[3]);
+            if source_alpha == 0 {
+                continue;
+            }
+            let at = ((y + ry) * width + x + rx) * 4;
+            let below_alpha = u32::from(rgba[at + 3]) * (255 - source_alpha) / 255;
+            let alpha = source_alpha + below_alpha;
+            for channel in 0..3 {
+                rgba[at + channel] = ((u32::from(source[channel]) * source_alpha
+                    + u32::from(rgba[at + channel]) * below_alpha)
+                    / alpha) as u8;
+            }
+            rgba[at + 3] = alpha as u8;
+        }
+    }
+    DecodedImage {
+        width: width as u32,
+        height: height as u32,
+        rgba,
+    }
+}
+
 fn text_style_at(styles: &[TextStyleSpan], char_index: usize) -> Option<TextStyleSpan> {
     styles
         .iter()
@@ -1330,3 +1421,36 @@ fn fs_main(v: VertexOut) -> @location(0) vec4<f32> {
 "#;
 
 use wgpu::util::DeviceExt;
+
+#[cfg(test)]
+mod glow_tests {
+    use super::*;
+
+    #[test]
+    fn text_glow_halos_the_text_and_moves_it_by_the_radius() {
+        // One opaque black pixel of text at (1, 1).
+        let mut rgba = vec![0u8; 3 * 3 * 4];
+        rgba[(3 + 1) * 4 + 3] = 255;
+        let text = DecodedImage {
+            width: 3,
+            height: 3,
+            rgba,
+        };
+        let glow = TextGlow {
+            radius_x: 1,
+            radius_y: 1,
+            rgb: [255, 255, 255],
+            concentration: 192,
+        };
+
+        let out = apply_text_glow(&text, glow);
+
+        assert_eq!((out.width, out.height), (5, 5));
+        let pixel = |x: usize, y: usize| &out.rgba[(y * 5 + x) * 4..][..4];
+        assert_eq!(pixel(2, 2), &[0, 0, 0, 255]);
+        assert_eq!(pixel(1, 1), &[255, 255, 255, 191]);
+        assert_eq!(pixel(3, 3), &[255, 255, 255, 191]);
+        assert_eq!(pixel(0, 0)[3], 0);
+        assert_eq!(pixel(4, 4)[3], 0);
+    }
+}
