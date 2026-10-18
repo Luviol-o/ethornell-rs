@@ -19,9 +19,19 @@ struct SurfaceControlSet {
     layers: BTreeSet<i32>,
 }
 
+/// The item layers of a released owner, still drawn for a frame (port
+/// behaviour, see `release_owner`).
+#[derive(Debug, Clone)]
+struct ReleasedControlSet {
+    surface: i32,
+    layers: BTreeSet<i32>,
+    frame: u64,
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct SurfaceControlRegistry {
     sets: BTreeMap<SurfaceControlOwner, SurfaceControlSet>,
+    released: Vec<ReleasedControlSet>,
 }
 
 impl SurfaceControlRegistry {
@@ -80,6 +90,47 @@ impl SurfaceControlRegistry {
             .unwrap_or_default()
     }
 
+    /// Port behaviour, not the target's (whose release deletes the item
+    /// Sprites at once): an owner's layers leave its owner set, so nothing
+    /// hit-tests them any more, but stay drawn as its window's controls until
+    /// the window gets a new layout (`take_released_on_surface`) or the frame
+    /// after `frame` ends (`take_released_before`).
+    pub(crate) fn release_owner(&mut self, owner: SurfaceControlOwner, frame: u64) {
+        if let Some(set) = self.sets.remove(&owner) {
+            self.released.push(ReleasedControlSet {
+                surface: set.surface,
+                layers: set.layers,
+                frame,
+            });
+        }
+    }
+
+    /// The released layers left on `surface`, removed from the registry.
+    pub(crate) fn take_released_on_surface(&mut self, surface: i32) -> BTreeSet<i32> {
+        self.take_released_where(|set| set.surface == surface)
+    }
+
+    /// The layers released before `frame`, removed from the registry.
+    pub(crate) fn take_released_before(&mut self, frame: u64) -> BTreeSet<i32> {
+        self.take_released_where(|set| set.frame < frame)
+    }
+
+    fn take_released_where(
+        &mut self,
+        mut matches: impl FnMut(&ReleasedControlSet) -> bool,
+    ) -> BTreeSet<i32> {
+        let mut taken = BTreeSet::new();
+        self.released.retain(|set| {
+            if matches(set) {
+                taken.extend(set.layers.iter().copied());
+                false
+            } else {
+                true
+            }
+        });
+        taken
+    }
+
     /// Remove every owner attached to a destroyed Window/surface.
     pub(crate) fn remove_surface(&mut self, surface: i32) -> BTreeSet<i32> {
         let owners = self
@@ -93,11 +144,13 @@ impl SurfaceControlRegistry {
                 removed.extend(set.layers);
             }
         }
+        removed.extend(self.take_released_on_surface(surface));
         removed
     }
 
     pub(crate) fn contains_layer(&self, layer: i32) -> bool {
         self.sets.values().any(|set| set.layers.contains(&layer))
+            || self.released.iter().any(|set| set.layers.contains(&layer))
     }
 
     pub(crate) fn contains_layer_for_owner(&self, owner: SurfaceControlOwner, layer: i32) -> bool {
