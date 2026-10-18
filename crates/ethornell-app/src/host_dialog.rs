@@ -1047,5 +1047,6 @@ fn set_wallpaper_platform(path: &str, style: i32, _tile: i32) -> bool {
 }
 
 pub(crate) fn set_wallpaper(path: &str, style: i32, tile: i32) -> bool {
+    if super::file_policy::restricted() { return false; }
     set_wallpaper_platform(path, style, tile)
 }

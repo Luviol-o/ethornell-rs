@@ -4195,16 +4195,14 @@ impl RuntimeTraceApi {
                 ethornell_vm::Value::None
             }
             (0x90, 0xC4) => {
+                if file_policy::restricted() {return Some(Err(ethornell_vm::VmError::Runtime("unsupported external bitmap descriptor import".into())));}
                 let pixel_mode = pop_int_value(stack).unwrap_or_default();
                 let file = pop_string_value(stack).unwrap_or_default();
                 let destination = pop_int_value(stack).unwrap_or_default();
                 let status = if !matches!(pixel_mode, -1 | 1 | 2 | 3) {
                     -1
-                } else if let Some(path) =
-                    find_runtime_file_from_root(&self.manager, &self.native_root, "", &file)
-                {
-                    match std::fs::read(path)
-                        .ok()
+                } else if let Some(bytes) = read_runtime_bytes(&self.manager, "", &file) {
+                    match Some(bytes)
                         .and_then(|bytes| decode_image(&bytes).ok())
                     {
                         Some(image) => {
@@ -4234,6 +4232,7 @@ impl RuntimeTraceApi {
                 ethornell_vm::Value::Int(status)
             }
             (0x90, 0xC5) => {
+                if file_policy::restricted() {return Some(Err(ethornell_vm::VmError::Runtime("unsupported external bitmap export; atomic user-save API required".into())));}
                 let bitmap = pop_int_value(stack).unwrap_or_default();
                 let quality = pop_int_value(stack).unwrap_or_default();
                 let format = pop_int_value(stack).unwrap_or_default();

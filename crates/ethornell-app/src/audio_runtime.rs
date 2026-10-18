@@ -157,6 +157,20 @@ mod tests {
         assert_eq!(clock.position_ms(), 0);
         assert!(!clock.is_running());
     }
+
+    #[test]
+    fn checked_commands_reject_an_absent_backend() {
+        let error = super::execute_audio_command_checked(
+            None,
+            super::AudioCommand::Pause {
+                channel: 1,
+                paused: true,
+                fade_ms: 0,
+            },
+            "test",
+        );
+        assert!(error.is_err());
+    }
 }
 
 pub(crate) fn execute_audio_command(
@@ -164,14 +178,21 @@ pub(crate) fn execute_audio_command(
     command: AudioCommand,
     frontend: &'static str,
 ) {
-    let Some(audio) = audio else {
-        tracing::warn!(
-            frontend,
-            ?command,
-            "audio command dropped because backend is unavailable"
-        );
-        return;
-    };
+    if let Err(error) = execute_audio_command_checked(audio, command, frontend) {
+        tracing::warn!(frontend, %error, "script audio command failed");
+    }
+}
+
+/// A host must propagate this result before claiming a successful tick. None
+/// is an unavailable backend, not implicit silent mode; explicit silent hosts
+/// discard commands at the frontend boundary instead.
+pub(crate) fn execute_audio_command_checked(
+    audio: Option<&mut ethornell_audio::AudioSystem>,
+    command: AudioCommand,
+    frontend: &'static str,
+) -> ethornell_core::Result<()> {
+    let audio = audio
+        .ok_or_else(|| ethornell_core::EthornellError::Other("audio backend unavailable".into()))?;
     match command {
         AudioCommand::Play {
             asset,
@@ -223,32 +244,27 @@ pub(crate) fn execute_audio_command(
                     fade_ms,
                 )
             };
-            match result {
-                Ok(started) => tracing::info!(
-                    frontend,
-                    channel,
-                    looped,
-                    volume,
-                    decode_gain,
-                    playback_rate,
-                    panning,
-                    fade_ms,
-                    started,
-                    archive = asset.archive,
-                    file = asset.file,
-                    loop_archive = loop_asset.as_ref().map(|asset| asset.archive.as_str()),
-                    loop_file = loop_asset.as_ref().map(|asset| asset.file.as_str()),
-                    "script audio playback requested"
-                ),
-                Err(err) => tracing::warn!(
-                    frontend,
-                    channel,
-                    archive = asset.archive,
-                    file = asset.file,
-                    %err,
-                    "script audio playback failed"
-                ),
-            }
+            let started = result.map_err(|error| {
+                ethornell_core::EthornellError::Other(format!(
+                    "audio playback failed on channel {channel}: {error}"
+                ))
+            })?;
+            tracing::info!(
+                frontend,
+                channel,
+                looped,
+                volume,
+                decode_gain,
+                playback_rate,
+                panning,
+                fade_ms,
+                started,
+                archive = asset.archive,
+                file = asset.file,
+                loop_archive = loop_asset.as_ref().map(|asset| asset.archive.as_str()),
+                loop_file = loop_asset.as_ref().map(|asset| asset.file.as_str()),
+                "script audio playback requested"
+            );
         }
         AudioCommand::PlayStream {
             channel,
@@ -273,7 +289,7 @@ pub(crate) fn execute_audio_command(
             paused,
             fade_ms,
         } => {
-            audio.pause_channel(channel, paused, fade_ms);
+            audio.try_pause_channel(channel, paused, fade_ms)?;
             tracing::debug!(
                 frontend,
                 channel,
@@ -315,4 +331,5 @@ pub(crate) fn execute_audio_command(
             );
         }
     }
+    Ok(())
 }

@@ -548,6 +548,7 @@ impl RuntimeTraceApi {
                 ethornell_vm::Value::Int(status)
             }
             0xf4 => {
+                if file_policy::restricted() {return Some(Err(ethornell_vm::VmError::Runtime("unsupported Android SWF control: upstream is capture-only without host audio; excluded from v1".into())));}
                 // Source order: bitmap, width, height, SWF path, parameter.
                 let parameter = pop_int_value(stack).unwrap_or_default();
                 let path = pop_string_value(stack).unwrap_or_default();

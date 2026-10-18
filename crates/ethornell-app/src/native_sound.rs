@@ -1023,10 +1023,11 @@ const NATIVE_CD_AUDIO_EXTENSIONS: &[&str] = &["ogg", "wav"];
 fn discover_native_cd_audio_tracks(
     manager: &ethornell_archive::ResourceManager,
 ) -> std::collections::BTreeMap<u8, AudioAsset> {
+    if file_policy::restricted() {return std::collections::BTreeMap::new();}
     let mut tracks = std::collections::BTreeMap::new();
     let root = game_root_path(manager);
     let mut directories = Vec::new();
-    if let Some(path) = std::env::var_os("ETHORNELL_CD_AUDIO_ROOT") {
+    if !file_policy::restricted() && let Some(path) = std::env::var_os("ETHORNELL_CD_AUDIO_ROOT") {
         directories.push(std::path::PathBuf::from(path));
     }
     for relative in ["cdda", "CDDA", "cd", "CD", "audio/cdda", "Audio/CDDA"] {
@@ -1061,7 +1062,16 @@ fn discover_native_cd_audio_tracks(
             else {
                 continue;
             };
-            let Ok(bytes) = std::fs::read(&path) else {
+            let bytes = if let Some(policy)=file_policy::active() {
+                use std::io::Read;
+                let Some(rel)=path.strip_prefix(&policy.resource).ok() else {continue;};
+                let Ok(file)=policy.open_resource(&rel.to_string_lossy()) else {continue;};
+                if file.metadata().map(|m|m.len()>128*1024*1024).unwrap_or(true) {continue;}
+                let mut bytes=Vec::new();
+                if file.take(128*1024*1024+1).read_to_end(&mut bytes).is_err() || bytes.len()>128*1024*1024 {continue;}
+                Ok(bytes)
+            } else {std::fs::read(&path)};
+            let Ok(bytes) = bytes else {
                 continue;
             };
             if !is_native_cd_audio_payload(&bytes) {

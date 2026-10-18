@@ -3,9 +3,170 @@ use crate::{
     graph::{RuntimeGraphDrawItem, RuntimeGraphLayer},
 };
 use ab_glyph::{Font, FontArc, PxScale, ScaleFont, point};
-use ethornell_core::{Result, composite_native_rgba};
+use ethornell_core::{EthornellError, Result, composite_native_rgba};
 use ethornell_image::{DecodedImage, write_rgba_png};
-use std::{path::Path, sync::OnceLock};
+use std::path::Path;
+
+thread_local! {
+    static SESSION_FONT: std::cell::RefCell<Option<FontArc>> = const { std::cell::RefCell::new(None) };
+    static MISSING_GLYPHS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static RASTER_ERROR: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+pub(crate) fn take_missing_glyphs() -> bool {
+    MISSING_GLYPHS.with(|m| m.replace(false))
+}
+
+pub(crate) fn take_raster_error() -> Option<String> {
+    RASTER_ERROR.with(|error| error.borrow_mut().take())
+}
+
+fn record_raster_error(message: impl Into<String>) {
+    RASTER_ERROR.with(|error| {
+        let mut error = error.borrow_mut();
+        if error.is_none() {
+            *error = Some(message.into());
+        }
+    });
+}
+
+fn check_session_coverage(text: &str) {
+    SESSION_FONT.with(|s| {
+        if let Some(font) = s.borrow().as_ref() {
+            check_font_coverage(font, text.chars());
+        }
+    });
+}
+
+fn check_font_coverage(font: &FontArc, text: impl IntoIterator<Item = char>) {
+    if text
+        .into_iter()
+        .any(|ch| !ch.is_control() && font.glyph_id(ch).0 == 0)
+    {
+        MISSING_GLYPHS.with(|missing| missing.set(true));
+    }
+}
+
+/// Desktop/headless configuration is read once at the session boundary. An
+/// explicitly selected invalid font must fail, not silently select another.
+pub(crate) fn load_default_font() -> Result<FontArc> {
+    if let Some(font) = SESSION_FONT.with(|session| session.borrow().clone()) {
+        return Ok(font);
+    }
+    match std::env::var_os("ETHORNELL_SNAPSHOT_FONT") {
+        Some(path) => ethornell_render::FontProvider::load_file(path, 0),
+        None => ethornell_render::FontProvider::load_system_cjk_font(),
+    }
+}
+
+pub(crate) struct FontSessionGuard {
+    previous: Option<FontArc>,
+    previous_missing: bool,
+    previous_error: Option<String>,
+    // TLS scopes must be exited on the thread which entered them.
+    _not_send: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+impl Drop for FontSessionGuard {
+    fn drop(&mut self) {
+        SESSION_FONT.with(|s| *s.borrow_mut() = self.previous.take());
+        MISSING_GLYPHS.with(|missing| missing.set(self.previous_missing));
+        RASTER_ERROR.with(|error| *error.borrow_mut() = self.previous_error.take());
+    }
+}
+
+/// Hold through bootstrap, VM ticks, CPU snapshots and teardown. No font bytes
+/// or failed provider lookup survive this scope unless owned by the caller.
+pub(crate) fn enter_font_session(font: &FontArc) -> FontSessionGuard {
+    FontSessionGuard {
+        previous: SESSION_FONT.with(|s| s.replace(Some(font.clone()))),
+        previous_missing: MISSING_GLYPHS.with(|missing| missing.replace(false)),
+        previous_error: take_raster_error(),
+        _not_send: std::marker::PhantomData,
+    }
+}
+
+pub(crate) fn with_font<T>(font: &FontArc, f: impl FnOnce() -> T) -> T {
+    let _restore = enter_font_session(font);
+    f()
+}
+
+const MAX_RASTER_BYTES: usize = 128 * 1024 * 1024;
+const MAX_TEXT_GLYPHS: usize = 65_536;
+
+fn raster_byte_len(width: u32, height: u32) -> Result<usize> {
+    let bytes = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|n| n.checked_mul(4));
+    match bytes {
+        Some(bytes) if width <= 16_384 && height <= 16_384 && bytes <= MAX_RASTER_BYTES => {
+            Ok(bytes)
+        }
+        _ => Err(EthornellError::Other(
+            "CPU raster image budget exceeded".into(),
+        )),
+    }
+}
+
+fn new_raster(width: u32, height: u32) -> Option<DecodedImage> {
+    let result = raster_byte_len(width, height).and_then(|bytes| {
+        let mut rgba = Vec::new();
+        rgba.try_reserve_exact(bytes)
+            .map_err(|_| EthornellError::Other("CPU raster allocation failed".into()))?;
+        rgba.resize(bytes, 0);
+        Ok(DecodedImage {
+            width,
+            height,
+            rgba,
+        })
+    });
+    match result {
+        Ok(image) => Some(image),
+        Err(error) => {
+            record_raster_error(error.to_string());
+            None
+        }
+    }
+}
+
+fn valid_text_raster(size: f32, glyph_count: usize) -> bool {
+    if !size.is_finite() || !(0.0..=1024.0).contains(&size) || glyph_count > MAX_TEXT_GLYPHS {
+        record_raster_error("CPU text raster budget exceeded");
+        return false;
+    }
+    true
+}
+
+fn valid_raster(image: &DecodedImage) -> bool {
+    if raster_byte_len(image.width, image.height).ok() != Some(image.rgba.len()) {
+        record_raster_error("invalid CPU raster RGBA image");
+        return false;
+    }
+    true
+}
+
+fn valid_text_position(x: f32, y: f32) -> bool {
+    if !x.is_finite() || !y.is_finite() || x.abs() > 1_000_000.0 || y.abs() > 1_000_000.0 {
+        record_raster_error("CPU text position out of range");
+        return false;
+    }
+    true
+}
+
+fn valid_glyph_bounds(bounds: ab_glyph::Rect) -> bool {
+    let width = bounds.width();
+    let height = bounds.height();
+    if !valid_text_position(bounds.min.x, bounds.min.y)
+        || !valid_text_position(bounds.max.x, bounds.max.y)
+        || !(0.0..=4096.0).contains(&width)
+        || !(0.0..=4096.0).contains(&height)
+        || width * height > 4_194_304.0
+    {
+        record_raster_error("glyph outline raster budget exceeded");
+        return false;
+    }
+    true
+}
 
 const SNAPSHOT_WIDTH: u32 = 1280;
 const SNAPSHOT_HEIGHT: u32 = 720;
@@ -18,6 +179,9 @@ pub(crate) struct RuntimeFrameComposition {
 
 pub(crate) fn write_runtime_snapshot(api: &RuntimeTraceApi, path: &Path) -> Result<()> {
     let out = compose_runtime_frame(api, true);
+    if let Some(error) = take_raster_error() {
+        return Err(EthornellError::Other(error));
+    }
     write_composed_runtime_snapshot(api, &out, path)
 }
 
@@ -26,6 +190,9 @@ pub(crate) fn write_composed_runtime_snapshot(
     framebuffer: &DecodedImage,
     path: &Path,
 ) -> Result<()> {
+    if !valid_raster(framebuffer) {
+        return Err(EthornellError::Other("invalid snapshot framebuffer".into()));
+    }
     if let Some(directory) = std::env::var_os("ETHORNELL_HEADLESS_DUMP_IMAGES_DIR") {
         let directory = std::path::PathBuf::from(directory);
         let selected_keys = std::env::var("ETHORNELL_HEADLESS_DUMP_IMAGE_KEYS")
@@ -109,10 +276,12 @@ pub(crate) fn compose_runtime_frame_through_priority(
     maximum_priority: Option<i32>,
 ) -> DecodedImage {
     let (width, height) = runtime_frame_size(api);
-    let mut out = DecodedImage {
-        width,
-        height,
-        rgba: vec![0; width as usize * height as usize * 4],
+    let Some(mut out) = new_raster(width, height) else {
+        return DecodedImage {
+            width: 0,
+            height: 0,
+            rgba: Vec::new(),
+        };
     };
     for px in out.rgba.as_chunks_mut::<4>().0 {
         px.copy_from_slice(&[0, 0, 0, 255]);
@@ -264,11 +433,7 @@ pub(crate) fn compose_graph_object(
     let (width, height) = target_size
         .filter(|(width, height)| *width > 0 && *height > 0)
         .unwrap_or((content_width.ceil() as u32, content_height.ceil() as u32));
-    let mut out = DecodedImage {
-        width: width.max(1),
-        height: height.max(1),
-        rgba: vec![0; width.max(1) as usize * height.max(1) as usize * 4],
-    };
+    let mut out = new_raster(width.max(1), height.max(1))?;
 
     if let Some(surface) = surface
         && let Some(resource_id) = surface.resource_id
@@ -466,6 +631,13 @@ pub(crate) fn draw_text_node(
     shadow: TextNodeShadow,
     clip: Option<crate::graph::RuntimeClipRect>,
 ) {
+    if !valid_raster(dst)
+        || !valid_text_position(node.x, node.y)
+        || !valid_text_raster(node.size, node.text.chars().count())
+    {
+        return;
+    }
+    check_session_coverage(&node.text);
     let Some(font) = snapshot_font() else {
         draw_fallback_text(dst, node, clip);
         return;
@@ -529,7 +701,7 @@ pub(crate) fn draw_text_node(
             ];
             draw_glyph(
                 dst,
-                font,
+                &font,
                 glyph.clone(),
                 shadow_color,
                 effect.dx,
@@ -543,7 +715,7 @@ pub(crate) fn draw_text_node(
         {
             draw_glyph(
                 dst,
-                font,
+                &font,
                 glyph.clone(),
                 [0.0, 0.0, 0.0, color[3] * shadow_alpha],
                 shadow_x,
@@ -553,7 +725,7 @@ pub(crate) fn draw_text_node(
                 clip,
             );
         }
-        draw_glyph(dst, font, glyph, color, 0, 0, bold, italic, clip);
+        draw_glyph(dst, &font, glyph, color, 0, 0, bold, italic, clip);
         x += advance;
         char_index += 1;
     }
@@ -561,7 +733,7 @@ pub(crate) fn draw_text_node(
     for (ruby, x, y, size) in crate::text::ruby_draw_runs(node, layout) {
         draw_text_run(
             dst,
-            font,
+            &font,
             &ruby,
             x,
             y,
@@ -584,6 +756,10 @@ fn draw_text_run(
     shadow: Option<(i32, i32, i32)>,
     clip: Option<crate::graph::RuntimeClipRect>,
 ) {
+    if !valid_text_position(x, y) || !valid_text_raster(size, text.chars().count()) {
+        return;
+    }
+    check_font_coverage(font, text.chars());
     let scale = PxScale::from(size);
     let scaled = font.as_scaled(scale);
     let baseline = y + scaled.ascent();
@@ -622,19 +798,14 @@ fn resolve_text_shadow(
     ))
 }
 
-fn snapshot_font() -> Option<&'static FontArc> {
-    static FONT: OnceLock<Option<FontArc>> = OnceLock::new();
-    FONT.get_or_init(|| {
-        if let Some(font) = std::env::var("ETHORNELL_SNAPSHOT_FONT")
-            .ok()
-            .and_then(|path| std::fs::read(path).ok())
-            .and_then(|bytes| FontArc::try_from_vec(bytes).ok())
-        {
-            return Some(font);
-        }
-        ethornell_render::load_system_cjk_font().ok()
-    })
-    .as_ref()
+fn snapshot_font() -> Option<FontArc> {
+    // Never perform filesystem IO in a glyph/measurement hot path. Production
+    // frontends initialize a session explicitly; unscoped calls are diagnostic.
+    let font = SESSION_FONT.with(|s| s.borrow().clone());
+    if font.is_none() {
+        record_raster_error("CPU font session not initialized");
+    }
+    font
 }
 
 /// Rasterize the target's direct bitmap-text path into an existing RGBA
@@ -652,6 +823,17 @@ pub(crate) fn rasterize_bitmap_text(
     horizontal_scale_percent: f32,
     color: [f32; 4],
 ) -> (i32, i32) {
+    if !valid_raster(dst)
+        || !valid_text_position(start_x as f32, start_y as f32)
+        || !valid_text_raster(size, text.chars().count())
+    {
+        return (start_x, start_y);
+    }
+    if !spacing.is_finite() || !horizontal_scale_percent.is_finite() {
+        record_raster_error("non-finite CPU bitmap text spacing/scale");
+        return (start_x, start_y);
+    }
+    check_session_coverage(text);
     let size = size.max(1.0);
     let horizontal_scale = if horizontal_scale_percent > 0.0 {
         horizontal_scale_percent / 100.0
@@ -698,7 +880,7 @@ pub(crate) fn rasterize_bitmap_text(
         let advance = scaled.h_advance(glyph_id).max(size * 0.5);
         let baseline = line_y + scaled.ascent();
         let glyph = glyph_id.with_scale_and_position(scale, point(x, baseline));
-        draw_glyph(dst, font, glyph, color, 0, 0, false, false, None);
+        draw_glyph(dst, &font, glyph, color, 0, 0, false, false, None);
         // Config resources use 100%; preserve the target's horizontal-scale
         // advance contract for other callers even though ab_glyph does not
         // provide an inexpensive per-glyph X-only transform here.
@@ -735,6 +917,9 @@ pub(crate) fn layout_direct_bitmap_text(
     bitmap_width: u32,
     bitmap_height: u32,
 ) -> (Vec<DirectTextGlyph>, i32) {
+    if !valid_text_raster(size as f32, bytes.len()) {
+        return (Vec::new(), 0);
+    }
     let size_i = size as i32;
     let mut glyphs = Vec::new();
     let mut x = start_x;
@@ -743,6 +928,7 @@ pub(crate) fn layout_direct_bitmap_text(
     let mut wrap: u32 = 0;
     let mut total = 0_i32;
     let mut index = 0;
+    let mut allocated = 0usize;
     while index < bytes.len() && bytes[index] != 0 {
         let lead = bytes[index];
         // sub_42FA80: 0x80..0x9F and 0xE0..0xFF lead a double-byte code.
@@ -758,18 +944,25 @@ pub(crate) fn layout_direct_bitmap_text(
                 x = start_x;
                 y = y.wrapping_add(size_i * line_percent / 100);
             }
-            let visible = x <= bitmap_width as i32 - 1
-                && x + width as i32 - 1 >= 0
-                && y <= bitmap_height as i32 - 1
-                && y + size_i - 1 >= 0;
+            let visible = i64::from(x) < i64::from(bitmap_width)
+                && i64::from(x) + i64::from(width) > 0
+                && i64::from(y) < i64::from(bitmap_height)
+                && i64::from(y) + i64::from(size) > 0;
             if !visible {
                 break;
             }
+            let cell_bytes = width.max(1) as usize * size as usize * 4;
+            allocated = allocated.saturating_add(cell_bytes);
+            if allocated > MAX_RASTER_BYTES {
+                record_raster_error("direct text cell budget exceeded");
+                return (Vec::new(), 0);
+            }
             let ink = direct_text_glyph_cell(code, size, bold);
-            let mut cell = DecodedImage {
-                width: width.max(1),
-                height: size,
-                rgba: vec![0; (width.max(1) * size * 4) as usize],
+            if ink.is_empty() && size != 0 {
+                return (Vec::new(), 0);
+            }
+            let Some(mut cell) = new_raster(width.max(1), size) else {
+                return (Vec::new(), 0);
             };
             let rgba = [
                 (packed_rgb >> 16) as u8,
@@ -788,8 +981,8 @@ pub(crate) fn layout_direct_bitmap_text(
             if width > 0 {
                 glyphs.push(DirectTextGlyph { x, y, cell });
             }
-            x = x.wrapping_add(width as i32 + spacing);
-            total = total.wrapping_add(width as i32 + spacing);
+            x = x.wrapping_add((width as i32).wrapping_add(spacing));
+            total = total.wrapping_add((width as i32).wrapping_add(spacing));
         } else {
             match code {
                 3 => {
@@ -813,6 +1006,9 @@ pub(crate) fn layout_direct_bitmap_text(
 /// monochrome `size` x `size` DIB. 0x7F is drawn as U+2014 and 0xEF40 as
 /// two U+2014; other codes at or above 0xEF40 draw nothing.
 fn direct_text_glyph_cell(code: u32, size: u32, bold: bool) -> Vec<bool> {
+    if !valid_text_raster(size as f32, 1) {
+        return Vec::new();
+    }
     let mut ink = vec![false; (size * size) as usize];
     let text: String = match code {
         0x7F => "\u{2014}".into(),
@@ -824,6 +1020,7 @@ fn direct_text_glyph_cell(code: u32, size: u32, bold: bool) -> Vec<bool> {
             .0
             .into_owned(),
     };
+    check_session_coverage(&text);
     let Some(font) = snapshot_font() else {
         return ink;
     };
@@ -839,6 +1036,9 @@ fn direct_text_glyph_cell(code: u32, size: u32, bold: bool) -> Vec<bool> {
             continue;
         };
         let bounds = outlined.px_bounds();
+        if !valid_glyph_bounds(bounds) {
+            return Vec::new();
+        }
         outlined.draw(|gx, gy, coverage| {
             if coverage < 0.5 {
                 return;
@@ -857,6 +1057,10 @@ fn direct_text_glyph_cell(code: u32, size: u32, bold: bool) -> Vec<bool> {
 
 /// Horizontal advance of one glyph, scaled by the horizontal percentage.
 pub(crate) fn glyph_advance(ch: char, size: f32, horizontal_scale_percent: f32) -> f32 {
+    if !valid_text_raster(size, 1) {
+        return 0.0;
+    }
+    check_session_coverage(&ch.to_string());
     let scale = if horizontal_scale_percent > 0.0 {
         horizontal_scale_percent / 100.0
     } else {
@@ -883,18 +1087,27 @@ pub(crate) fn rasterize_placed_glyphs(
     color: [f32; 4],
     color_of: &dyn Fn(usize) -> Option<[f32; 4]>,
 ) {
+    if !valid_raster(dst) || !valid_text_raster(size, glyphs.len()) {
+        return;
+    }
     let size = size.max(1.0);
     let scale = PxScale::from(size);
     let font = snapshot_font();
+    if let Some(font) = font.as_ref() {
+        check_font_coverage(font, glyphs.iter().map(|glyph| glyph.ch));
+    }
     for glyph in glyphs {
+        if !valid_text_position(glyph.x, glyph.y) {
+            return;
+        }
         let color = color_of(glyph.index).unwrap_or(color);
-        match font {
+        match font.as_ref() {
             Some(font) => {
                 let baseline = glyph.y + font.as_scaled(scale).ascent();
                 let placed = font
                     .glyph_id(glyph.ch)
                     .with_scale_and_position(scale, point(glyph.x, baseline));
-                draw_glyph(dst, font, placed, color, 0, 0, false, false, None);
+                draw_glyph(dst, &font, placed, color, 0, 0, false, false, None);
             }
             None => fill_rect(
                 dst,
@@ -940,18 +1153,23 @@ fn glyph_cell(
     size: f32,
     rgb: [u8; 3],
 ) -> Option<(DecodedImage, i32, i32)> {
+    if !valid_text_position(x, y) {
+        return None;
+    }
     let scale = PxScale::from(size);
     let baseline = y + font.as_scaled(scale).ascent();
-    let outlined = font.outline_glyph(font.glyph_id(ch).with_scale_and_position(scale, point(x, baseline)))?;
+    let outlined = font.outline_glyph(
+        font.glyph_id(ch)
+            .with_scale_and_position(scale, point(x, baseline)),
+    )?;
     let bounds = outlined.px_bounds();
+    if !valid_glyph_bounds(bounds) {
+        return None;
+    }
     let (left, top) = (bounds.min.x as i32, bounds.min.y as i32);
     let width = (bounds.max.x as i32 - left).max(1) as u32;
     let height = (bounds.max.y as i32 - top).max(1) as u32;
-    let mut cell = DecodedImage {
-        width,
-        height,
-        rgba: vec![0; (width * height * 4) as usize],
-    };
+    let mut cell = new_raster(width, height)?;
     outlined.draw(|gx, gy, coverage| {
         if gx < width && gy < height {
             let at = ((gy * width + gx) * 4) as usize;
@@ -980,33 +1198,55 @@ pub(crate) fn rasterize_placed_glyph_records(
     color_of: &dyn Fn(usize) -> Option<[f32; 4]>,
     shadow: Option<TextShadow>,
 ) {
+    if !valid_raster(dst) || !valid_text_raster(size, glyphs.len()) {
+        return;
+    }
     let Some(font) = snapshot_font() else {
         rasterize_placed_glyphs(dst, glyphs, size, color, color_of);
         return;
     };
+    check_font_coverage(&font, glyphs.iter().map(|glyph| glyph.ch));
     let size = size.max(1.0);
     let byte = |value: f32| (value.clamp(0.0, 1.0) * 255.0).round() as u8;
     let shadow = shadow.filter(|shadow| matches!(shadow.mode, 1 | 2));
     for glyph in glyphs {
         let color = color_of(glyph.index).unwrap_or(color);
         let rgb = [byte(color[0]), byte(color[1]), byte(color[2])];
-        let Some((cell, left, top)) = glyph_cell(font, glyph.ch, glyph.x, glyph.y, size, rgb) else {
+        let Some((cell, left, top)) = glyph_cell(&font, glyph.ch, glyph.x, glyph.y, size, rgb)
+        else {
             continue;
         };
         let Some(shadow) = shadow else {
             crate::bitmap_blend::blit_mode(dst, dst_format, &cell, 2, left, top, 0, 0);
             continue;
         };
+        if shadow.dx > 1024 || shadow.dy > 1024 {
+            record_raster_error("text shadow raster budget exceeded");
+            return;
+        }
         let (dx, dy) = (shadow.dx.max(0), shadow.dy.max(0));
-        let shadow_rgb = [(shadow.rgb >> 16) as u8, (shadow.rgb >> 8) as u8, shadow.rgb as u8];
-        let parameter = 256 - shadow.concentration;
-        let (spread_x, spread_y) = if shadow.mode == 1 { (dx, dy) } else { (2 * dx, 2 * dy) };
+        let shadow_rgb = [
+            (shadow.rgb >> 16) as u8,
+            (shadow.rgb >> 8) as u8,
+            shadow.rgb as u8,
+        ];
+        let parameter = 256i32.saturating_sub(shadow.concentration);
+        let (spread_x, spread_y) = if shadow.mode == 1 {
+            (dx, dy)
+        } else {
+            (2 * dx, 2 * dy)
+        };
         let width = cell.width + spread_x as u32;
         let height = cell.height + spread_y as u32;
-        let mut record = DecodedImage {
-            width,
-            height,
-            rgba: vec![0; (width * height * 4) as usize],
+        if shadow.mode == 2
+            && u64::from(width) * u64::from(height) * (2 * dx + 1) as u64 * (2 * dy + 1) as u64
+                > 50_000_000
+        {
+            record_raster_error("text glow work budget exceeded");
+            return;
+        }
+        let Some(mut record) = new_raster(width, height) else {
+            return;
         };
         if shadow.mode == 1 {
             let mut tinted = cell.clone();
@@ -1026,7 +1266,8 @@ pub(crate) fn rasterize_placed_glyph_records(
                                 && (0..cell.height as i32).contains(&sy)
                             {
                                 sum += u32::from(
-                                    cell.rgba[((sy as u32 * cell.width + sx as u32) * 4 + 3) as usize],
+                                    cell.rgba
+                                        [((sy as u32 * cell.width + sx as u32) * 4 + 3) as usize],
                                 );
                             }
                         }
@@ -1048,6 +1289,10 @@ pub(crate) fn rasterize_placed_glyph_records(
 }
 
 pub(crate) fn measure_text_advance(text: &str, size: f32, spacing: f32) -> i32 {
+    if !valid_text_raster(size, text.chars().count()) {
+        return 0;
+    }
+    check_session_coverage(text);
     let glyph_count = text.chars().count();
     if glyph_count == 0 {
         return 0;
@@ -1082,20 +1327,31 @@ fn draw_glyph(
     italic: bool,
     clip: Option<crate::graph::RuntimeClipRect>,
 ) {
+    if !valid_text_position(glyph.position.x, glyph.position.y) {
+        return;
+    }
     let Some(outlined) = font.outline_glyph(glyph) else {
         return;
     };
     let bounds = outlined.px_bounds();
+    if !valid_glyph_bounds(bounds) {
+        return;
+    }
     outlined.draw(|gx, gy, coverage| {
         let italic_dx = if italic {
             ((bounds.height() - gy as f32).max(0.0) * 0.20).round() as i32
         } else {
             0
         };
-        let x = bounds.min.x as i32 + gx as i32 + dx + italic_dx;
-        let y = bounds.min.y as i32 + gy as i32 + dy;
+        let x = (bounds.min.x as i32)
+            .saturating_add(gx as i32)
+            .saturating_add(dx)
+            .saturating_add(italic_dx);
+        let y = (bounds.min.y as i32)
+            .saturating_add(gy as i32)
+            .saturating_add(dy);
         for bold_dx in 0..=i32::from(bold) {
-            let x = x + bold_dx;
+            let x = x.saturating_add(bold_dx);
             if x < 0
                 || y < 0
                 || x >= dst.width as i32
@@ -1183,8 +1439,8 @@ fn fill_rect(
     color: [f32; 4],
     clip: Option<crate::graph::RuntimeClipRect>,
 ) {
-    for py in y.max(0)..(y + height).min(dst.height as i32) {
-        for px in x.max(0)..(x + width).min(dst.width as i32) {
+    for py in y.max(0)..y.saturating_add(height).min(dst.height as i32) {
+        for px in x.max(0)..x.saturating_add(width).min(dst.width as i32) {
             if !point_in_clip(px, py, clip) {
                 continue;
             }
@@ -1209,6 +1465,9 @@ fn point_in_clip(x: i32, y: i32, clip: Option<crate::graph::RuntimeClipRect>) ->
 }
 
 fn composite_runtime_item(dst: &mut DecodedImage, src: &DecodedImage, item: &RuntimeGraphDrawItem) {
+    if !valid_raster(dst) || !valid_raster(src) {
+        return;
+    }
     if let Some(quad) = item.destination_quad {
         composite_affine_mode5(
             dst,
@@ -1373,11 +1632,7 @@ fn source_pixel_or_none(src: &DecodedImage, x: i32, y: i32) -> Option<[u8; 4]> {
         return None;
     }
     let index = ((y as u32 * src.width + x as u32) * 4) as usize;
-    Some(
-        src.rgba[index..index + 4]
-            .try_into()
-            .expect("RGBA source pixel"),
-    )
+    src.rgba.get(index..index + 4)?.try_into().ok()
 }
 
 fn source_pixel_or_zero(src: &DecodedImage, x: i32, y: i32) -> [u8; 4] {
@@ -1399,6 +1654,9 @@ fn composite_nearest(
     blend_mode: i32,
     clip: Option<crate::graph::RuntimeClipRect>,
 ) {
+    if !valid_raster(dst) || !valid_raster(src) {
+        return;
+    }
     if src.width == 0
         || src.height == 0
         || width <= 0.0
@@ -1448,6 +1706,134 @@ fn blend_pixel_native(dst: &mut [u8], src: &[u8], alpha_scale: f32, blend_mode: 
     let destination: &mut [u8; 4] = dst.try_into().expect("RGBA destination pixel");
     let source: [u8; 4] = src.try_into().expect("RGBA source pixel");
     composite_native_rgba(destination, source, alpha_scale, blend_mode);
+}
+
+#[cfg(test)]
+mod font_session_tests {
+    use super::*;
+
+    // Preserve real font metrics/outlines while hiding cmap, giving a valid
+    // font with deliberately absent glyph coverage (including SJIS ASCII).
+    fn missing_font(font: &FontArc) -> FontArc {
+        let mut bytes = font.font_data().to_vec();
+        let face = if bytes.starts_with(b"ttcf") {
+            u32::from_be_bytes(bytes[12..16].try_into().unwrap()) as usize
+        } else {
+            0
+        };
+        let tables = u16::from_be_bytes(bytes[face + 4..face + 6].try_into().unwrap()) as usize;
+        let cmap = (0..tables)
+            .map(|index| face + 12 + index * 16)
+            .find(|offset| &bytes[*offset..*offset + 4] == b"cmap")
+            .expect("cmap table");
+        let cmap_offset =
+            u32::from_be_bytes(bytes[cmap + 8..cmap + 12].try_into().unwrap()) as usize;
+        // Keep the sorted directory intact; zero cmap encoding subtables.
+        bytes[cmap_offset + 2..cmap_offset + 4].copy_from_slice(&[0, 0]);
+        ethornell_render::FontProvider::load_bytes(bytes, 0).expect("font without cmap")
+    }
+
+    #[test]
+    fn session_font_is_reused_and_diagnostics_are_nested_and_cleared() {
+        let font = ethornell_render::FontProvider::load_system_cjk_font().expect("system CJK font");
+        let before = SESSION_FONT.with(|font| font.borrow().is_some());
+        {
+            let _session = enter_font_session(&font);
+            for _ in 0..100 {
+                assert_eq!(
+                    glyph_advance('A', 20.0, 100.0),
+                    glyph_advance('A', 20.0, 100.0)
+                );
+            }
+            assert!(take_raster_error().is_none());
+            check_session_coverage("\u{10ffff}");
+            record_raster_error("outer");
+            with_font(&font, || {
+                assert!(!take_missing_glyphs());
+                assert!(take_raster_error().is_none());
+                check_session_coverage("\u{10ffff}");
+                record_raster_error("inner");
+            });
+            assert!(take_missing_glyphs());
+            assert_eq!(take_raster_error().as_deref(), Some("outer"));
+        }
+        assert_eq!(SESSION_FONT.with(|font| font.borrow().is_some()), before);
+        with_font(&font, || {
+            assert!(!take_missing_glyphs());
+            assert!(take_raster_error().is_none());
+        });
+    }
+
+    #[test]
+    fn cpu_bitmap_node_and_placed_glyph_paths_report_missing_coverage() {
+        let font = ethornell_render::FontProvider::load_system_cjk_font().expect("system CJK font");
+        let incomplete = missing_font(&font);
+        with_font(&incomplete, || {
+            direct_text_glyph_cell(u32::from(b'A'), 20, false);
+            assert!(take_missing_glyphs());
+            glyph_advance('A', 20.0, 100.0);
+            assert!(take_missing_glyphs());
+        });
+        with_font(&font, || {
+            let mut image = new_raster(40, 40).unwrap();
+            rasterize_bitmap_text(&mut image, "\u{10ffff}", 0, 0, 20.0, 0.0, 100.0, [1.0; 4]);
+            assert!(take_missing_glyphs());
+            let node = crate::text::RuntimeTextNode {
+                text: "\u{10ffff}".into(),
+                enabled: true,
+                owner_object: None,
+                screen_attached: true,
+                target_surface: None,
+                x: 0.0,
+                y: 0.0,
+                size: 20.0,
+                line_height: 20.0,
+                formatted_layout: false,
+                color: [1.0; 4],
+                z: 0,
+                ruby_spans: vec![],
+                style_spans: vec![],
+            };
+            draw_text_node(
+                &mut image,
+                &node,
+                crate::text::RuntimeFormattedTextLayout::plain(&node),
+                TextNodeShadow::Default(None),
+                None,
+            );
+            assert!(take_missing_glyphs());
+            let glyph = crate::text_layout::PlacedGlyph {
+                ch: '\u{10ffff}',
+                index: 0,
+                x: 0.0,
+                y: 0.0,
+            };
+            rasterize_placed_glyphs(&mut image, &[glyph], 20.0, [1.0; 4], &|_| None);
+            assert!(take_missing_glyphs());
+        });
+        with_font(&font, || {
+            glyph_advance('A', 20.0, 100.0);
+            assert!(
+                !take_missing_glyphs(),
+                "previous session must not poison this font"
+            );
+        });
+    }
+
+    #[test]
+    fn cpu_allocation_and_text_budgets_fail_without_panicking() {
+        assert!(raster_byte_len(u32::MAX, u32::MAX).is_err());
+        assert!(new_raster(u32::MAX, u32::MAX).is_none());
+        assert!(take_raster_error().is_some());
+        assert!(direct_text_glyph_cell(65, u32::MAX, false).is_empty());
+        assert!(take_raster_error().is_some());
+        assert!(
+            layout_direct_bitmap_text(b"A", i32::MAX, i32::MAX, u32::MAX, false, i32::MAX, 0, 1, 1)
+                .0
+                .is_empty()
+        );
+        assert!(take_raster_error().is_some());
+    }
 }
 
 #[cfg(test)]
@@ -1605,6 +1991,8 @@ mod styled_text_snapshot_tests {
 
     #[test]
     fn message_glow_draws_a_light_halo_around_dark_text() {
+        let font = super::load_default_font().expect("test requires system CJK font");
+        let _font_session = super::enter_font_session(&font);
         let node = RuntimeTextNode {
             text: "AB".into(),
             enabled: true,
@@ -1650,6 +2038,8 @@ mod styled_text_snapshot_tests {
 
     #[test]
     fn cpu_framebuffer_applies_the_same_per_character_color_span() {
+        let font = super::load_default_font().expect("test requires system CJK font");
+        let _font_session = super::enter_font_session(&font);
         let node = RuntimeTextNode {
             text: "AB".into(),
             enabled: true,
@@ -1709,6 +2099,8 @@ mod glyph_record_tests {
     use ethornell_image::DecodedImage;
 
     fn render(shadow: Option<TextShadow>) -> DecodedImage {
+        let font = super::load_default_font().expect("test requires system CJK font");
+        let _session = super::enter_font_session(&font);
         let mut image = DecodedImage {
             width: 40,
             height: 40,

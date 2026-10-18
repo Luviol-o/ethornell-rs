@@ -1161,6 +1161,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ethornell-android"
+version = "0.1.0"
+dependencies = [
+ "ethornell-app",
+ "ndk-context",
+]
+
+[[package]]
 name = "ethornell-app"
 version = "0.1.0"
 dependencies = [
@@ -1174,12 +1182,14 @@ dependencies = [
  "ethornell-script",
  "ethornell-vm",
  "image",
+ "libc",
  "na_mpeg2_decoder",
  "pelite",
  "pollster",
  "ruffle_core",
  "ruffle_render_wgpu",
  "tracing",
+ "wgpu 0.19.4",
  "winit 0.31.0-beta.3",
 ]
 
@@ -1246,6 +1256,7 @@ dependencies = [
  "bytemuck",
  "ethornell-core",
  "ethornell-image",
+ "raw-window-handle 0.6.2",
  "tracing",
  "wgpu 0.19.4",
  "winit 0.31.0-beta.3",

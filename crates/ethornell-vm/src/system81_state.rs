@@ -55,6 +55,7 @@ impl BlobTable {
 
 #[derive(Debug)]
 pub(crate) struct System81SharedState {
+    pub(crate) sentence_table: crate::sentence_table::SentenceTable,
     pub(crate) clock_jump_threshold_ms: i32,
     pub(crate) coordinate_slots: [Option<(i32, i32)>; 5],
     pub(crate) input_binding_values: [i32; 256],
@@ -85,6 +86,7 @@ pub(crate) struct System81SharedState {
 impl Default for System81SharedState {
     fn default() -> Self {
         Self {
+            sentence_table: crate::sentence_table::SentenceTable::default(),
             clock_jump_threshold_ms: 1000,
             coordinate_slots: [None; 5],
             input_binding_values: [0; 256],

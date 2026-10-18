@@ -3,6 +3,34 @@ use std::path::{Path, PathBuf};
 
 use super::find_runtime_resource;
 
+pub(crate) fn authorized_archive_arg(archive: &str) -> bool {
+    let normalized = archive.replace('\\', "/");
+    is_empty_archive_arg(archive)
+        || matches!(normalized.as_str(), "bgi-resource/" | "bgi-user/")
+        || (!normalized.contains(['/', ':', '\0']) && !normalized.starts_with('.'))
+}
+pub(crate) fn scoped_name(archive: &str, file: &str) -> Option<String> {
+    let normalized = archive.replace('\\', "/");
+    let name = file.replace('\\', "/");
+    if matches!(normalized.as_str(), "bgi-resource/" | "bgi-user/") {
+        if name.starts_with("bgi-") {
+            name.starts_with(&normalized).then_some(name)
+        } else {
+            Some(format!("{normalized}{name}"))
+        }
+    } else {
+        Some(name)
+    }
+}
+pub(crate) fn named_archive(archive: &str) -> bool {
+    authorized_archive_arg(archive)
+        && !is_empty_archive_arg(archive)
+        && !matches!(
+            archive.replace('\\', "/").as_str(),
+            "bgi-user/" | "bgi-resource/"
+        )
+}
+
 pub(crate) fn game_root_path(manager: &ResourceManager) -> PathBuf {
     let root = manager.archives().root.as_path();
     if root.is_absolute() {
@@ -42,6 +70,11 @@ pub(crate) fn find_runtime_file_from_root(
     archive: &str,
     file: &str,
 ) -> Option<PathBuf> {
+    if let Some(policy) = super::file_policy::active() {
+        let _ = (policy, native_root, archive, file);
+        // Restricted callers must consume an FD/metadata, never reopen a Path.
+        return None;
+    }
     if file.trim().is_empty() {
         return None;
     }
@@ -166,6 +199,9 @@ pub(crate) fn runtime_file_path_from_root(
     native_root: &Path,
     file: &str,
 ) -> Option<PathBuf> {
+    if super::file_policy::restricted() {
+        return None;
+    }
     let normalized = normalize_runtime_native_path(file);
     if normalized.trim().is_empty() {
         return None;
@@ -190,6 +226,26 @@ pub(crate) fn runtime_file_exists_from_root(
     archive: &str,
     file: &str,
 ) -> bool {
+    if let Some(policy) = super::file_policy::active() {
+        if !authorized_archive_arg(archive) {
+            return false;
+        }
+        if named_archive(archive) {
+            return find_runtime_resource(manager, archive, file).is_some();
+        }
+        let Some(name) = scoped_name(archive, file) else {
+            return false;
+        };
+        if policy.metadata(&name).is_some_and(|m| m.is_file()) {
+            return true;
+        }
+        if name.replace('\\', "/").starts_with("bgi-") {
+            return false;
+        }
+        return (!is_empty_archive_arg(archive)
+            && find_runtime_resource(manager, archive, file).is_some())
+            || authorized_container_name(manager, file).is_some();
+    }
     if file.trim().is_empty() {
         return false;
     }
@@ -249,6 +305,48 @@ pub(crate) fn read_runtime_bytes(
     archive: &str,
     file: &str,
 ) -> Option<Vec<u8>> {
+    if let Some(policy) = super::file_policy::active() {
+        use std::io::Read;
+        if !authorized_archive_arg(archive) {
+            return None;
+        }
+        if named_archive(archive) {
+            let entry = find_runtime_resource(manager, archive, file)?;
+            return manager.read_by_entry_decoded(&entry).ok();
+        }
+        let file = scoped_name(archive, file)?;
+        let file = file.as_str();
+        match policy.read_loose(file) {
+            Ok(bytes) => return Some(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return None,
+        }
+        if file.replace('\\', "/").starts_with("bgi-user/") {
+            return None;
+        }
+        if file.replace('\\', "/").starts_with("bgi-resource/") {
+            return None;
+        }
+        if let Some(container) = authorized_container_name(manager, file) {
+            let f = policy.open_resource(&container).ok()?;
+            if f.metadata().ok()?.len() > 256 * 1024 * 1024 {
+                return None;
+            }
+            let mut bytes = Vec::new();
+            f.take(256 * 1024 * 1024 + 1).read_to_end(&mut bytes).ok()?;
+            return (bytes.len() <= 256 * 1024 * 1024).then_some(bytes);
+        }
+        let entry = find_runtime_resource(manager, archive, file)?;
+        if entry.packed_size > 256 * 1024 * 1024
+            || entry.unpacked_size.unwrap_or(0) > 256 * 1024 * 1024
+        {
+            return None;
+        }
+        return manager
+            .read_by_entry_decoded(&entry)
+            .ok()
+            .filter(|b| b.len() <= 256 * 1024 * 1024);
+    }
     if let Some(path) = find_runtime_file(manager, archive, file)
         && let Ok(bytes) = std::fs::read(path)
     {
@@ -256,6 +354,29 @@ pub(crate) fn read_runtime_bytes(
     }
     let entry = find_runtime_resource(manager, archive, file)?;
     manager.read_by_entry_decoded(&entry).ok()
+}
+
+pub(crate) fn authorized_container_name(manager: &ResourceManager, file: &str) -> Option<String> {
+    // Only a container already indexed from an authorized FD can satisfy the
+    // BGI data01xxx.arc family alias. Never interpret it as a host glob.
+    let requested = file.replace('\\', "/");
+    if requested.contains('/')
+        || requested.contains(':')
+        || !requested.to_ascii_lowercase().contains("xxx")
+    {
+        return None;
+    }
+    manager.archives().archives.iter().find_map(|a| {
+        let name = a.path.file_name()?.to_str()?;
+        bgi_xxx_pattern_matches(&requested, name)
+            .then(|| {
+                a.path
+                    .strip_prefix(&manager.archives().root)
+                    .ok()
+                    .map(|p| p.to_string_lossy().into_owned())
+            })
+            .flatten()
+    })
 }
 
 pub(crate) fn is_empty_archive_arg(archive: &str) -> bool {

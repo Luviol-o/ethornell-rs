@@ -69,6 +69,7 @@ pub(crate) fn test_path_writable(path: &Path) -> bool {
 }
 
 pub(crate) fn shell_open(target: &str) -> bool {
+    if super::file_policy::restricted() { return false; }
     if std::env::var_os("ETHORNELL_GUI_HEADLESS").is_some() {
         return false;
     }
@@ -116,6 +117,7 @@ pub(crate) struct PortablePlatformStore {
 
 impl PortablePlatformStore {
     pub(crate) fn from_environment() -> Self {
+        if super::file_policy::restricted() { return Self::default(); }
         let Some(path) = std::env::var_os("ETHORNELL_PLATFORM_STORE") else {
             return Self::default();
         };
@@ -173,6 +175,7 @@ impl PortablePlatformStore {
     }
 
     pub(crate) fn ensure_path(&mut self, path: std::path::PathBuf) {
+        if super::file_policy::restricted() { return; }
         if self.path.is_none() {
             self.path = Some(path);
         }

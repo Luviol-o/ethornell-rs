@@ -1355,7 +1355,7 @@ impl RuntimeTraceApi {
                 let name = pop_string_value(stack).unwrap_or_default();
                 let available = !name.is_empty()
                     && (self.manager.find(&name).is_some()
-                        || std::path::Path::new(&name).is_file());
+                        || if let Some(policy) = file_policy::active() { policy.metadata(&name).is_some_and(|m| m.is_file()) } else { std::path::Path::new(&name).is_file() });
                 if available {
                     self.native_user.font_resources.insert(name);
                 }
@@ -1411,6 +1411,7 @@ impl RuntimeTraceApi {
                 ethornell_vm::Value::None
             }
             0xF0 => {
+                if file_policy::restricted() { return Some(Err(ethornell_vm::VmError::Runtime("unsupported desktop wallpaper capability".into()))); }
                 let tile = pop_int_value(stack).unwrap_or_default();
                 let style = pop_int_value(stack).unwrap_or_default();
                 let path = pop_string_value(stack).unwrap_or_default();
