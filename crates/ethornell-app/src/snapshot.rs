@@ -151,6 +151,7 @@ pub(crate) fn compose_runtime_frame_through_priority(
                 && api.should_draw_text_node(node)
             {
                 let mut positioned = node.clone();
+                positioned.style_spans = api.text_node_style_spans(node);
                 if let Some(surface) = node
                     .target_surface
                     .filter(|surface| api.graph_surfaces.contains_key(surface))
@@ -322,6 +323,7 @@ pub(crate) fn compose_graph_object(
             continue;
         }
         let mut positioned = node.clone();
+        positioned.style_spans = api.text_node_style_spans(node);
         if let Some(surface) = node
             .target_surface
             .filter(|surface| api.graph_surfaces.contains_key(surface))

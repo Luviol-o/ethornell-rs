@@ -3,7 +3,7 @@ use crate::display_tree::NativeDisplayKind;
 use crate::graph::{RuntimeGraphLayer, RuntimeUserControl};
 use crate::ruby_registry::RubyRegistry;
 use crate::text_anim::{
-    ParsedMessageMarkup, RuntimeLinkSpan, RuntimeRubySpan, RuntimeTextStyleSpan,
+    ParsedMessageMarkup, RuntimeLinkSpan, RuntimeRubySpan, RuntimeTextStyle, RuntimeTextStyleSpan,
     RuntimeTimelineMark, normalize_message_text, parse_message_markup_with,
 };
 use std::collections::BTreeMap;
@@ -1067,6 +1067,46 @@ impl RuntimeTraceApi {
             message_text
         ));
         duration_ms
+    }
+
+    /// The style spans a text node is drawn with. A window's Graph91:88
+    /// style makes its font bold (sub_42F0F0 -> sub_42DF40 asks CreateFontA
+    /// for weight 700 when it is non-zero, 100 otherwise), so every
+    /// character drawn in that window is bold; markup colours and italics
+    /// are kept.
+    pub(crate) fn text_node_style_spans(
+        &self,
+        node: &RuntimeTextNode,
+    ) -> Vec<RuntimeTextStyleSpan> {
+        let bold_font = node
+            .target_surface
+            .and_then(|surface| self.surface_text_states.get(&surface))
+            .is_some_and(|state| state.font_style != 0);
+        if !bold_font {
+            return node.style_spans.clone();
+        }
+        let bold = |start_char, end_char, style: RuntimeTextStyle| RuntimeTextStyleSpan {
+            start_char,
+            end_char,
+            style: RuntimeTextStyle {
+                bold: true,
+                ..style
+            },
+        };
+        let mut spans = Vec::with_capacity(node.style_spans.len() * 2 + 1);
+        let mut covered = 0;
+        for span in &node.style_spans {
+            if span.start_char > covered {
+                spans.push(bold(covered, span.start_char, RuntimeTextStyle::default()));
+            }
+            spans.push(bold(span.start_char, span.end_char, span.style));
+            covered = covered.max(span.end_char);
+        }
+        let chars = node.text.chars().count();
+        if chars > covered {
+            spans.push(bold(covered, chars, RuntimeTextStyle::default()));
+        }
+        spans
     }
 
     pub(crate) fn formatted_text_layout(
