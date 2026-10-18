@@ -6201,7 +6201,18 @@ impl RuntimeTraceApi {
         {
             return materialized_ordinals.len();
         }
-        for layer in self.surface_controls.remove_owner(owner) {
+        // A processor's configure (sub_44A900) starts by resetting its
+        // window's child array (sub_42BBD0 deletes every child), so the icon
+        // Sprites a Graph90:B7 layout (sub_44B260) gave that window are gone;
+        // only the processor's own items are drawn from then on.
+        let mut stale = self.surface_controls.remove_owner(owner);
+        if matches!(owner, SurfaceControlOwner::InputObject(_)) {
+            stale.extend(
+                self.surface_controls
+                    .remove_owner(SurfaceControlOwner::Surface(surface)),
+            );
+        }
+        for layer in stale {
             self.graph_layers.remove(&layer);
             self.release_screen_text_node(layer);
         }
@@ -15594,6 +15605,81 @@ mod input_tests {
             (hit_b_after_release.0.group, hit_b_after_release.0.index),
             (0, 9)
         );
+    }
+
+    #[test]
+    fn processor_configure_replaces_the_window_layout_icons() {
+        // Wonderful Everyday's logwnd._bp lays its entries out on the log
+        // window (Graph90:B7), then configures an extended processor on that
+        // window with the same items and, as the log scrolls, reconfigures
+        // only the processor. The layout's icons stayed at their first
+        // positions under the scrolled ones: entries showed twice, overlapping.
+        let manager =
+            ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let mut api = super::RuntimeTraceApi::new(manager);
+        let surface = 20_024;
+        let object = 95;
+        let bitmap = 1920;
+        api.store_graph_image(
+            "test:log-entry".to_string(),
+            DecodedImage {
+                width: 40,
+                height: 20,
+                rgba: vec![255; 40 * 20 * 4],
+            },
+        );
+        api.graph_resources.insert(
+            bitmap,
+            RuntimeGraphResource::whole("test:log-entry".to_string()),
+        );
+        api.graph_surfaces
+            .insert(surface, RuntimeSurface::display(surface, 320.0, 120.0));
+        api.graph_input_objects.insert(
+            object,
+            super::graph_input::RuntimeGraphInputObject::new_extended(surface),
+        );
+        let entry_at = |y| GraphInputDescriptor {
+            regions: vec![GraphInputRegion {
+                group: 0,
+                index: 0,
+                ordinal: 0,
+                enabled_depth: 1,
+                selected: false,
+                x: 10,
+                y,
+                width: 40,
+                height: 20,
+                normal_resource: bitmap,
+                selected_resource: -1,
+                hover_resource: -1,
+                hover_selected_resource: -1,
+                mask_resource: -1,
+                current_selection_hit_excluded: false,
+                flags: 0,
+            }],
+            ..GraphInputDescriptor::default()
+        };
+        let drawn_on_surface = |api: &super::RuntimeTraceApi| {
+            api.graph_layers
+                .values()
+                .filter(|layer| layer.target_surface == Some(surface))
+                .count()
+        };
+
+        GraphApi::configure_graph_surface_controls(&mut api, surface, entry_at(20));
+        assert_eq!(drawn_on_surface(&api), 1);
+
+        GraphApi::configure_graph_input_object(&mut api, object, entry_at(20));
+        assert_eq!(
+            api.surface_controls
+                .owner_layer_count(SurfaceControlOwner::Surface(surface)),
+            0
+        );
+        assert_eq!(drawn_on_surface(&api), 1);
+
+        // A scroll step: only the processor is reconfigured, items moved.
+        GraphApi::configure_graph_input_object(&mut api, object, entry_at(60));
+        assert_eq!(drawn_on_surface(&api), 1);
     }
 
     #[test]
