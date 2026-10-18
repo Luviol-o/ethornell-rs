@@ -378,10 +378,14 @@ impl BlockDecoder<'_> {
             )));
         }
 
+        // The codes run to the strip's last bit, as the target reads them
+        // (sub_49FB40, sub_49FD70): the reader may already hold the last byte
+        // while bits of it are still unread.
+        let strip_bits = reader.input.data.len() * 8;
         let mut color_data = vec![0i16; block_size as usize];
         let mut acc = 0i32;
         let mut i = 0i32;
-        while i < block_size && reader.input.pos < reader.input.data.len() {
+        while i < block_size && reader.bits_used() < strip_bits {
             let count = self.tree1.decode_token(&mut reader)?;
             if count != 0 {
                 let mut v = reader.get_bits(count as u32)? as i32;
@@ -398,9 +402,9 @@ impl BlockDecoder<'_> {
         }
 
         i = 0;
-        while i < block_size && reader.input.pos < reader.input.data.len() {
+        while i < block_size && reader.bits_used() < strip_bits {
             let mut index = 1usize;
-            while index < 64 && reader.input.pos < reader.input.data.len() {
+            while index < 64 && reader.bits_used() < strip_bits {
                 let code = self.tree2.decode_token(&mut reader)?;
                 if code == 0 {
                     break;
@@ -849,6 +853,11 @@ impl<'a> MsbBitStream<'a> {
         Ok((self.bits >> self.cached_bits) & mask)
     }
 
+    /// The bits taken so far: `get_bits` fetches whole bytes ahead of them.
+    fn bits_used(&self) -> usize {
+        self.input.pos * 8 - self.cached_bits as usize
+    }
+
     fn get_next_bit(&mut self) -> Result<bool> {
         if self.cached_bits == 0 {
             self.bits = (self.bits << 8) | self.input.read_u8()? as u32;
@@ -875,3 +884,102 @@ const BLOCK_FILL_ORDER: [u8; 64] = [
     13, 6, 7, 14, 21, 28, 35, 42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23, 30, 37, 44, 51, 58, 59,
     52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63,
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// MSB-first bit writer, the inverse of `MsbBitStream`.
+    #[derive(Default)]
+    struct Bits {
+        bytes: Vec<u8>,
+        used: usize,
+    }
+
+    impl Bits {
+        fn put(&mut self, value: u32, count: u32) {
+            for shift in (0..count).rev() {
+                if self.used.is_multiple_of(8) {
+                    self.bytes.push(0);
+                }
+                let bit = ((value >> shift) & 1) as u8;
+                *self.bytes.last_mut().unwrap() |= bit << (7 - self.used % 8);
+                self.used += 1;
+            }
+        }
+
+        /// A symbol's code, read off the decoder's own tree, then its value
+        /// bits.
+        fn token(&mut self, tree: &HuffmanTree, symbol: usize, value: u32, bits: u32) {
+            let mut pending = vec![(tree.nodes.len() - 1, 0, 0)];
+            while let Some((index, code, length)) = pending.pop() {
+                let node = &tree.nodes[index];
+                if node.is_parent {
+                    pending.push((node.left_index, code << 1, length + 1));
+                    pending.push((node.right_index, code << 1 | 1, length + 1));
+                } else if index == symbol {
+                    self.put(code, length);
+                    self.put(value, bits);
+                    return;
+                }
+            }
+            panic!("no code for symbol {symbol}");
+        }
+
+        fn align(&mut self) {
+            self.used = self.used.next_multiple_of(8);
+        }
+    }
+
+    #[test]
+    fn a_strip_decodes_the_codes_in_its_last_byte() {
+        // One 8x8 block of a 24-bit image: grey, with a horizontal Cr
+        // coefficient that makes it redder on the left.
+        let mut dc_weights = vec![0u32; 0x10];
+        let mut ac_weights = vec![0u32; 0xb0];
+        (dc_weights[0], dc_weights[1]) = (2, 1);
+        (ac_weights[0], ac_weights[0x40]) = (3, 1);
+        let tree1 = HuffmanTree::new(&dc_weights, true);
+        let tree2 = HuffmanTree::new(&ac_weights, true);
+        let mut bits = Bits::default();
+        // DC differences of Y, Cb and Cr (symbol: the value's size).
+        bits.token(&tree1, 1, 1, 1);
+        bits.token(&tree1, 0, 0, 0);
+        bits.token(&tree1, 0, 0, 0);
+        bits.align();
+        // AC codes, one byte: Y and Cb end at once, Cr has 15 at zigzag
+        // position 1 (size 4, no zero run) and ends.
+        bits.token(&tree2, 0, 0, 0);
+        bits.token(&tree2, 0, 0, 0);
+        bits.token(&tree2, 0x40, 15, 4);
+        bits.token(&tree2, 0, 0, 0);
+        assert_eq!(bits.used, 16);
+        let mut strip = vec![0xc0, 0x01]; // 192 coefficients
+        strip.extend(&bits.bytes);
+
+        let decode = |strip: &[u8]| {
+            let decoder = BlockDecoder {
+                input: strip,
+                bpp: 24,
+                width: 8,
+                tree1: HuffmanTree::new(&dc_weights, true),
+                tree2: HuffmanTree::new(&ac_weights, true),
+                dct: [DCT_TABLE; 2],
+            };
+            let mut bgra = vec![0u8; 8 * 8 * 4];
+            decoder
+                .unpack_block(0, strip.len() as i32, 0, &mut bgra)
+                .unwrap();
+            bgra
+        };
+        let bgra = decode(&strip);
+        // The strip's last byte was fetched for Y's end code; Cb's end code
+        // and Cr's coefficient follow in it.
+        let red = |x: usize| bgra[x * 4 + 2];
+        assert!(red(0) > red(7) + 4, "red {} .. {}", red(0), red(7));
+        // Bytes after the strip's codes change nothing.
+        let mut padded = strip.clone();
+        padded.push(0);
+        assert_eq!(bgra, decode(&padded));
+    }
+}
