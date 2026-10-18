@@ -117,6 +117,13 @@ pub fn decode_cbg(data: &[u8]) -> Result<DecodedImage> {
     cbg::decode_cbg(data)
 }
 
+/// Decode frame `frame` of a BGI frame movie ("BF_Movie_______", drawn by
+/// Graph90:F6) over `image`, which must have the movie's size. A frame codes
+/// only the blocks that change, so `image` must hold the frame before it.
+pub fn decode_bf_movie_frame(data: &[u8], frame: u32, image: &mut DecodedImage) -> Result<()> {
+    cbg::bf_movie::decode_frame(data, frame, image)
+}
+
 pub fn decode_cbg_to_png(data: &[u8], output: &Path) -> Result<()> {
     let image = decode_cbg(data)?;
     write_rgba_png(&image, output)
