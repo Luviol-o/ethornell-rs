@@ -1,6 +1,10 @@
 //! The only unsafe operations here are bounded caller-memory access and the
 //! documented raw Android window/context handoff. Runtime objects never cross
 //! threads and are never represented by caller-controlled pointers.
+#[cfg(target_os = "ios")]
+mod ios;
+#[cfg(target_os = "android")]
+mod android_jni;
 use ethornell_app::host_runtime::{HostConfig, HostRuntime};
 use std::{
     cell::RefCell,

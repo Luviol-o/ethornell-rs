@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Ethornell</string>
+    <string name="import_folder">Import game folder</string>
+    <string name="games_folder_hint">Games are kept in %1$s. You can also copy a game folder there over USB.</string>
+    <string name="no_games">No games yet. Import the folder that holds the game\'s .arc files.</string>
+    <string name="importing">Importing…</string>
+    <string name="import_failed">Import failed</string>
+    <string name="encoding_sjis">Text: Shift-JIS (Japanese)</string>
+    <string name="encoding_gbk">Text: GBK (Chinese translation)</string>
+    <string name="delete">Delete</string>
+    <string name="delete_confirm">Delete %1$s and its files? Saves are kept.</string>
+    <string name="engine_error">The game stopped</string>
+</resources>

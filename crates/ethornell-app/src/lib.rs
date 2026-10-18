@@ -204,6 +204,24 @@ pub struct AppConfig {
     pub script: Option<String>,
 }
 
+/// The game folder of a launch without one (a double-click on the program):
+/// asked for with the platform's folder dialog. None when cancelled.
+pub fn choose_game_folder() -> Option<PathBuf> {
+    host_dialog::choose_path(
+        host_dialog::PathDialogMode::Folder,
+        "Choose the game folder (the one with the .arc files)",
+        "",
+        "",
+        &[],
+    )
+    .map(PathBuf::from)
+}
+
+/// Reports a startup failure in a dialog, for a launch without a terminal.
+pub fn show_error(title: &str, text: &str) {
+    host_dialog::show_text(title, text);
+}
+
 pub fn run(config: AppConfig) -> Result<()> {
     let font = snapshot::load_default_font()?;
     let _font_session = snapshot::enter_font_session(&font);
@@ -8526,6 +8544,7 @@ fn parse_env_point(x_key: &str, y_key: &str) -> Option<(f32, f32)> {
 /// and scripts bind input classes to those codes with Sys80:1B (Wonderful
 /// Everyday: Ctrl and Space hold the skip gate, Escape cancels, Page Up/Down
 /// scroll).
+#[cfg(feature = "desktop-window")]
 fn input_descriptor_for_keycode(code: KeyCode) -> Option<i32> {
     let descriptor = match code {
         KeyCode::Backspace => 0x08,

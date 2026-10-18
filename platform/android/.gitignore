@@ -1,0 +1,9 @@
+.gradle/
+build/
+**/build/
+.idea/
+*.iml
+local.properties
+.kotlin/
+# Rust libraries placed by build.sh
+app/src/main/jniLibs/

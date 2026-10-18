@@ -42,7 +42,7 @@ only writable/mirrorable set. No original resource `UserData` is automatically
 imported. Writes are synchronous temp-file/sync/rename/directory-sync operations;
 await a serial engine-thread barrier before export. Pause without its command
 ACK is not a flush barrier. A post-rename sync error means committed but
-durability uncertain. See `../BUILD.md` for the exact storage contract.
+durability uncertain. See `STORAGE.md` for the exact storage contract.
 No shell execution, DLL loading or unrestricted filesystem/URL access is
 authorized by this interface. Full IME, arbitrary file pickers, movie audio,
 BMV/WMV/MP4 and complete SWF playback are not claimed v1 capabilities. Existing

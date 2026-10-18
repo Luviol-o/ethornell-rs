@@ -22,15 +22,15 @@ fn host_vm_budget(physical_bytes: Option<u64>) -> ethornell_vm::VmResourceBudget
     }
 }
 fn host_physical_memory() -> Option<u64> {
-    #[cfg(target_os="android")]
+    #[cfg(any(target_os="android", target_os="ios"))]
     {
         let pages=unsafe {libc::sysconf(libc::_SC_PHYS_PAGES)};
         let size=unsafe {libc::sysconf(libc::_SC_PAGESIZE)};
         if pages<=0 || size<=0 {return None;}
         (pages as u64).checked_mul(size as u64)
     }
-    #[cfg(not(target_os="android"))]
-    {Some(4*1024*1024*1024)} // host diagnostic profile, not Android RAM evidence
+    #[cfg(not(any(target_os="android", target_os="ios")))]
+    {Some(4*1024*1024*1024)} // host diagnostic profile, not device RAM evidence
 }
 
 // The candidate is borrowed from the JNI owner. Failure must drop it before
@@ -234,8 +234,9 @@ impl HostRuntime {
         }
         Ok(())
     }
-    /// Caller retains the ANativeWindow until detach/destroy has returned.
-    #[cfg(target_os = "android")]
+    /// Caller retains the ANativeWindow (Android) or UIView (iOS) until
+    /// detach/destroy has returned.
+    #[cfg(any(target_os = "android", target_os = "ios"))]
     pub unsafe fn set_surface(
         &mut self,
         ptr: *mut std::ffi::c_void,
@@ -250,14 +251,20 @@ impl HostRuntime {
         self.textures.clear();
         self.last_tick = None;
         self.tick_remainder_ns = 0;
-        let backend = match self.backend {
-            1 => wgpu::Backends::VULKAN,
-            2 => wgpu::Backends::GL,
-            _ => wgpu::Backends::VULKAN | wgpu::Backends::GL,
+        #[cfg(target_os = "android")]
+        let mut renderer = {
+            let backend = match self.backend {
+                1 => wgpu::Backends::VULKAN,
+                2 => wgpu::Backends::GL,
+                _ => wgpu::Backends::VULKAN | wgpu::Backends::GL,
+            };
+            pollster::block_on(unsafe {
+                Renderer::new_android(ptr, w, h, backend, self.font.clone())
+            })?
         };
-        let mut renderer = pollster::block_on(unsafe {
-            Renderer::new_android(ptr, w, h, backend, self.font.clone())
-        })?;
+        #[cfg(target_os = "ios")]
+        let mut renderer =
+            pollster::block_on(unsafe { Renderer::new_ios(ptr, w, h, self.font.clone()) })?;
         renderer.set_virtual_size(
             self.runtime.api.screen_width.max(1) as f32,
             self.runtime.api.screen_height.max(1) as f32,
@@ -285,7 +292,7 @@ impl HostRuntime {
         self.generation = generation;
         Ok(())
     }
-    #[cfg(not(target_os = "android"))]
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     pub unsafe fn set_surface(
         &mut self,
         _: *mut std::ffi::c_void,
@@ -294,7 +301,7 @@ impl HostRuntime {
         _: u64,
     ) -> Result<()> {
         Err(EthornellError::Other(
-            "Android Surface unavailable on this target".into(),
+            "no host surface on this target".into(),
         ))
     }
     pub fn detach_surface(&mut self, generation: u64) -> Result<()> {

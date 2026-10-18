@@ -1,0 +1,19 @@
+[package]
+name = "ethornell-mobile"
+version = "0.1.0"
+edition.workspace = true
+build = "build.rs"
+
+# The host-driven C ABI of the mobile launchers: `libethornell.so` for the
+# Android app (platform/android) and `libethornell.a` for the iOS app
+# (platform/ios). See platform/android/include and platform/ios/include.
+[lib]
+name = "ethornell"
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+ethornell-app = { path = "../ethornell-app", default-features = false, features = ["host-driven"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+ndk-context = "0.1"
+jni = "0.21"

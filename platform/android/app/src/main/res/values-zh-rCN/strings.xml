@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="import_folder">导入游戏文件夹</string>
+    <string name="games_folder_hint">游戏保存在 %1$s。也可以通过 USB 把游戏文件夹直接复制到这里。</string>
+    <string name="no_games">还没有游戏。请导入包含游戏 .arc 文件的文件夹。</string>
+    <string name="importing">正在导入…</string>
+    <string name="import_failed">导入失败</string>
+    <string name="encoding_sjis">文本：Shift-JIS（日文）</string>
+    <string name="encoding_gbk">文本：GBK（中文汉化）</string>
+    <string name="delete">删除</string>
+    <string name="delete_confirm">删除 %1$s 及其文件？存档会保留。</string>
+    <string name="engine_error">游戏已停止</string>
+</resources>

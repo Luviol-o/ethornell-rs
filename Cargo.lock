@@ -1161,14 +1161,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ethornell-android"
-version = "0.1.0"
-dependencies = [
- "ethornell-app",
- "ndk-context",
-]
-
-[[package]]
 name = "ethornell-app"
 version = "0.1.0"
 dependencies = [
@@ -1246,6 +1238,15 @@ dependencies = [
  "ethornell-core",
  "image",
  "serde",
+]
+
+[[package]]
+name = "ethornell-mobile"
+version = "0.1.0"
+dependencies = [
+ "ethornell-app",
+ "jni 0.21.1",
+ "ndk-context",
 ]
 
 [[package]]

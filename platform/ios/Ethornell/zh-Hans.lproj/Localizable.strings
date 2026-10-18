@@ -1,0 +1,13 @@
+"Copy game folders (with their .arc files) into Ethornell with the Files app or Finder, or import one." = "用“文件”App 或访达把游戏文件夹（含 .arc 文件）复制到 Ethornell，或者直接导入。";
+"Import game folder" = "导入游戏文件夹";
+"Import failed" = "导入失败";
+"Text: Shift-JIS (Japanese)" = "文本：Shift-JIS（日文）";
+"Text: GBK (Chinese translation)" = "文本：GBK（中文汉化）";
+"Delete" = "删除";
+"The folder holds no .arc archives." = "这个文件夹里没有 .arc 文件。";
+"The game stopped" = "游戏已停止";
+"Yes" = "是";
+"No" = "否";
+"Close the game?" = "关闭游戏？";
+"Close" = "关闭";
+"Cancel" = "取消";

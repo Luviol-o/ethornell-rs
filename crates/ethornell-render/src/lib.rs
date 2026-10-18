@@ -539,6 +539,41 @@ impl<'w> Renderer<'w> {
         Self::from_surface(&instance, surface, width, height, font).await
     }
 
+    /// A renderer on a UIKit view. wgpu draws through the view's
+    /// `CAMetalLayer` (adding one when its layer is not).
+    ///
+    /// # Safety
+    /// `ui_view` must be a `UIView*` that outlives the renderer, used on the
+    /// main thread only.
+    #[cfg(target_os = "ios")]
+    pub async unsafe fn new_ios(
+        ui_view: *mut std::ffi::c_void,
+        width: u32,
+        height: u32,
+        font: FontArc,
+    ) -> Result<Self> {
+        let view = std::ptr::NonNull::new(ui_view)
+            .ok_or_else(|| EthornellError::Other("null UIView".into()))?;
+        validate_surface_size(width, height, u32::MAX)?;
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::METAL,
+            ..Default::default()
+        });
+        // SAFETY: the host guarantees the view's lifetime as documented.
+        let surface = unsafe {
+            instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
+                raw_display_handle: raw_window_handle::RawDisplayHandle::UiKit(
+                    raw_window_handle::UiKitDisplayHandle::new(),
+                ),
+                raw_window_handle: raw_window_handle::RawWindowHandle::UiKit(
+                    raw_window_handle::UiKitWindowHandle::new(view),
+                ),
+            })
+        }
+        .map_err(|err| EthornellError::Other(format!("create iOS surface failed: {err}")))?;
+        Self::from_surface(&instance, surface, width, height, font).await
+    }
+
     pub fn set_virtual_size(&mut self, width: f32, height: f32) {
         self.virtual_width = width.max(1.0);
         self.virtual_height = height.max(1.0);
@@ -1512,6 +1547,7 @@ pub(crate) const SYSTEM_CJK_FONT_CANDIDATES: &[&str] = &[
     "/system/fonts/NotoSansSC-Regular.otf",
     "/system/fonts/DroidSansFallback.ttf",
     "/System/Library/Fonts/ヒラギノ角ゴシック W8.ttc",
+    "/System/Library/Fonts/Core/HiraginoKakuGothic.ttc",
     "/System/Library/Fonts/AppleSDGothicNeo.ttc",
     "/System/Library/Fonts/Hiragino Sans GB.ttc",
     "/System/Library/Fonts/STHeiti Medium.ttc",

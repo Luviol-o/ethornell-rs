@@ -1,0 +1,58 @@
+# XcodeGen spec of the iOS launcher; platform/ios/build.sh generates
+# Ethornell.xcodeproj from it after building Vendor/Ethornell.xcframework.
+name: Ethornell
+options:
+  bundleIdPrefix: com.xmoezzz
+  deploymentTarget:
+    iOS: "15.0"
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+targets:
+  Ethornell:
+    type: application
+    platform: iOS
+    sources:
+      - path: Ethornell
+    info:
+      path: Ethornell/Info.plist
+      properties:
+        CFBundleDisplayName: Ethornell
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        # Game folders are copied into the app's Documents with the Files
+        # app or Finder, or imported from the launcher.
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+        UILaunchScreen: {}
+        UIRequiresFullScreen: true
+        UIStatusBarHidden: true
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+          - UIInterfaceOrientationPortrait
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+        ITSAppUsesNonExemptEncryption: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.xmoezzz.ethornell
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SWIFT_OBJC_BRIDGING_HEADER: Ethornell/Ethornell-Bridging-Header.h
+        HEADER_SEARCH_PATHS: $(PROJECT_DIR)/include
+        OTHER_LDFLAGS: -lc++
+        CODE_SIGN_STYLE: Automatic
+    dependencies:
+      - framework: Vendor/Ethornell.xcframework
+        embed: false
+      - sdk: Metal.framework
+      - sdk: QuartzCore.framework
+      - sdk: AudioToolbox.framework
+      - sdk: CoreAudio.framework
+      - sdk: AVFoundation.framework
+      - sdk: CoreText.framework

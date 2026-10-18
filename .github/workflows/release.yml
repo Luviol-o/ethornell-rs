@@ -48,35 +48,79 @@ jobs:
           if-no-files-found: error
 
   macos:
-    name: macOS (${{ matrix.arch }})
+    name: macOS (universal app)
     runs-on: macos-15
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: arm64
-            target: aarch64-apple-darwin
-          - arch: x86_64
-            target: x86_64-apple-darwin
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
       - uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.target }}
-      - name: Build
-        run: cargo build --release --locked -p ethornell-cli --bin ethornell --target ${{ matrix.target }}
+      - name: Build Ethornell.app
+        run: platform/macos/package.sh
       - name: Package
         run: |
           mkdir -p dist
-          test -f target/${{ matrix.target }}/release/ethornell
-          tar -C target/${{ matrix.target }}/release -czf dist/ethornell-macos-${{ matrix.arch }}.tar.gz ethornell
+          cp target/macos/Ethornell-macos.zip dist/ethornell-macos-universal.zip
+          tar -C target/macos/Ethornell.app/Contents/MacOS -czf dist/ethornell-macos-universal.tar.gz ethornell
       - uses: actions/upload-artifact@v4
         with:
-          name: ethornell-macos-${{ matrix.arch }}
-          path: dist/ethornell-macos-${{ matrix.arch }}.tar.gz
+          name: ethornell-macos-universal
+          path: |
+            dist/ethornell-macos-universal.zip
+            dist/ethornell-macos-universal.tar.gz
+          if-no-files-found: error
+
+  android:
+    name: Android (APK)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,x86_64-linux-android
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Build APK
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_LATEST_HOME }}
+        # A debug-signed APK: installable as is. Each CI machine has its own
+        # debug key, so updating needs an uninstall first (saves are lost).
+        run: platform/android/build.sh
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp platform/android/app/build/outputs/apk/debug/app-debug.apk dist/ethornell-android.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ethornell-android
+          path: dist/ethornell-android.apk
+          if-no-files-found: error
+
+  ios:
+    name: iOS (unsigned IPA)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim
+      - uses: Swatinem/rust-cache@v2
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Build IPA
+        run: platform/ios/build.sh device
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp platform/ios/build/Ethornell-unsigned.ipa dist/ethornell-ios-unsigned.ipa
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ethornell-ios
+          path: dist/ethornell-ios-unsigned.ipa
           if-no-files-found: error
 
   windows:
@@ -103,7 +147,7 @@ jobs:
   rolling:
     name: Publish rolling prerelease
     if: github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/')
-    needs: [linux, macos, windows]
+    needs: [linux, macos, windows, android, ios]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -122,8 +166,10 @@ jobs:
         run: |
           set -euo pipefail
           files=(dist/ethornell-linux-{x86_64,aarch64}.tar.gz
-                 dist/ethornell-macos-{arm64,x86_64}.tar.gz
-                 dist/ethornell-windows-x86_64.zip)
+                 dist/ethornell-macos-universal.{zip,tar.gz}
+                 dist/ethornell-windows-x86_64.zip
+                 dist/ethornell-android.apk
+                 dist/ethornell-ios-unsigned.ipa)
           for file in "${files[@]}"; do test -f "$file"; done
 
           if gh release view pre-release >/dev/null 2>&1; then
@@ -139,7 +185,7 @@ jobs:
   release:
     name: Publish versioned release
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    needs: [linux, macos, windows]
+    needs: [linux, macos, windows, android, ios]
     runs-on: ubuntu-latest
     permissions:
       contents: write

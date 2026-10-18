@@ -25,9 +25,14 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Parser)]
 #[command(name = "ethornell")]
 #[command(about = "Rust Ethornell / BURIKO General Interpreter runtime tools")]
+#[command(args_conflicts_with_subcommands = true)]
 struct Cli {
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
+    /// Game folder to play. Without a command or a folder (a double-click on
+    /// the program), a folder dialog asks for one; a folder dropped on the
+    /// program arrives here.
+    game: Option<PathBuf>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -304,11 +309,38 @@ impl MagicStats {
     }
 }
 
+/// Plays a game without a command line: the folder given (dropped on the
+/// program) or one chosen in a dialog. Errors are shown in a dialog too, as
+/// there may be no terminal to print them.
+fn play(game: Option<PathBuf>) -> anyhow::Result<()> {
+    let Some(game) = game.or_else(ethornell_app::choose_game_folder) else {
+        return Ok(());
+    };
+    let result = GameRoot::new(game).map_err(anyhow::Error::from).and_then(|game_root| {
+        ethornell_app::run(ethornell_app::AppConfig {
+            game_root,
+            trace: false,
+            fail_on_stub: false,
+            force_text_test: false,
+            headless: false,
+            script: None,
+        })
+        .map_err(anyhow::Error::from)
+    });
+    if let Err(error) = &result {
+        ethornell_app::show_error("Ethornell", &format!("{error:#}"));
+    }
+    result
+}
+
 fn main() -> anyhow::Result<()> {
     init_tracing();
     let cli = Cli::parse();
+    let Some(command) = cli.command else {
+        return play(cli.game);
+    };
 
-    match cli.command {
+    match command {
         Command::Scan { game } => {
             let root = GameRoot::new(game)?;
             let report = scan_game_root(&root)?;
