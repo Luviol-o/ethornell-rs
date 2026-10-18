@@ -1304,7 +1304,9 @@ pub fn load_system_cjk_font() -> Result<FontArc> {
     load_text_font(std::env::var_os("ETHORNELL_FONT"))
 }
 
-fn load_text_font(requested: Option<std::ffi::OsString>) -> Result<FontArc> {
+/// Loads the text font from `requested` (the value of `ETHORNELL_FONT`) when
+/// it names a usable font file, else the first usable system font.
+pub fn load_text_font(requested: Option<std::ffi::OsString>) -> Result<FontArc> {
     if let Some(path) = requested {
         let path = std::path::PathBuf::from(path);
         match std::fs::read(&path)
