@@ -48,6 +48,16 @@ impl HeadlessInputScript {
         }
     }
 
+    /// Probe (regress_probe): a script from a string, for the autopilot's macros.
+    pub fn from_source(source: &str) -> Result<Self, String> {
+        Self::parse(source)
+    }
+
+    /// Probe: no action, wait or queued release left.
+    pub fn is_finished(&self) -> bool {
+        self.actions.is_empty() && self.wait_remaining == 0 && self.queued_release.is_none()
+    }
+
     pub(crate) fn parse(source: &str) -> Result<Self, String> {
         let mut actions = VecDeque::new();
         for raw_token in source.split(',') {

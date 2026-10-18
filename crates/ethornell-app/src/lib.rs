@@ -72,6 +72,8 @@ mod native_system;
 mod native_user;
 mod perspective_blit;
 mod platform;
+mod regress_probe;
+pub use regress_probe::probe_frame_movie_status;
 mod resource_lookup;
 mod ruby_registry;
 mod runtime_frontend;
@@ -21853,6 +21855,7 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
 
     fn load_file_bytes(&mut self, archive: &str, file: &str) -> Option<Vec<u8>> {
         let bytes = read_runtime_bytes(&self.manager, archive, file);
+        let bytes = regress_probe::probe_scenario_load(&self.manager, archive, file, bytes);
         let resolved_archive = find_runtime_resource(&self.manager, archive, file)
             .and_then(|entry| {
                 entry
@@ -25163,6 +25166,7 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
             materialized_layout = %materialized_layout,
             "GraphConfigureIconInputProcessor"
         );
+        regress_probe::probe_note_configure(object);
         // sub_44A900 resets the pointer-current item and immediately reruns
         // hit testing. If the cursor is already over an item, the target can
         // therefore queue the initial 0x10000002 record during configure.
@@ -27695,12 +27699,18 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                             .entry(target)
                             .or_default()
                             .push_str(&drawn);
+                        if self.native_message_surface_target == Some(target) {
+                            regress_probe::probe_record_line("skip", &drawn);
+                        }
                     } else {
                         let parsed = text::parse_and_wrap_styled_message(text, &state);
                         self.surface_text_buffers
                             .entry(target)
                             .or_default()
                             .push_str(&parsed.text);
+                        if self.native_message_surface_target == Some(target) {
+                            regress_probe::probe_record_line("skip", &parsed.text);
+                        }
                         let x = state.x;
                         let y = state.y;
                         // The window composes this text into its own
@@ -29629,7 +29639,14 @@ fn run_headless(
     mut runtime: Option<RuntimeEngine>,
 ) -> Result<()> {
     tracing::info!(title, "GUI headless runtime started");
-    let mut audio = match AudioSystem::new() {
+    // Probe: PROBE_NOAUDIO=1 creates no audio system at all. Otherwise this
+    // build's audio system has no device (regress_probe, ethornell-audio)
+    // and renders its mix in VM time below.
+    let mut audio = match if std::env::var_os("PROBE_NOAUDIO").is_some() {
+        Err(EthornellError::Other("PROBE_NOAUDIO".into()))
+    } else {
+        AudioSystem::new()
+    } {
         Ok(mut audio) => {
             // Sound still plays (scripts poll channel state), only inaudibly.
             if std::env::var_os("ETHORNELL_HEADLESS_MUTE").is_some() {
@@ -29678,6 +29695,10 @@ fn run_headless(
         "headless cooperative scheduler configured"
     );
     let mut input_script = HeadlessInputScript::from_env();
+    let mut probe_autoplay = regress_probe::ProbeAutoplay::from_env();
+    let mut probe_last_report: Option<ethornell_vm::VmRunReport> = None;
+    let probe_pokes = regress_probe::probe_pokes();
+    let probe_fast_compose = std::env::var_os("PROBE_FASTCOMPOSE").is_some();
     let mut pending_input_events = VecDeque::new();
     if input_script.is_some() {
         tracing::info!("headless input script loaded");
@@ -29707,6 +29728,12 @@ fn run_headless(
     let mut runtime_failure = None;
     for frame in 0..max_frames {
         if let Some(runtime) = runtime.as_mut() {
+            regress_probe::apply_pokes(&mut runtime.vm.memory, &probe_pokes);
+            if let Some(autoplay) = probe_autoplay.as_mut()
+                && autoplay.tick(frame, &mut runtime.api, &runtime.vm, probe_last_report.as_ref())
+            {
+                break;
+            }
             let frame_report = runtime_frontend::drive_runtime_frame(
                 runtime,
                 &mut pending_input_events,
@@ -29717,7 +29744,27 @@ fn run_headless(
                 audio.as_mut(),
                 "headless",
             );
+            if let Some(audio) = audio.as_mut() {
+                audio.probe_render(NATIVE_TICK_MS);
+                if frame % 600 == 0 {
+                    regress_probe::log_audio(frame, audio);
+                }
+            }
             let last_report = frame_report.last_report;
+            if last_report.is_some() {
+                probe_last_report = last_report.clone();
+            }
+            if let Some(report) = last_report.as_ref()
+                && report.stop_reason.is_fatal()
+            {
+                let reason = format!("{:?}", report.stop_reason);
+                tracing::warn!(
+                    frame,
+                    pc = report.pc,
+                    reason = %reason.chars().take_while(|ch| ch.is_ascii_alphanumeric()).collect::<String>(),
+                    "PROBEFATAL"
+                );
+            }
             if std::mem::take(&mut runtime.api.pending_window_close_request)
                 && runtime.api.handle_host_window_close("Sys80:69/headless")
             {
@@ -29735,8 +29782,18 @@ fn run_headless(
             // presentation: every logical frame still traverses the shared
             // render tree and produces a complete offscreen framebuffer.
             // sub_462100: a frame that is not due shows the last one again.
-            let frame_composition = if runtime.api.take_present_due() || last_composition.is_none()
+            let present_due = runtime.api.take_present_due();
+            // Probe: PROBE_FASTCOMPOSE=1 composes only every 60th frame and
+            // snapshot frames (the composite is read-only: the VM runs the same).
+            if probe_fast_compose
+                && frame % 60 != 0
+                && !snapshot_frames.contains(&frame)
+                && !runtime.api.quit_requested
+                && !runtime.vm.halted
             {
+                continue;
+            }
+            let frame_composition = if present_due || last_composition.is_none() {
                 runtime.api.performance_profile.begin();
                 let composition =
                     snapshot::compose_runtime_frame_with_diagnostics(&runtime.api, true);
@@ -29870,6 +29927,9 @@ fn run_headless(
     }
     if let Some(runtime) = runtime.as_ref() {
         runtime.api.write_call_coverage_if_requested();
+    }
+    if let Some(audio) = audio.as_ref() {
+        regress_probe::log_audio(regress_probe::probe_frame() as usize, audio);
     }
     if let Some(failure) = runtime_failure {
         return Err(EthornellError::Other(failure));
