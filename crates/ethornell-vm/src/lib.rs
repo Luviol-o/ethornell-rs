@@ -6214,17 +6214,6 @@ impl Vm {
                     return None;
                 }
 
-                if procedure.native.initial_delay_enabled != 0
-                    && now_tick < procedure.initial_deadline_tick
-                    && input_bits == 0
-                {
-                    self.thread.replace_current_procedure(InstalledCProcedure {
-                        source_opcode: installed.source_opcode,
-                        object: CProcedure::DspMsg(procedure),
-                    });
-                    return Some(VmStopReason::WaitingForInputOrTime);
-                }
-
                 if input_bits != 0 {
                     if api.native_message_is_animating() {
                         // Ordinary input only reveals while glyph animation is
@@ -6255,6 +6244,21 @@ impl Vm {
                     // every completion; scrmsg stores it as "ended by input".
                     self.push_value(Value::Int(procedure.native.ordinary_input_latch as i32));
                     return None;
+                }
+
+                // The start delay (+0x44/+0x48, Graph90:9B) holds only a
+                // message that waits at its end: sub_433E40 finalizes a +0x38
+                // == 0 message before it looks at +0x44, so a typed message
+                // ahead of the waiting one isn't held too.
+                if procedure.native.initial_delay_enabled != 0
+                    && now_tick < procedure.initial_deadline_tick
+                    && input_bits == 0
+                {
+                    self.thread.replace_current_procedure(InstalledCProcedure {
+                        source_opcode: installed.source_opcode,
+                        object: CProcedure::DspMsg(procedure),
+                    });
+                    return Some(VmStopReason::WaitingForInputOrTime);
                 }
 
                 // Target +0x5c is armed only after the text processor reaches
@@ -16428,6 +16432,64 @@ mod tests {
         vm.advance_time_ms(1);
         assert_eq!(vm.poll_current_procedure(&mut api, false), None);
         assert_eq!(api.message_reveals, 0);
+        assert_eq!(api.message_finishes, 1);
+    }
+
+    #[test]
+    fn the_start_delay_holds_only_a_message_that_waits_at_its_end() {
+        // Wonderful Everyday's scrmsg sets the voice's remaining time as the
+        // start delay, then runs a typed message (+0x38 = 0) and a waiting
+        // one in auto mode. Only the waiting one is held, as in sub_433E40.
+        let message = |end_wait_policy: i32| {
+            super::native_thread::InstalledCProcedure::dsp_msg(
+                super::MAIN_THREAD_ID,
+                NativeOpcode {
+                    group: 0x90,
+                    id: 0x90,
+                },
+                0,
+                super::NativeMessageProcedureConfig {
+                    class: super::NativeMessageProcedureClass::DspMsg,
+                    initial_delay_enabled: true,
+                    initial_delay_ms: 1000,
+                    reveal_duration_ms: 0,
+                    reveal_steps: 0,
+                    reveal_step_delay_ms: 0,
+                    settle_steps: 0,
+                    settle_step_delay_ms: 0,
+                    auto_advance_delay_ms: Some(30),
+                    input_scope: 2,
+                    completion_control: 0,
+                    end_wait_policy,
+                    allow_high_bit_input: true,
+                    allow_auxiliary_input: true,
+                    auxiliary_input_mask: 0,
+                    input_forces_completion: false,
+                },
+            )
+        };
+
+        let mut vm = Vm::new();
+        vm.install_cprocedure(message(0), false);
+        let mut api = SchedulingApi::default();
+        assert_eq!(vm.poll_current_procedure(&mut api, false), None);
+        assert_eq!(api.message_finishes, 1);
+
+        let mut vm = Vm::new();
+        vm.install_cprocedure(message(1), false);
+        let mut api = SchedulingApi::default();
+        vm.advance_time_ms(999);
+        assert_eq!(
+            vm.poll_current_procedure(&mut api, false),
+            Some(VmStopReason::WaitingForInputOrTime)
+        );
+        vm.advance_time_ms(1);
+        assert_eq!(
+            vm.poll_current_procedure(&mut api, false),
+            Some(VmStopReason::WaitingForInputOrTime)
+        );
+        vm.advance_time_ms(30);
+        assert_eq!(vm.poll_current_procedure(&mut api, false), None);
         assert_eq!(api.message_finishes, 1);
     }
 
