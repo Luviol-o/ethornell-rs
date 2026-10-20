@@ -3515,16 +3515,14 @@ impl Vm {
             BpOpcode::Known {
                 name: "strfind", ..
             } => {
-                let needle = self.pop_string_lossy()?;
-                let haystack = self.pop_string_lossy()?;
-                let needle=self.encode_native_string(&needle);
-                let haystack=self.encode_native_string(&haystack);
+                let needle = self.pop_native_string_bytes()?;
+                let haystack = self.pop_native_string_bytes()?;
                 let found = if needle.is_empty() {
                     0
                 } else {
                     haystack
                         .windows(needle.len())
-                        .position(|window| window == needle.as_ref())
+                        .position(|window| window == needle.as_slice())
                         .map(|offset| offset as i32)
                         .unwrap_or(-1)
                 };
@@ -3535,27 +3533,24 @@ impl Vm {
             } => {
                 // sub_474520 pops replacement, needle, haystack, destination,
                 // runs sub_495A80 and pushes the number of replacements.
-                let replacement = self.pop_string_lossy()?;
-                let needle = self.pop_string_lossy()?;
-                let haystack = self.pop_string_lossy()?;
+                let replacement = self.pop_native_string_bytes()?;
+                let needle = self.pop_native_string_bytes()?;
+                let haystack = self.pop_native_string_bytes()?;
                 let dst = self.pop_ptr()?;
-                let (replaced, count) = target_strreplace(
-                    &self.encode_native_string(&haystack),
-                    &self.encode_native_string(&needle),
-                    &self.encode_native_string(&replacement),
-                );
-                let text=if self.native_abi_profile==NativeAbiProfile::Amachoco {String::from_utf8_lossy(&replaced)} else {encoding_rs::SHIFT_JIS.decode(&replaced).0};
-                self.write_c_string(dst, &text)?;
+                let (replaced, count) = target_strreplace(&haystack, &needle, &replacement);
+                self.write_c_string_native_bytes(dst, &replaced)?;
                 self.push_value(Value::Int(count));
             }
             BpOpcode::Known { name: "strlen", .. } => {
-                let text = self.pop_string_lossy()?;
-                let encoded=self.encode_native_string(&text);
-                self.push_value(Value::Int(encoded.len() as i32));
+                // The target runs C strlen over the raw buffer, so bytes that
+                // do not survive a Shift-JIS round trip (GBK fan patches)
+                // must be counted as stored.
+                let bytes = self.pop_native_string_bytes()?;
+                self.push_value(Value::Int(bytes.len() as i32));
             }
             BpOpcode::Known { name: "streq", .. } => {
-                let right = self.pop_string_lossy()?;
-                let left = self.pop_string_lossy()?;
+                let right = self.pop_native_string_bytes()?;
+                let left = self.pop_native_string_bytes()?;
                 self.push_value(Value::Int((left == right) as i32));
             }
             BpOpcode::Known { name: "strcpy", .. } => {
@@ -3566,10 +3561,11 @@ impl Vm {
             BpOpcode::Known {
                 name: "strconcat", ..
             } => {
-                let right = self.pop_string_lossy()?;
-                let left = self.pop_string_lossy()?;
+                let right = self.pop_native_string_bytes()?;
+                let mut joined = self.pop_native_string_bytes()?;
                 let dst = self.pop_ptr()?;
-                self.write_c_string(dst, &format!("{left}{right}"))?;
+                joined.extend_from_slice(&right);
+                self.write_c_string_native_bytes(dst, &joined)?;
             }
             BpOpcode::Known {
                 name: "getchar", ..
@@ -7978,6 +7974,26 @@ impl Vm {
         self.copy_buffer(dst, src, size)
     }
 
+    /// Write native bytes, keeping the String path (and its script-record
+    /// restore) for anything that round-trips through the native encoding.
+    fn write_c_string_native_bytes(&mut self, ptr: u32, bytes: &[u8]) -> VmResult<()> {
+        let text = if self.native_abi_profile == NativeAbiProfile::Amachoco {
+            String::from_utf8_lossy(bytes)
+        } else {
+            encoding_rs::SHIFT_JIS.decode(bytes).0
+        };
+        if self.encode_native_string(&text).as_ref() == bytes {
+            return self.write_c_string(ptr, &text);
+        }
+        let range = self.resolve_write_range(ptr, bytes.len().saturating_add(1))?;
+        let start = range.start;
+        self.memory[start..start + bytes.len()].copy_from_slice(bytes);
+        self.memory[start + bytes.len()] = 0;
+        self.clear_shadow_values(ptr, bytes.len().saturating_add(1));
+        self.trace_watch_write(ptr, bytes.len().saturating_add(1), 0, "write_c_string");
+        Ok(())
+    }
+
     fn write_c_string_raw(&mut self, ptr: u32, text: &str) -> VmResult<()> {
         let encoded=if self.native_abi_profile==NativeAbiProfile::Amachoco {std::borrow::Cow::Borrowed(text.as_bytes())} else {encoding_rs::SHIFT_JIS.encode(text).0};
         let bytes = encoded.as_ref();
@@ -11744,6 +11760,35 @@ impl Vm {
     fn pop_string_lossy(&mut self) -> VmResult<String> {
         let value = self.pop_value()?;
         self.value_as_native_string_lossy(value)
+    }
+
+    /// Pop a string operand as the bytes the target would see in its buffer.
+    fn pop_native_string_bytes(&mut self) -> VmResult<Vec<u8>> {
+        match self.pop_value()? {
+            Value::Str(text) => Ok(self.encode_native_string(&text).into_owned()),
+            Value::Ptr(ptr) => self.read_shadowed_c_string_bytes(ptr),
+            Value::Int(value) => self.read_shadowed_c_string_bytes(value as u32),
+            Value::Func { offset, .. } => self.read_shadowed_c_string_bytes(offset),
+            Value::Program(_) | Value::None => Ok(Vec::new()),
+        }
+    }
+
+    /// Shadows of loaded scenario text are decoded as Shift-JIS, which is
+    /// lossy for other encodings. Memory stays authoritative whenever the
+    /// shadow is just that decoding of it.
+    fn read_shadowed_c_string_bytes(&self, ptr: u32) -> VmResult<Vec<u8>> {
+        let Some(Value::Str(text)) = self.mem_values.get(&Self::value_key(ptr)) else {
+            return self.read_c_string_bytes(ptr);
+        };
+        if let Ok(raw) = self.read_c_string_bytes(ptr) {
+            if self
+                .read_c_string(ptr)
+                .is_ok_and(|decoded| decoded == *text)
+            {
+                return Ok(raw);
+            }
+        }
+        Ok(self.encode_native_string(text).into_owned())
     }
 
     fn render_sprintf(&mut self, fmt: &str) -> String {
@@ -17524,6 +17569,35 @@ mod tests {
             .extend([Value::Str("Main".into()), Value::Str(":".into())]);
         vm.dispatch(&instruction, &mut TraceApi).unwrap();
         assert_eq!(vm.stack, [Value::Int(2), Value::Int(-1)]);
+    }
+
+    #[test]
+    fn string_opcodes_measure_raw_bytes_behind_lossy_shadows() {
+        // GBK "恭介" is not valid Shift-JIS; scenario preprocessing shadows it
+        // with a lossy decoding while memory keeps the stored bytes.
+        let gbk = [0xb9, 0xa7, 0xbd, 0xe9];
+        let mut vm = Vm::new();
+        vm.memory[0x100..0x104].copy_from_slice(&gbk);
+        vm.memory[0x104] = 0;
+        let lossy = encoding_rs::SHIFT_JIS.decode(&gbk).0.into_owned();
+        vm.mem_values.insert(Vm::value_key(0x100), Value::Str(lossy));
+
+        let strlen = test_instruction(0x10, 0x68, "strlen", vec![0x68], Vec::new());
+        vm.stack.push(Value::Ptr(0x100));
+        vm.dispatch(&strlen, &mut TraceApi).unwrap();
+        assert_eq!(vm.stack, [Value::Int(4)]);
+        vm.stack.clear();
+
+        let strconcat = test_instruction(0x10, 0x6b, "strconcat", vec![0x6b], Vec::new());
+        vm.stack
+            .extend([Value::Ptr(0x200), Value::Ptr(0x100), Value::Str("!".into())]);
+        vm.dispatch(&strconcat, &mut TraceApi).unwrap();
+        assert_eq!(&vm.memory[0x200..0x206], &[0xb9, 0xa7, 0xbd, 0xe9, b'!', 0]);
+
+        let streq = test_instruction(0x10, 0x69, "streq", vec![0x69], Vec::new());
+        vm.stack.extend([Value::Ptr(0x100), Value::Ptr(0x200)]);
+        vm.dispatch(&streq, &mut TraceApi).unwrap();
+        assert_eq!(vm.stack, [Value::Int(0)]);
     }
 
     #[test]
