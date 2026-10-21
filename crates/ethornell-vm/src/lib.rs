@@ -2223,9 +2223,6 @@ pub struct Vm {
     pub heap_ptr: u32,
     heap_allocations: BTreeMap<u32, u32>,
     heap_free_blocks: Vec<(u32, u32)>,
-    shared_heap: Arc<Mutex<SharedHeapState>>,
-    shared_heap_generation: u64,
-    shared_heap_dirty: Vec<std::ops::Range<usize>>,
     pub halted: bool,
     pub calls: BTreeMap<String, usize>,
     pub stubs: BTreeMap<String, usize>,
@@ -2299,20 +2296,6 @@ pub struct Vm {
     next_thread_id: i32,
     collect_diagnostics: bool,
     extended_opcodes: extended_opcodes::ExtendedOpcodeState,
-}
-
-#[derive(Debug, Default)]
-struct SharedHeapState {
-    bytes: Vec<u8>,
-    values: BTreeMap<u32, Value>,
-    generation: u64,
-    journal: Vec<SharedHeapJournalEntry>,
-}
-
-#[derive(Debug, Clone)]
-struct SharedHeapJournalEntry {
-    generation: u64,
-    range: std::ops::Range<usize>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -6997,9 +6980,6 @@ impl Vm {
                 .max(INITIAL_MEMORY_SIZE)
                 .min(MAX_MEMORY_SIZE);
             self.memory.resize(grown, 0);
-        }
-        if start >= HEAP_MEMORY_BASE && size != 0 {
-            self.mark_shared_heap_dirty(start..end);
         }
         Ok(start..end)
     }

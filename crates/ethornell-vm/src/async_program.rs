@@ -1,7 +1,7 @@
 use crate::MAIN_THREAD_ID;
 use crate::{
-    ADDRESS_MASK, GraphApi, LOCAL_MEMORY_BASE, SoundApi, SysApi, Value, Vm, VmRunOptions,
-    VmStopReason,
+    ADDRESS_MASK, GraphApi, HEAP_MEMORY_BASE, LOCAL_MEMORY_BASE, SoundApi, SysApi, Value, Vm,
+    VmRunOptions, VmStopReason,
 };
 use ethornell_script::BpProgram;
 use std::sync::Arc;
@@ -12,6 +12,12 @@ pub(crate) struct AsyncProgramTask {
     pub(crate) vm: Box<Vm>,
     pub(crate) runnable: bool,
     pub(crate) completed: bool,
+}
+
+impl AsyncProgramTask {
+    pub(crate) fn key(&self) -> &str {
+        &self.key
+    }
 }
 
 impl Vm {
@@ -51,21 +57,15 @@ impl Vm {
         };
         let key = program_key(&program);
 
-        self.flush_shared_heap();
+        // The new thread gets the globals and heap when it first runs (see
+        // `hand_over_memory`); until then it owns only its local region.
         let mut vm = Vm::new();
+        vm.memory.truncate(HEAP_MEMORY_BASE);
+        vm.memory.shrink_to_fit();
         vm.native_abi_profile = self.native_abi_profile;
         vm.graph_text_encoding = self.graph_text_encoding;
-        vm.shared_heap = Arc::clone(&self.shared_heap);
         vm.system80_shared = Arc::clone(&self.system80_shared);
         vm.system81_shared = Arc::clone(&self.system81_shared);
-        vm.sync_shared_heap();
-        let shared_end = shared_memory_end(self);
-        vm.memory[..shared_end].copy_from_slice(&self.memory[..shared_end]);
-        vm.mem_values = self
-            .mem_values
-            .range(..LOCAL_MEMORY_BASE)
-            .map(|(addr, value)| (*addr, value.clone()))
-            .collect();
         vm.heap_ptr = self.heap_ptr;
         vm.record_tables = self.record_tables.clone();
         vm.next_record_table_handle = self.next_record_table_handle;
@@ -328,8 +328,6 @@ impl Vm {
     where
         A: SysApi + GraphApi + SoundApi,
     {
-        self.flush_shared_heap();
-        self.sync_shared_heap();
         let trace_async = trace_events || std::env::var_os("TRACE_ASYNC_PROGRAMS").is_some();
 
         // Native `sub_48CD70` walks one flat CThread list. Status 3 replaces
@@ -382,7 +380,6 @@ impl Vm {
                 ..run_options.clone()
             };
             let mut task = self.async_tasks.remove(cursor);
-            task.vm.sync_shared_heap();
             transfer_async_shared_state(self, &mut task.vm);
             let mut scheduler_tasks = std::mem::take(&mut self.async_tasks);
             scheduler_tasks.append(&mut task.vm.async_tasks);
@@ -407,8 +404,6 @@ impl Vm {
                     "async VM host watchdog ended this scheduler slice"
                 );
             }
-            task.vm.flush_shared_heap();
-            self.sync_shared_heap();
             let root_messages = std::mem::take(&mut task.vm.pending_root_program_messages);
             let root_callbacks = std::mem::take(&mut task.vm.pending_root_program_callbacks);
             if trace_async {
@@ -522,91 +517,6 @@ impl Vm {
         }
     }
 
-    pub(crate) fn mark_shared_heap_dirty(&mut self, range: std::ops::Range<usize>) {
-        if range.start >= range.end {
-            return;
-        }
-        let mut start = range.start;
-        let mut end = range.end;
-        self.shared_heap_dirty.retain(|existing| {
-            if existing.end < start || existing.start > end {
-                true
-            } else {
-                start = start.min(existing.start);
-                end = end.max(existing.end);
-                false
-            }
-        });
-        self.shared_heap_dirty.push(start..end);
-    }
-
-    fn flush_shared_heap(&mut self) {
-        if self.shared_heap_dirty.is_empty() {
-            return;
-        }
-        let ranges = std::mem::take(&mut self.shared_heap_dirty);
-        let mut shared = self
-            .shared_heap
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        shared.generation = shared.generation.saturating_add(1);
-        let generation = shared.generation;
-        for range in ranges {
-            if shared.bytes.len() < range.end {
-                shared.bytes.resize(range.end, 0);
-            }
-            shared.bytes[range.clone()].copy_from_slice(&self.memory[range.clone()]);
-            let value_range = range.start as u32..range.end as u32;
-            shared
-                .values
-                .extract_if(value_range.clone(), |_, _| true)
-                .for_each(drop);
-            shared.values.extend(
-                self.mem_values
-                    .range(value_range)
-                    .map(|(addr, value)| (*addr, value.clone())),
-            );
-            shared
-                .journal
-                .push(super::SharedHeapJournalEntry { generation, range });
-        }
-        self.shared_heap_generation = generation;
-    }
-
-    fn sync_shared_heap(&mut self) {
-        let shared = self
-            .shared_heap
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if self.shared_heap_generation == shared.generation {
-            return;
-        }
-        let first = shared
-            .journal
-            .partition_point(|entry| entry.generation <= self.shared_heap_generation);
-        let ranges = shared.journal[first..]
-            .iter()
-            .map(|entry| entry.range.clone())
-            .collect::<Vec<_>>();
-        for range in ranges {
-            if self.memory.len() < range.end {
-                self.memory.resize(range.end, 0);
-            }
-            self.memory[range.clone()].copy_from_slice(&shared.bytes[range.clone()]);
-            let value_range = range.start as u32..range.end as u32;
-            self.mem_values
-                .extract_if(value_range.clone(), |_, _| true)
-                .for_each(drop);
-            self.mem_values.extend(
-                shared
-                    .values
-                    .range(value_range)
-                    .map(|(addr, value)| (*addr, value.clone())),
-            );
-        }
-        self.shared_heap_generation = shared.generation;
-    }
-
     fn async_program_key(&self, value: &Value) -> Option<String> {
         if matches!(value, Value::Int(_) | Value::Ptr(_)) {
             let thread_id = value.as_i32();
@@ -659,10 +569,35 @@ fn program_key(program: &BpProgram) -> String {
         .to_string()
 }
 
-fn shared_memory_end(vm: &Vm) -> usize {
-    (vm.heap_ptr as usize)
-        .min(LOCAL_MEMORY_BASE as usize)
-        .min(vm.memory.len())
+/// Hands the process memory -- globals and the shared heap, as one buffer --
+/// to the thread about to run, without copying it. Only threads' local
+/// regions (`LOCAL_MEMORY_BASE..HEAP_MEMORY_BASE`, and their shadow values)
+/// stay with each thread. The idle side keeps a buffer whose globals and heap
+/// are stale; it gets the live one back before it runs again. Sharing the
+/// heap by copying it instead cost every idle thread a full heap.
+fn hand_over_memory(source: &mut Vm, destination: &mut Vm) {
+    let local = LOCAL_MEMORY_BASE as usize..HEAP_MEMORY_BASE;
+    for vm in [&mut *source, &mut *destination] {
+        if vm.memory.len() < HEAP_MEMORY_BASE {
+            vm.memory.resize(HEAP_MEMORY_BASE, 0);
+        }
+    }
+    std::mem::swap(&mut source.memory, &mut destination.memory);
+    destination.memory[local.clone()].swap_with_slice(&mut source.memory[local]);
+
+    let local_keys = LOCAL_MEMORY_BASE..HEAP_MEMORY_BASE as u32;
+    let source_locals = source
+        .mem_values
+        .extract_if(local_keys.clone(), |_, _| true)
+        .collect::<Vec<_>>();
+    let destination_locals = destination
+        .mem_values
+        .extract_if(local_keys, |_, _| true)
+        .collect::<Vec<_>>();
+    std::mem::swap(&mut source.mem_values, &mut destination.mem_values);
+    destination.mem_values.extend(destination_locals);
+    source.mem_values.clear();
+    source.mem_values.extend(source_locals);
 }
 
 fn transfer_async_shared_state(source: &mut Vm, destination: &mut Vm) {
@@ -678,23 +613,7 @@ fn transfer_async_shared_state(source: &mut Vm, destination: &mut Vm) {
             "VM indexed-record state transfer begin"
         );
     }
-    let shared_end = shared_memory_end(source);
-    if destination.memory.len() < shared_end {
-        destination.memory.resize(shared_end, 0);
-    }
-    destination.memory[..shared_end].copy_from_slice(&source.memory[..shared_end]);
-
-    // Leave thread-local and heap shadows in place. Only the global segment
-    // moves with the active thread; heap shadows use the dirty-range journal.
-    destination
-        .mem_values
-        .extract_if(..LOCAL_MEMORY_BASE, |_, _| true)
-        .for_each(drop);
-    destination.mem_values.extend(
-        source
-            .mem_values
-            .extract_if(..LOCAL_MEMORY_BASE, |_, _| true),
-    );
+    hand_over_memory(source, destination);
 
     std::mem::swap(&mut source.heap_ptr, &mut destination.heap_ptr);
     std::mem::swap(
@@ -878,40 +797,46 @@ mod tests {
             task.mem_values[&(LOCAL_MEMORY_BASE - 1)],
             Value::Str("root".into())
         );
-        for addr in [LOCAL_MEMORY_BASE, crate::HEAP_MEMORY_BASE as u32] {
-            assert_eq!(root.mem_values[&addr], Value::Str("root".into()));
-            assert_eq!(task.mem_values[&addr], Value::Str("task".into()));
-        }
+        // Locals stay with each thread; heap values travel with the memory.
+        assert_eq!(root.mem_values[&LOCAL_MEMORY_BASE], Value::Str("root".into()));
+        assert_eq!(task.mem_values[&LOCAL_MEMORY_BASE], Value::Str("task".into()));
+        let heap = HEAP_MEMORY_BASE as u32;
+        assert_eq!(task.mem_values[&heap], Value::Str("root".into()));
+        assert!(!root.mem_values.contains_key(&heap));
         transfer_async_shared_state(&mut task, &mut root);
         assert_eq!(
             root.mem_values[&(LOCAL_MEMORY_BASE - 1)],
             Value::Str("root".into())
         );
+        assert_eq!(root.mem_values[&heap], Value::Str("root".into()));
+        assert_eq!(root.mem_values[&LOCAL_MEMORY_BASE], Value::Str("root".into()));
     }
 
     #[test]
-    fn heap_sync_applies_all_ranges_in_each_unseen_generation() {
+    fn running_thread_holds_the_one_heap_and_idle_threads_keep_only_locals() {
         let mut root = Vm::new();
         let mut task = Vm::new();
-        task.shared_heap = Arc::clone(&root.shared_heap);
+        task.memory.truncate(HEAP_MEMORY_BASE);
+        let local = LOCAL_MEMORY_BASE as usize;
+        root.memory[local] = 1;
+        task.memory[local] = 2;
         let ptr = root.alloc_heap(32);
-        root.write_value(ptr, 2, &Value::Str("first".into()))
+        root.write_c_string_raw(ptr, "root").unwrap();
+        root.write_value(ptr + 16, 2, &Value::Str("value".into()))
             .unwrap();
-        root.write_value(ptr + 16, 2, &Value::Str("second".into()))
-            .unwrap();
-        root.flush_shared_heap();
-        task.sync_shared_heap();
-        assert_eq!(task.mem_values, root.mem_values);
 
-        root.write_c_string_raw(ptr, "raw").unwrap();
-        root.write_value(ptr + 16, 2, &Value::Str("updated".into()))
-            .unwrap();
-        root.flush_shared_heap();
-        task.sync_shared_heap();
-        assert_eq!(task.read_c_string(ptr).unwrap(), "raw");
-        assert_eq!(task.mem_values, root.mem_values);
-        task.sync_shared_heap();
-        assert_eq!(task.mem_values, root.mem_values);
+        transfer_async_shared_state(&mut root, &mut task);
+        assert_eq!(task.read_c_string(ptr).unwrap(), "root");
+        assert_eq!(task.read_value(ptr + 16, 2).unwrap(), Value::Str("value".into()));
+        assert_eq!((task.memory[local], root.memory[local]), (2, 1));
+        // The idle root holds the task's small buffer, not a heap copy.
+        assert_eq!(root.memory.len(), HEAP_MEMORY_BASE);
+        task.write_c_string_raw(ptr, "task").unwrap();
+
+        transfer_async_shared_state(&mut task, &mut root);
+        assert_eq!(root.read_c_string(ptr).unwrap(), "task");
+        assert_eq!((root.memory[local], task.memory[local]), (1, 2));
+        assert_eq!(task.memory.len(), HEAP_MEMORY_BASE);
     }
 
     #[test]

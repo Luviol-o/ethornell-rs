@@ -440,12 +440,12 @@ mod tests {
         .unwrap();
         let usage = root.resource_usage();
         assert_eq!(usage.vm_count, 2);
-        assert_eq!(usage.memory_bytes, initial.memory_bytes * 2);
+        // A new thread owns only its local region until it runs.
+        assert_eq!(usage.memory_bytes, initial.memory_bytes + crate::HEAP_MEMORY_BASE);
         assert!(
             root.check_resource_budget(VmResourceBudget {
                 max_vm_count: 1,
                 max_memory_capacity_bytes: usize::MAX,
-                max_journal_entries: usize::MAX
             })
             .is_err()
         );
@@ -907,21 +907,13 @@ pub(crate) struct PendingHostRequest {
     pub(crate) user_dialog: Option<crate::user_dialog::UserDialogSink>,
 }
 
-/// Measured Vec backing storage; not a process RSS estimate. Shared heap is
-/// counted once; every live child VM's private memory is counted separately.
+/// Measured Vec backing storage; not a process RSS estimate. The running
+/// thread holds the process memory; every other VM only its own buffer.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct VmResourceUsage {
     pub vm_count: usize,
     pub memory_bytes: usize,
     pub memory_capacity_bytes: usize,
-    pub shared_heap_bytes: usize,
-    pub shared_heap_capacity_bytes: usize,
-    pub journal_entries: usize,
-    pub journal_capacity_bytes: usize,
-    /// Total covered bytes in journal ranges (not retained byte copies).
-    pub journal_range_bytes: usize,
-    pub shared_generation: u64,
-    pub oldest_consumed_generation: u64,
 }
 
 /// Host-enforced admission limits. Check before scheduling a pass and after
@@ -931,7 +923,6 @@ pub struct VmResourceUsage {
 pub struct VmResourceBudget {
     pub max_vm_count: usize,
     pub max_memory_capacity_bytes: usize,
-    pub max_journal_entries: usize,
 }
 
 impl Vm {
@@ -1067,8 +1058,20 @@ impl Vm {
                 "host response violates stack output contract".into(),
             ));
         }
+        // A suspended thread does not hold the process memory (see
+        // `hand_over_memory`), so only the address itself is checked here;
+        // `settle_ready_host_response` writes once the thread runs again.
         for write in &response.writes {
-            target.resolve_range(write.address, write.bytes.len())?;
+            let start = Vm::memory_addr(write.address) as usize;
+            if start
+                .checked_add(write.bytes.len())
+                .is_none_or(|end| end > crate::MAX_MEMORY_SIZE)
+            {
+                return Err(VmError::MemoryOutOfBounds {
+                    addr: write.address,
+                    size: write.bytes.len(),
+                });
+            }
         }
         target.ready_host_response = Some(response);
         target.pending_host_request = None;
@@ -1079,19 +1082,16 @@ impl Vm {
         let Some(response) = self.ready_host_response.take() else {
             return Ok(());
         };
-        // Guest memory cannot shrink while the owning thread is suspended;
-        // scheduling only transfers/enlarges the shared segment in between.
+        // The thread runs again, so it holds the process memory: the writes
+        // land in the globals and heap every thread sees.
         let ranges = response
             .writes
             .iter()
             .map(|write| self.resolve_range(write.address, write.bytes.len()))
             .collect::<VmResult<Vec<_>>>()?;
         for (write, range) in response.writes.into_iter().zip(ranges) {
-            self.memory[range.clone()].copy_from_slice(&write.bytes);
+            self.memory[range].copy_from_slice(&write.bytes);
             self.clear_shadow_values(write.address, write.bytes.len());
-            if range.start >= crate::HEAP_MEMORY_BASE {
-                self.mark_shared_heap_dirty(range);
-            }
         }
         for value in response.outputs {
             self.push_value(value);
@@ -1151,25 +1151,26 @@ impl Vm {
     }
 
     pub fn resource_usage(&self) -> VmResourceUsage {
-        let shared = self
-            .shared_heap
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let mut usage = VmResourceUsage {
-            shared_heap_bytes: shared.bytes.len(),
-            shared_heap_capacity_bytes: shared.bytes.capacity(),
-            journal_entries: shared.journal.len(),
-            journal_capacity_bytes: shared
-                .journal
-                .capacity()
-                .saturating_mul(std::mem::size_of::<crate::SharedHeapJournalEntry>()),
-            journal_range_bytes: shared.journal.iter().map(|entry| entry.range.len()).sum(),
-            shared_generation: shared.generation,
-            oldest_consumed_generation: self.shared_heap_generation,
-            ..VmResourceUsage::default()
-        };
+        let mut usage = VmResourceUsage::default();
         self.add_private_usage(&mut usage);
         usage
+    }
+
+    /// `(task key, runnable, completed, memory length, capacity)` for every
+    /// child VM, depth first, for budget diagnostics.
+    pub fn task_memory_breakdown(&self) -> Vec<(String, bool, bool, usize, usize)> {
+        let mut out = Vec::new();
+        for task in &self.async_tasks {
+            out.push((
+                task.key().to_string(),
+                task.runnable,
+                task.completed,
+                task.vm.memory.len(),
+                task.vm.memory.capacity(),
+            ));
+            out.extend(task.vm.task_memory_breakdown());
+        }
+        out
     }
 
     fn add_private_usage(&self, usage: &mut VmResourceUsage) {
@@ -1178,9 +1179,6 @@ impl Vm {
         usage.memory_capacity_bytes = usage
             .memory_capacity_bytes
             .saturating_add(self.memory.capacity());
-        usage.oldest_consumed_generation = usage
-            .oldest_consumed_generation
-            .min(self.shared_heap_generation);
         for task in &self.async_tasks {
             task.vm.add_private_usage(usage);
         }
@@ -1188,13 +1186,8 @@ impl Vm {
 
     pub fn check_resource_budget(&self, budget: VmResourceBudget) -> VmResult<VmResourceUsage> {
         let usage = self.resource_usage();
-        let capacity = usage
-            .memory_capacity_bytes
-            .saturating_add(usage.shared_heap_capacity_bytes)
-            .saturating_add(usage.journal_capacity_bytes);
         if usage.vm_count > budget.max_vm_count
-            || capacity > budget.max_memory_capacity_bytes
-            || usage.journal_entries > budget.max_journal_entries
+            || usage.memory_capacity_bytes > budget.max_memory_capacity_bytes
         {
             return Err(VmError::Runtime("VM resource budget exceeded".into()));
         }

@@ -11,14 +11,14 @@ fn elapsed_ms_with_carry(delta_ns: u64, remainder: &mut u64) -> u64 {
 }
 
 // A bounded admission profile, not a process RSS limit. Real Amairo bootstrap
-// measured 648,441,292 retained VM/shared/journal bytes at 14 VMs. Preserve the
+// measured 648,441,292 retained VM/shared/journal bytes at 14 VMs (before
+// threads handed one heap around instead of copying it). Preserve the
 // conservative profile on lower-memory or unknown Android hardware; >=4GiB
 // devices admit that measured workload with ~24% headroom, never without a cap.
 fn host_vm_budget(physical_bytes: Option<u64>) -> ethornell_vm::VmResourceBudget {
     ethornell_vm::VmResourceBudget {
         max_vm_count: 64,
         max_memory_capacity_bytes: if physical_bytes.is_some_and(|bytes|bytes>=4*1024*1024*1024) {768*1024*1024} else {512*1024*1024},
-        max_journal_entries: 1_000_000,
     }
 }
 fn host_physical_memory() -> Option<u64> {
@@ -744,11 +744,11 @@ mod tests {
         assert_eq!(host_vm_budget(Some(u64::MAX)).max_memory_capacity_bytes,normal.max_memory_capacity_bytes);
         assert!(normal.max_memory_capacity_bytes>648_441_292);
         assert!(low.max_memory_capacity_bytes<648_441_292);
-        assert_eq!(normal.max_vm_count,64);assert_eq!(normal.max_journal_entries,1_000_000);
+        assert_eq!(normal.max_vm_count,64);
         let vm=Vm::new();let usage=vm.resource_usage();
-        let capacity=usage.memory_capacity_bytes+usage.shared_heap_capacity_bytes+usage.journal_capacity_bytes;
-        assert!(vm.check_resource_budget(ethornell_vm::VmResourceBudget {max_vm_count:64,max_memory_capacity_bytes:capacity-1,max_journal_entries:1_000_000}).is_err());
-        assert!(vm.check_resource_budget(ethornell_vm::VmResourceBudget {max_vm_count:64,max_memory_capacity_bytes:capacity,max_journal_entries:1_000_000}).is_ok());
+        let capacity=usage.memory_capacity_bytes;
+        assert!(vm.check_resource_budget(ethornell_vm::VmResourceBudget {max_vm_count:64,max_memory_capacity_bytes:capacity-1}).is_err());
+        assert!(vm.check_resource_budget(ethornell_vm::VmResourceBudget {max_vm_count:64,max_memory_capacity_bytes:capacity}).is_ok());
         assert!(vm.check_resource_budget(ethornell_vm::VmResourceBudget {max_vm_count:0,..normal}).is_err());
     }
     #[test]
@@ -780,11 +780,11 @@ mod tests {
                     if frame==2010 && std::env::var_os("ETHORNELL_RESTRICTED_TRACE").is_some(){for (&id,obj) in &host.runtime.api.graph_input_objects {for (&lid,layer) in &host.runtime.api.graph_layers {if layer.target_surface==Some(obj.layer) && host.runtime.api.surface_controls.contains_layer_for_owner(SurfaceControlOwner::InputObject(id),lid) {eprintln!("local-only INPUTLAYER obj={id} layer={lid} hit={} xywh=({},{} {}x{}) transform={:?} enabled={} key={}",layer.hit_id,layer.x,layer.y,layer.width,layer.height,host.runtime.api.layer_world_transform(lid,layer),layer.enabled,layer.key);}}}}
                     if frame==2010 && std::env::var_os("ETHORNELL_RESTRICTED_TRACE").is_some(){for (&id,obj) in &host.runtime.api.graph_input_objects {if let Some(r)=obj.descriptor.regions.first(){eprintln!("local-only HITFACT obj={id} eligible={} mask={} visible={} configure_size={:?}",obj.pointer_hit_eligible(*r),host.runtime.api.graph_input_item_mask_accepts(*r,22,14),host.runtime.api.graph_surfaces.get(&obj.layer).is_some_and(|s|host.runtime.api.surface_display_chain_visible(obj.layer,s)),host.runtime.api.resource_image_region(native_surface_control_configure_resource(r)).map(|(_,r)|(r.width,r.height)));}}}
                     if frame==2010 && std::env::var_os("ETHORNELL_RESTRICTED_TRACE").is_some(){for (&id,obj) in &host.runtime.api.graph_input_objects {eprintln!("local-only VISFACT obj={id} drawable={} opacity={} props={:?}",host.runtime.api.display_tree.chain_drawable(obj.layer),host.runtime.api.surface_display_opacity(obj.layer),host.runtime.api.graph_object_properties.get(&obj.layer));}}
-                    let budget=if measure_only {ethornell_vm::VmResourceBudget {max_vm_count:64,max_memory_capacity_bytes:2*1024*1024*1024,max_journal_entries:1_000_000}} else {host.vm_budget};
+                    let budget=if measure_only {ethornell_vm::VmResourceBudget {max_vm_count:64,max_memory_capacity_bytes:2*1024*1024*1024}} else {host.vm_budget};
                     host.runtime.vm.check_resource_budget(budget).map_err(|_|EthornellError::Other(format!("restricted budget failed before frame={frame} usage={:?}",host.runtime.vm.resource_usage())))?;
                     let report = runtime_frontend::drive_runtime_frame_checked(&mut host.runtime,&mut host.input_queue,&mut input,RuntimeFramePacing,16,16,None,"restricted-repro",false)?;
-                    host.runtime.vm.check_resource_budget(budget).map_err(|_|EthornellError::Other(format!("restricted budget failed after frame={frame} usage={:?}",host.runtime.vm.resource_usage())))?;
-                    let usage=host.runtime.vm.resource_usage();peak_capacity=peak_capacity.max(usage.memory_capacity_bytes+usage.shared_heap_capacity_bytes+usage.journal_capacity_bytes);peak_vms=peak_vms.max(usage.vm_count);
+                    host.runtime.vm.check_resource_budget(budget).map_err(|_|EthornellError::Other(format!("restricted budget failed after frame={frame} root_memory={} usage={:?} tasks={:#?}",host.runtime.vm.memory.len(),host.runtime.vm.resource_usage(),host.runtime.vm.task_memory_breakdown())))?;
+                    let usage=host.runtime.vm.resource_usage();peak_capacity=peak_capacity.max(usage.memory_capacity_bytes);peak_vms=peak_vms.max(usage.vm_count);
                     if let Some(message)=host.runtime.api.host.fatal.take() {return Err(EthornellError::Other(format!("restricted host failure at frame={frame}; opcode={:?}; category={}",host.runtime.api.last_native_call,if message.contains("missing BP program") {"missing_program"} else {"host_denied"})));}
                     if let Some(report)=report.last_report.as_ref().filter(|r|r.stop_reason.is_fatal()) {
                         let unsupported=report.recent_trace.iter().any(|t|t.contains("unsupported"));
@@ -797,10 +797,10 @@ mod tests {
                         let save_failure=event.text.contains("保存") || event.text.contains("書き込み");
                         return Err(EthornellError::Other(format!("restricted sample blocked host_request frame={frame} save_failure={save_failure} opcode={:?} user_files={:?}",host.runtime.api.last_native_call,host.policy.enumerate("*",true,0,false).unwrap_or_default())));
                     }
-                    if frame%300==0 {if let Some(r)=report.last_report.as_ref(){eprintln!("local-only restricted frame={frame} program={} pc={} stop={:?} procedure={:?} native={:?}",r.program,r.pc,r.stop_reason,r.thread.current_procedure,host.runtime.api.last_native_call);}}
+                    if frame%300==0 {if let Some(r)=report.last_report.as_ref(){eprintln!("local-only restricted frame={frame} program={} pc={} stop={:?} procedure={:?} native={:?} usage={:?}",r.program,r.pc,r.stop_reason,r.thread.current_procedure,host.runtime.api.last_native_call,host.runtime.vm.resource_usage());}}
                 }
                 let files=host.policy.enumerate("*",true,0,false)?;
-                let saved=files.iter().find(|name|name.to_ascii_lowercase().ends_with("amairochocolate101.sud")).ok_or_else(||EthornellError::Other("restricted sample produced no expected user save".into()))?;
+                let saved=files.iter().find(|name|name.to_ascii_lowercase().ends_with("amairochocolate101.sud")).ok_or_else(||EthornellError::Other(format!("restricted sample produced no expected user save; user files={files:?}")))?;
                 let bytes=host.policy.read_user(saved)?;
                 if bytes.is_empty() {return Err(EthornellError::Other("restricted sample save is empty".into()));}
                 if let Some(path)=std::env::var_os("ETHORNELL_RESTRICTED_REPRO_SNAPSHOT") {snapshot::write_runtime_snapshot(&host.runtime.api,Path::new(&path))?;}
