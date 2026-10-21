@@ -15406,7 +15406,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_REQUEST_REDRAW_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target helpers sub_461D70/sub_461D80 coalesce pending redraw requests and preserve the stronger full-redraw request.",
+        notes: "BGI 1.622 sub_479EA0: sub_4622D0 (full) / sub_4622E0 (partial) redraw request (dword_566714/506BD0); a pending full request stays full.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_SET_SCHEDULER_GATE,
@@ -15414,7 +15414,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_SET_SCHEDULER_GATE_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target stores the supplied graph scheduler gate without converting it to an unrelated rendering property.",
+        notes: "sub_479ED0 -> sub_462260: dword_506BD4; the main loop (sub_462100) presents only while set, otherwise the last frame stays (take_present_due).",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_SET_FRAME_RATE,
@@ -15422,7 +15422,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_SET_FRAME_RATE_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target validates 1..=1000, derives the millisecond interval, and resets its next frame deadline.",
+        notes: "sub_479EF0 -> sub_462280: 1..=1000 else fatal (無効なフレームレート); interval 1000/rate (dword_506BCC), next presentation due at once.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_INITIALIZE_BITMAP_MEMORY_MANAGER,
@@ -15430,7 +15430,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_INITIALIZE_BITMAP_MEMORY_MANAGER_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target validates the byte limit and initializes/resets the native bitmap memory manager. Portable runtime enforces the limit but does not reproduce the allocator layout.",
+        notes: "sub_479F60 -> sub_439C80: DCCache budget; more than 0x20000000 is fatal (無効なキャッシュサイズ).",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_CREATE_WORK_BITMAP,
@@ -15438,7 +15438,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_CREATE_WORK_BITMAP_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_4794C0: bitmap >= 0x4000 is fatal; sub_442EE0 creates a back-buffer-sized format-1 bitmap and copies the current frame into it.",
+        notes: "sub_479FC0 -> sub_4432A0: bitmap < 0x4000 (sub_4986D0) created in the screen's size/format and filled from the current frame.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_CREATE_PRIORITIZED_WORK_BITMAP,
@@ -15446,7 +15446,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_CREATE_PRIORITIZED_WORK_BITMAP_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_4794F0: priority >= 0x10000 and bitmap >= 0x4000 are fatal; sub_442F80 creates a back-buffer-sized bitmap and renders once every object with sort key <= (priority << 16 | 0xFFFF) into it (sub_430D30).",
+        notes: "sub_479FF0 -> sub_443340: priority (sub_498720) then bitmap checks; the display tree up to the priority is rendered into it.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_SET_CENTER,
@@ -15454,7 +15454,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_SET_CENTER_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target sub_461E30/sub_442E70 stores an optional graph centre. CObjectManager initializes it to (-1,-1); sub_442E90 accepts it only when 0<=x<display_width and 0<=y<display_height. Normal Sprite projection sub_429AF0 uses this validated centre instead of display_width/2,display_height/2 when CDspObj+0x100 is enabled.",
+        notes: "sub_47A030 -> sub_443230: screen centre +0x40/+0x44 = second/first argument; screen marked dirty.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_SET_SYNC_LOAD_HOLD,
@@ -15462,7 +15462,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_SET_SYNC_LOAD_HOLD_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_479560 -> sub_402070 stores dword_565AE0. sub_402080 then keeps Graph90:10 synchronous for that many ms after the first load (the configured gate always does); the first load after the window yields once through CProcLoadBitmap.",
+        notes: "sub_47A060 -> sub_402070: synchronous-load hold dword_565AF0, open window dword_565AF4 cleared (sub_402080).",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_SET_DISPLAY_ENABLED,
@@ -15470,7 +15470,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_SET_DISPLAY_ENABLED_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target stores the enable gate and invalidates/rechecks the display chain.",
+        notes: "sub_47A080 -> sub_41A9B0: stores dword_5076AC (written only) and marks the screen dirty.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_SET_DEFAULT_PRIORITY,
@@ -15478,7 +15478,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_SET_DEFAULT_PRIORITY_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target validates and stores the default graph priority.",
+        notes: "sub_47A0A0 -> sub_462400: priority check, CObjectManager+0x48 = priority << 16 for objects created later.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_SET_OBJECT_UPDATE_REDRAW_POLICY,
@@ -15486,7 +15486,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_SET_OBJECT_UPDATE_REDRAW_POLICY_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target writes two globals controlling redraw requests after display-object update completion; it is not a global coordinate offset.",
+        notes: "sub_47A0D0 -> sub_431DB0: dword_50768C (procedure redraw requests) and dword_565B88 (full).",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_SET_CURRENT_BITMAP,
@@ -15494,7 +15494,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_SET_CURRENT_BITMAP_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target writes the supplied bitmap handle to the bitmap manager current slot; it is not the current display object.",
+        notes: "sub_47A100 -> sub_407BA0: bitmap manager current slot.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_SET_DISPLAY_OPTIONS,
@@ -15510,7 +15510,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_SET_RASTER_FORMAT_MODE_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target derives layouts (2,1,2), (4,2,4), (6,3,8), or (8,4,16) and rebuilds registered fonts.",
+        notes: "sub_47A160 -> sub_42E050: anti-aliasing level, fatal above 3 (signed); hardware layouts for 0..=3, none otherwise; fonts rebuilt.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_REGISTER_FONT,
@@ -15518,7 +15518,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_REGISTER_FONT_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target deduplicates by face/height/weight/italic and updates the registered font id.",
+        notes: "sub_47A1C0 -> sub_462340 -> sub_42F340: cache count, italic, width, height, face; unknown face / height / width / cache < 2 are fatal with the 1.622 texts.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_SET_BITMAP_UNBLEND_COLOR,
@@ -15526,7 +15526,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_SET_BITMAP_UNBLEND_COLOR_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target stores the packed RGB color used by bitmap alpha-unblend paths.",
+        notes: "sub_47A2C0 -> sub_407B40: dword_565B28, applied by sub_408E80 to format-2 pixels of every later bitmap load.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_LOAD_BITMAP,
@@ -20044,6 +20044,9 @@ const PORTABLE_EQUIVALENT_OPCODES: &[NativeOpcode] = &[
     opcodes::SYS81_QUERY_CONTROLLER_STATE,
     opcodes::SYS81_SET_BICUBIC_SHADER,
     opcodes::SYS81_LAUNCH_PROCESS_WAIT,
+    opcodes::GRAPH90_INITIALIZE_BITMAP_MEMORY_MANAGER,
+    opcodes::GRAPH90_SET_RASTER_FORMAT_MODE,
+    opcodes::GRAPH90_REGISTER_FONT,
 ];
 
 const PARTIAL_IMPLEMENTATION_OPCODES: &[NativeOpcode] = &[
@@ -20149,10 +20152,7 @@ const PARTIAL_IMPLEMENTATION_OPCODES: &[NativeOpcode] = &[
     opcodes::GRAPH91_SET_MULTILAYER_LAYER_AUXILIARY_PAIR,
     opcodes::GRAPH91_SET_MULTILAYER_LAYER_SOURCE_VELOCITY,
     opcodes::GRAPH91_SET_MULTILAYER_LAYER_TRANSFORM_VELOCITY,
-    opcodes::GRAPH90_INITIALIZE_BITMAP_MEMORY_MANAGER,
     opcodes::GRAPH90_SET_DISPLAY_OPTIONS,
-    opcodes::GRAPH90_SET_RASTER_FORMAT_MODE,
-    opcodes::GRAPH90_REGISTER_FONT,
     opcodes::GRAPH90_CREATE_BITMAP_FROM_PIXELS,
     opcodes::GRAPH90_COPY_BITMAP_PIXELS,
     opcodes::GRAPH90_VALIDATE_BITMAP_FORMAT,

@@ -63,6 +63,7 @@ mod native_backml;
 mod native_landscape;
 mod native_sprite_filters;
 mod native_system;
+mod target_checks;
 mod native_user;
 mod perspective_blit;
 mod platform;
@@ -713,9 +714,15 @@ struct RuntimeTraceApi {
     /// Target pixel/raster format mode and the derived component layout.
     graph_raster_format_mode: i32,
     graph_raster_layout: (i32, i32, i32),
+    /// dword_506BD4 (Graph90:01): the main loop presents only while set.
     graph_scheduler_enabled: bool,
-    graph_frame_rate: u32,
+    /// dword_506BCC: milliseconds between presented frames (1000 / rate).
+    graph_frame_interval_ms: u32,
+    /// dword_566758: clock value of the next presentation.
+    graph_next_present_ms: u32,
+    /// dword_565D50: the DCCache byte budget (0 = no cache).
     graph_memory_limit: u32,
+    /// dword_566714 / dword_506BD0: a pending redraw, Some(full).
     graph_redraw_requested: Option<bool>,
     graph_global_offset: (f32, f32),
     /// SystemB0:08 CProcShakeScreen transient screen displacement.
@@ -1152,7 +1159,8 @@ impl RuntimeTraceApi {
             graph_raster_format_mode: 0,
             graph_raster_layout: (0, 0, 1),
             graph_scheduler_enabled: true,
-            graph_frame_rate: 60,
+            graph_frame_interval_ms: 16,
+            graph_next_present_ms: 0,
             graph_memory_limit: 0,
             graph_redraw_requested: None,
             graph_global_offset: (0.0, 0.0),
@@ -1380,6 +1388,38 @@ impl RuntimeTraceApi {
             last_native_call: None,
             runtime_stubbed: false,
         }
+    }
+
+    /// sub_408E80 (in sub_4080A0, every bitmap decode): with a Graph90:0F
+    /// colour, format-2 pixels whose alpha is neither 0 nor 255 are
+    /// un-premultiplied from that colour, channel by channel, clamped.
+    fn apply_bitmap_unblend_color(&mut self, bitmap: i32) {
+        let color = self.graph_bitmap_unblend_color as u32;
+        if color == 0 || self.bitmap_formats.get(&bitmap) != Some(&2) {
+            return;
+        }
+        let Some(resource) = self.graph_resources.get(&bitmap).cloned() else {
+            return;
+        };
+        let Some(mut image) = self.graph_images.get(&resource.key).cloned() else {
+            return;
+        };
+        // DecodedImage is RGBA; the target colour is 0x00RRGGBB.
+        let key_rgb = [(color >> 16) as u8, (color >> 8) as u8, color as u8];
+        for pixel in image.rgba.chunks_exact_mut(4) {
+            let alpha = i32::from(pixel[3]);
+            if alpha == 0 || alpha == 255 {
+                continue;
+            }
+            for channel in 0..3 {
+                let base = i32::from(key_rgb[channel]);
+                let value = 255 * (i32::from(pixel[channel]) - (255 - alpha) * base / 255) / alpha;
+                pixel[channel] = value.clamp(0, 255) as u8;
+            }
+        }
+        let key = format!("{}#unblend:{color:06x}", resource.key);
+        self.store_graph_image(key.clone(), image);
+        self.graph_resources.insert(bitmap, RuntimeGraphResource { key, ..resource });
     }
 
     fn store_graph_image(&mut self, key: String, image: DecodedImage) {
@@ -3227,6 +3267,27 @@ impl RuntimeTraceApi {
     }
 
     /// dword_506B8C/506BAC[dword_506B88].
+    /// sub_462100: whether this main-loop pass presents a frame. Presenting
+    /// needs the display enabled (Graph90:01) and the frame interval
+    /// (Graph90:02) elapsed; the next time advances by whole intervals.
+    /// The portable compositor re-derives every frame from the display tree,
+    /// so a redraw counts as requested on every pass.
+    pub(crate) fn take_present_due(&mut self) -> bool {
+        if !self.graph_scheduler_enabled {
+            return false;
+        }
+        let now = self.clock_base_ms.wrapping_add(self.engine_time_ms as u32);
+        if self.graph_next_present_ms > now {
+            return false;
+        }
+        let interval = self.graph_frame_interval_ms.max(1);
+        self.graph_redraw_requested = None;
+        self.graph_next_present_ms = self
+            .graph_next_present_ms
+            .wrapping_add(interval.wrapping_mul((now - self.graph_next_present_ms) / interval + 1));
+        true
+    }
+
     /// sub_45EDE0: mode 2 falls back to 0 when the adjusted desktop
     /// (sub_45EAE0(.., 1)) is narrower or lower than the display mode.
     pub(crate) fn effective_fullscreen_scale_mode(&self) -> i32 {
@@ -10557,8 +10618,17 @@ mod input_tests {
         call_graph(&mut api, 0x90, 0x0b, &mut bitmap).unwrap();
         let mut raster = vec![Value::Int(3)];
         call_graph(&mut api, 0x90, 0x0d, &mut raster).unwrap();
-        let mut font = vec![
+        // Face 1 is the stock Mincho entry; face 9 was never interned.
+        let mut unknown_face = vec![
             Value::Int(9),
+            Value::Int(28),
+            Value::Int(125),
+            Value::Int(1),
+            Value::Int(4),
+        ];
+        assert!(call_graph(&mut api, 0x90, 0x0e, &mut unknown_face).is_err());
+        let mut font = vec![
+            Value::Int(1),
             Value::Int(28),
             Value::Int(125),
             Value::Int(1),
@@ -10583,7 +10653,7 @@ mod input_tests {
                 font.weight_percent,
                 font.font_id
             ),
-            (9, 28, 125, 4)
+            (1, 28, 125, 4)
         );
         assert!(font.italic);
     }
@@ -11122,17 +11192,15 @@ mod input_tests {
 
         let mut frame_rate = vec![Value::Int(1000)];
         call_graph(&mut api, 0x90, 0x02, &mut frame_rate).unwrap();
-        assert_eq!(api.graph_frame_rate, 1000);
+        assert_eq!(api.graph_frame_interval_ms, 1);
         let mut invalid_frame_rate = vec![Value::Int(1001)];
-        call_graph(&mut api, 0x90, 0x02, &mut invalid_frame_rate).unwrap();
-        assert_eq!(api.graph_frame_rate, 1000);
+        assert!(call_graph(&mut api, 0x90, 0x02, &mut invalid_frame_rate).is_err());
 
         let mut memory_limit = vec![Value::Int(0x2000_0000)];
         call_graph(&mut api, 0x90, 0x03, &mut memory_limit).unwrap();
         assert_eq!(api.graph_memory_limit, 0x2000_0000);
         let mut invalid_memory_limit = vec![Value::Int(0x2000_0001)];
-        call_graph(&mut api, 0x90, 0x03, &mut invalid_memory_limit).unwrap();
-        assert_eq!(api.graph_memory_limit, 0x2000_0000);
+        assert!(call_graph(&mut api, 0x90, 0x03, &mut invalid_memory_limit).is_err());
 
         let bitmap = 3790;
         let mut create = vec![Value::Int(bitmap)];
@@ -23354,11 +23422,7 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                 // recreated at the window's size in the default format (1
                 // promoted to 2) and receives a raw copy of the window's
                 // composed bitmap (sub_42C940 -> sub_40AF50).
-                if destination_bitmap as u32 >= 0x4000 {
-                    return Err(ethornell_vm::VmError::Runtime(format!(
-                        "Graph90:83 bitmap handle {destination_bitmap} is out of range"
-                    )));
-                }
+                target_checks::bitmap(destination_bitmap)?;
                 let Some(window_size) = Self::is_window_surface_handle(source_window)
                     .then(|| self.graph_surfaces.get(&source_window))
                     .flatten()
@@ -23627,50 +23691,57 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                 tracing::info!(x, y, center_valid, "GraphSetCenter");
             }
             (0x90, 0x07) => {
-                // sub_479560 -> sub_402070 stores dword_565AE0.
+                // sub_47A060 -> sub_402070: dword_565AF0 = hold, and the
+                // open window (dword_565AF4) closes.
                 let value = pop_int_value(stack).unwrap_or_default();
                 self.graph_config.sync_load_hold_ms = value;
+                self.sync_load_deadline = 0;
                 tracing::debug!(value, "GraphSetSynchronousLoadHold");
             }
             (0x90, 0x00) => {
+                // sub_479EA0: sub_4622D0 (full) / sub_4622E0 (partial); a
+                // pending full request stays full.
                 let full_redraw = pop_int_value(stack).unwrap_or_default() != 0;
                 self.graph_redraw_requested =
                     Some(self.graph_redraw_requested.unwrap_or(false) || full_redraw);
                 tracing::debug!(full_redraw, "GraphRequestRedraw");
             }
             (0x90, 0x01) => {
+                // sub_479ED0 -> sub_462260: dword_506BD4.
                 let enabled = pop_int_value(stack).unwrap_or_default() != 0;
                 self.graph_scheduler_enabled = enabled;
                 tracing::debug!(enabled, "GraphSetSchedulerEnabled");
                 trace_graph!(self, "graph scheduler enabled={enabled}");
             }
             (0x90, 0x02) => {
-                let frame_rate = pop_int_value(stack).unwrap_or_default();
-                if (1..=1000).contains(&frame_rate) {
-                    self.graph_frame_rate = frame_rate as u32;
+                // sub_479EF0 -> sub_462280: 1..=1000 (else fatal); the next
+                // presentation is due at once.
+                let frame_rate = pop_int_value(stack).unwrap_or_default() as u32;
+                if frame_rate.wrapping_sub(1) > 999 {
+                    return Err(ethornell_vm::VmError::Runtime(format!(
+                        "無効なフレームレート [ {} ] が指定されました",
+                        frame_rate as i32
+                    )));
                 }
-                tracing::info!(
-                    frame_rate,
-                    accepted = (1..=1000).contains(&frame_rate),
-                    interval_ms = 1000 / self.graph_frame_rate.max(1),
-                    "GraphSetFrameRate"
-                );
+                self.graph_frame_interval_ms = (1000 / frame_rate).max(1);
+                self.graph_next_present_ms = 0;
             }
             (0x90, 0x03) => {
-                let limit = pop_int_value(stack).unwrap_or_default();
-                if (0..=0x2000_0000).contains(&limit) {
-                    self.graph_memory_limit = limit as u32;
+                // sub_479F60 -> sub_439C80: a new DCCache of `limit` bytes
+                // (0 drops it); more than 0x20000000 is fatal.
+                let limit = pop_int_value(stack).unwrap_or_default() as u32;
+                if limit > 0x2000_0000 {
+                    return Err(ethornell_vm::VmError::Runtime(format!(
+                        "無効なキャッシュサイズ [ {} ] が指定されました",
+                        limit as i32
+                    )));
                 }
-                tracing::info!(limit, "GraphSetMemoryLimit");
+                self.graph_memory_limit = limit;
             }
             (0x90, 0x04) => {
                 let bitmap = pop_int_value(stack).unwrap_or_default();
                 // sub_4794C0: sub_497B60 rejects handles >= 0x4000.
-                if bitmap as u32 >= 0x4000 {
-                    return Err(ethornell_vm::VmError::Runtime(format!(
-                        "Graph90:04 bitmap handle {bitmap} is out of range"
-                    )));
-                }
+                target_checks::bitmap(bitmap)?;
                 let created = self.create_native_work_bitmap(bitmap, None);
                 let dimensions = self.bitmap_dimensions.get(&bitmap).copied();
                 tracing::debug!(
@@ -23688,16 +23759,8 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                 let priority = pop_int_value(stack).unwrap_or_default();
                 let bitmap = pop_int_value(stack).unwrap_or_default();
                 // sub_4794F0: sub_497BB0 then sub_497B60.
-                if priority as u32 >= 0x1_0000 {
-                    return Err(ethornell_vm::VmError::Runtime(format!(
-                        "Graph90:05 priority {priority} is out of range"
-                    )));
-                }
-                if bitmap as u32 >= 0x4000 {
-                    return Err(ethornell_vm::VmError::Runtime(format!(
-                        "Graph90:05 bitmap handle {bitmap} is out of range"
-                    )));
-                }
+                target_checks::priority(priority)?;
+                target_checks::bitmap(bitmap)?;
                 let created = self.create_native_work_bitmap(bitmap, Some(priority));
                 tracing::debug!(bitmap, priority, created, "GraphCreatePrioritizedBitmap");
             }
@@ -23708,12 +23771,11 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                 tracing::info!(enabled, "GraphSetEnabled");
             }
             (0x90, 0x09) => {
+                // sub_47A0A0 -> sub_462400: CObjectManager+0x48 = priority
+                // << 16, the priority of objects created later.
                 let priority = pop_int_value(stack).unwrap_or_default();
-                if (0..0x1_0000).contains(&priority) {
-                    self.graph_default_priority = priority;
-                } else {
-                    tracing::warn!(priority, "invalid graph default priority");
-                }
+                target_checks::priority(priority)?;
+                self.graph_default_priority = priority;
                 tracing::debug!(priority, "GraphSetDefaultPriority");
                 trace_graph!(self, "default priority={priority}");
             }
@@ -23725,25 +23787,25 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                 tracing::info!(arg1, arg2, "GraphSetDisplayMode");
             }
             (0x90, 0x0d) => {
-                // sub_42DC80 accepts modes 0..=3 and derives three target
-                // raster layout globals. The portable GPU path corresponds to
-                // the target's hardware-enabled branch.
+                // sub_47A160 -> sub_42E050: anti-aliasing level, fatal above
+                // 3 (signed); hardware AA (dword_507694 = 1) maps 0..=3 to
+                // the supersampling layouts, any other accepted value to
+                // none. Then every font is rebuilt (sub_42F6F0).
                 let mode = pop_int_value(stack).unwrap_or_default();
-                if (0..=3).contains(&mode) {
-                    self.graph_raster_format_mode = mode;
-                    self.graph_raster_layout = match mode {
-                        0 => (2, 1, 2),
-                        1 => (4, 2, 4),
-                        2 => (6, 3, 8),
-                        3 => (8, 4, 16),
-                        _ => unreachable!(),
-                    };
-                    // Target sub_4092D0 rebuilds every registered font after
-                    // the mode changes. Portable fonts are regenerated lazily,
-                    // so a full redraw is the visible equivalent boundary.
-                    self.graph_redraw_requested = Some(true);
+                if mode > 3 {
+                    return Err(ethornell_vm::VmError::Runtime(format!(
+                        "無効なアンチエイリアスレベル [ {mode} ] が指定されました"
+                    )));
                 }
-                tracing::info!(mode, layout = ?self.graph_raster_layout, "GraphSetRasterFormatMode");
+                self.graph_raster_format_mode = mode;
+                self.graph_raster_layout = match mode {
+                    0 => (2, 1, 2),
+                    1 => (4, 2, 4),
+                    2 => (6, 3, 8),
+                    3 => (8, 4, 16),
+                    _ => (0, 0, 1),
+                };
+                self.graph_redraw_requested = Some(true);
             }
             (0x90, 0x80) => {
                 let height = pop_int_value(stack).unwrap_or_default();
@@ -24034,11 +24096,7 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                 let target = stack.pop();
                 tracing::debug!(?target, ?archive, ?name, "GraphLoadResource");
                 let target_id = target.as_ref().map(value_to_i32).unwrap_or_default();
-                if !(0..0x4000).contains(&target_id) {
-                    return Err(ethornell_vm::VmError::Runtime(format!(
-                        "Graph90:10 bitmap handle {target_id} is out of range"
-                    )));
-                }
+                target_checks::bitmap(target_id)?;
                 let archive_name = archive
                     .as_ref()
                     .and_then(value_to_string)
@@ -24055,10 +24113,14 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                 if !loaded {
                     // Both the synchronous error path and CProcLoad's -1
                     // tick (+400 is 0) end the engine.
+                    // sub_466010 without a media root: the missing-file
+                    // script error (a decode failure reports the BMP/BG
+                    // texts of sub_47A2E0 in the target).
                     return Err(ethornell_vm::VmError::Runtime(format!(
-                        "Graph90:10 cannot load {archive_name}:{resource_name}"
+                        "指定されたファイル [ {archive_name} : {resource_name} ] は存在しません"
                     )));
                 }
+                self.apply_bitmap_unblend_color(target_id);
                 if archive_name.eq_ignore_ascii_case("sysgrp.arc")
                     && resource_name.starts_with("SGTitle")
                 {
@@ -24090,11 +24152,7 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                 // format 0..=6 with 7 meaning 1, and a successful allocation
                 // of width * bpp * height bytes; any failure is a script
                 // error. Handle 0 is an ordinary slot.
-                if !(0..0x4000).contains(&bitmap_id) {
-                    return Err(ethornell_vm::VmError::Runtime(format!(
-                        "Graph90:11 bitmap handle {bitmap_id} is out of range"
-                    )));
-                }
+                target_checks::bitmap(bitmap_id)?;
                 let format_id = if format_id == 7 { 1 } else { format_id };
                 if !(0..=6).contains(&format_id) || width < 0 || height < 0 {
                     return Err(ethornell_vm::VmError::Runtime(format!(
@@ -24220,11 +24278,7 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                     // (sub_497DB0, <= 0x100) before blitting; each failure is
                     // a script error.
                     for handle in [destination, source] {
-                        if !(0..0x4000).contains(&handle) {
-                            return Err(ethornell_vm::VmError::Runtime(format!(
-                                "Graph90:18 bitmap handle {handle} is out of range"
-                            )));
-                        }
+                        target_checks::bitmap(handle)?;
                     }
                     if !matches!(mode, 0..=9 | 0x20..=0x27 | 0x40 | 0x41 | 0x80 | 0xc0 | 0xc1 | 0xf0 | 0xff)
                     {
@@ -25186,32 +25240,37 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                 tracing::debug!(object, value, "GraphSetTextObjectValue");
             }
             (0x90, 0x0e) => {
+                // sub_47A1C0 -> sub_462340 -> sub_42F340: pops cache count,
+                // italic, width %, height, face id. Unknown face, height
+                // outside 4..=200, width outside 25..=200 or a cache count
+                // below 2 are fatal (the width message prints the italic
+                // value, as the target does).
                 let font_id = pop_int_value(stack).unwrap_or_default();
-                let italic = pop_int_value(stack).unwrap_or_default() != 0;
+                let italic_value = pop_int_value(stack).unwrap_or_default();
                 let weight_percent = pop_int_value(stack).unwrap_or_default();
                 let height = pop_int_value(stack).unwrap_or_default();
                 let font_name_id = pop_int_value(stack).unwrap_or_default();
-                let registered =
-                    self.graph_config
-                        .register_font(graph_config::RuntimeFontRegistration {
-                            font_name_id,
-                            height,
-                            weight_percent,
-                            italic,
-                            font_id,
-                        });
-                if registered && (4..=200).contains(&height) {
-                    self.text_state.font_size = height as f32;
+                let fatal = |message: String| Err(ethornell_vm::VmError::Runtime(message));
+                if !self.native_user.font_name_known(font_name_id) {
+                    return fatal(format!("無効なフォント番号 [ {font_name_id} ] が指定されました"));
                 }
-                tracing::info!(
+                if (height - 4) as u32 > 0xC4 {
+                    return fatal(format!("無効なフォントサイズ [ {height} ] が指定されました"));
+                }
+                if (weight_percent - 25) as u32 > 0xAF {
+                    return fatal(format!("無効なフォント幅 [ {italic_value} ] が指定されました"));
+                }
+                if font_id < 2 {
+                    return fatal(format!("無効なキャッシュ量 [ {font_id} ] が指定されました"));
+                }
+                self.graph_config.register_font(graph_config::RuntimeFontRegistration {
                     font_name_id,
                     height,
                     weight_percent,
-                    italic,
+                    italic: italic_value != 0,
                     font_id,
-                    registered,
-                    "GraphRegisterFont"
-                );
+                });
+                self.text_state.font_size = height as f32;
             }
             (0x92, 0x91) => {
                 let args = pop_args(stack, 11);
@@ -26994,6 +27053,7 @@ fn run_headless(
         .map(|runtime| runtime.api.total_native_calls)
         .unwrap_or_default();
     let mut next_frame = Instant::now();
+    let mut last_composition: Option<snapshot::RuntimeFrameComposition> = None;
     let mut runtime_failure = None;
     for frame in 0..max_frames {
         if let Some(runtime) = runtime.as_mut() {
@@ -27024,10 +27084,16 @@ fn run_headless(
             // Headless differs from the window frontend only at final
             // presentation: every logical frame still traverses the shared
             // render tree and produces a complete offscreen framebuffer.
-            runtime.api.performance_profile.begin();
-            let frame_composition =
-                snapshot::compose_runtime_frame_with_diagnostics(&runtime.api, true);
-            runtime.api.performance_profile.end(true);
+            // sub_462100: a frame that is not due shows the last one again.
+            let frame_composition = if runtime.api.take_present_due() || last_composition.is_none() {
+                runtime.api.performance_profile.begin();
+                let composition = snapshot::compose_runtime_frame_with_diagnostics(&runtime.api, true);
+                runtime.api.performance_profile.end(true);
+                last_composition = Some(composition.clone());
+                composition
+            } else {
+                last_composition.clone().expect("checked above")
+            };
             if snapshot_frames.contains(&frame)
                 && let Some(base_path) = snapshot_path.as_ref()
             {

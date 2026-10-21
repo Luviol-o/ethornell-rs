@@ -505,6 +505,11 @@ impl NativeUserState {
             .map(|(name, _)| name.as_str())
     }
 
+    /// sub_469110: whether a face id was interned.
+    pub(super) fn font_name_known(&self, id: i32) -> bool {
+        self.fonts.values().any(|record| record.id == id)
+    }
+
     fn intern_font(&mut self, name: String, option: i32) -> i32 {
         // sub_468A70 registers metadata only for option 0 (charset 128)
         // or option 1 (charset/default value 0). Option -1 and all other

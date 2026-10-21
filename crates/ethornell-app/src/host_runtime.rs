@@ -609,11 +609,14 @@ impl HostRuntime {
             self.runtime.api.screen_width.max(1) as f32,
             self.runtime.api.screen_height.max(1) as f32,
         );
-        self.runtime.api.performance_profile.begin();
-        let commands =
-            frame_presenter::prepare_frame(renderer, &self.runtime.api, &mut self.textures)?;
-        renderer.submit(&commands);
-        self.runtime.api.performance_profile.end(true);
+        // sub_462100: present a newly composed frame only when one is due.
+        if self.runtime.api.take_present_due() {
+            self.runtime.api.performance_profile.begin();
+            let commands =
+                frame_presenter::prepare_frame(renderer, &self.runtime.api, &mut self.textures)?;
+            renderer.submit(&commands);
+            self.runtime.api.performance_profile.end(true);
+        }
         renderer.render()?;
         self.runtime.api.presentation_state = self.runtime
                 .api

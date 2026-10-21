@@ -657,6 +657,22 @@ impl ApplicationHandler for WindowApp {
                 if let Some(runtime) = runtime.as_mut() {
                     runtime.api.performance_profile.begin();
                 }
+                // sub_462100: without a due presentation the window shows the
+                // last composed frame again (WM_PAINT path).
+                if runtime.as_mut().is_some_and(|runtime| !runtime.api.take_present_due()) {
+                    if let Some(runtime) = runtime.as_mut() {
+                        runtime.api.performance_profile.end(false);
+                    }
+                    window.pre_present_notify();
+                    if let Err(err) = renderer.render() {
+                        tracing::error!(%err, "render failed");
+                        if let Ok(mut slot) = failure.lock() {
+                            *slot = Some(err.to_string());
+                        }
+                        target.exit();
+                    }
+                    return;
+                }
                 let commands = if let Some(runtime) = runtime.as_ref() {
                     match frame_presenter::prepare_frame(renderer, &runtime.api, graph_textures) {
                         Ok(commands) => commands,

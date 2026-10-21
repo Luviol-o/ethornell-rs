@@ -184,6 +184,7 @@ fn valid_glyph_bounds(bounds: ab_glyph::Rect) -> bool {
 const SNAPSHOT_WIDTH: u32 = 1280;
 const SNAPSHOT_HEIGHT: u32 = 720;
 
+#[derive(Clone)]
 pub(crate) struct RuntimeFrameComposition {
     pub(crate) framebuffer: DecodedImage,
     pub(crate) render_tree_nodes: usize,
