@@ -24,6 +24,7 @@ ruffle_core = { git = "https://github.com/ruffle-rs/ruffle.git", tag = "v0.4.1",
 ruffle_render_wgpu = { git = "https://github.com/ruffle-rs/ruffle.git", tag = "v0.4.1" }
 ab_glyph.workspace = true
 encoding_rs.workspace = true
+serde_json.workspace = true
 pollster.workspace = true
 tracing.workspace = true
 winit = { workspace = true, optional = true }

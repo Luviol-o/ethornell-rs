@@ -37,6 +37,7 @@ mod system81_state;
 pub mod target_thread;
 mod time;
 mod user_data;
+mod user_dialog;
 
 pub use host_request::{
     HostMemoryWrite, HostRequest, HostResponse, VmResourceBudget, VmResourceUsage,
@@ -5395,224 +5396,24 @@ impl Vm {
                     let text = api.current_user_text();
                     let bytes_written = self.write_c_string_bounded(destination, &text, 255)?;
                     Some(Value::Int(bytes_written as i32))
-                } else if (code, id) == (0xb0, 0x84) {
-                    // sub_478D70: mode, initial, title, output buffer. A negative
-                    // mode enables the target signed-decimal edit filter.
-                    let mode = self.pop_int()?;
-                    let initial = self.pop_string_lossy()?;
-                    let title = self.pop_string_lossy()?;
-                    let destination = self.pop_ptr()?;
-                    let max_bytes = target_dialog_max_bytes(mode, 255);
-                    let accepted = match api.show_user_dialog(UserDialogRequest::Input {
-                        title,
-                        initial,
-                        max_bytes,
-                        numeric: mode < 0,
-                    }) {
-                        Some(UserDialogResponse::Input(value)) => {
-                            self.write_c_string_bounded(destination, &value, max_bytes)?;
-                            true
+                } else if user_dialog::is_user_dialog(code, id) {
+                    let (request, sink) = self
+                        .parse_user_dialog(id)?
+                        .expect("user dialog selector");
+                    if self.begin_host_continuation(
+                        api,
+                        HostRequest::UserDialog(request.clone()),
+                        1,
+                    )? {
+                        if let Some(pending) = self.pending_host_request.as_mut() {
+                            pending.user_dialog = Some(sink);
                         }
-                        _ => false,
-                    };
-                    Some(Value::Int(i32::from(accepted)))
-                } else if (code, id) == (0xb0, 0x85) {
-                    // sub_478DC0: two independent 256-byte output buffers.
-                    let second_max = self.pop_int()?;
-                    let second_initial = self.pop_string_lossy()?;
-                    let second_label = self.pop_string_lossy()?;
-                    let first_max = self.pop_int()?;
-                    let first_initial = self.pop_string_lossy()?;
-                    let first_label = self.pop_string_lossy()?;
-                    let title = self.pop_string_lossy()?;
-                    let second_destination = self.pop_ptr()?;
-                    let first_destination = self.pop_ptr()?;
-                    let first_max_bytes = target_dialog_max_bytes(first_max, 255);
-                    let second_max_bytes = target_dialog_max_bytes(second_max, 255);
-                    let accepted = match api.show_user_dialog(UserDialogRequest::TwoField {
-                        title,
-                        first_label,
-                        first_initial,
-                        first_max_bytes,
-                        first_numeric: false,
-                        second_label,
-                        second_initial,
-                        second_max_bytes,
-                        second_numeric: false,
-                    }) {
-                        Some(UserDialogResponse::TwoField([first, second])) => {
-                            self.write_c_string_bounded(
-                                first_destination,
-                                &first,
-                                first_max_bytes,
-                            )?;
-                            self.write_c_string_bounded(
-                                second_destination,
-                                &second,
-                                second_max_bytes,
-                            )?;
-                            true
-                        }
-                        _ => false,
-                    };
-                    Some(Value::Int(i32::from(accepted)))
-                } else if (code, id) == (0xb0, 0x86) {
-                    // sub_478E60: four fixed segments joined with '-'.
-                    let _extra = self.pop_int()?;
-                    let signed_max = self.pop_int()?;
-                    let prompt = self.pop_string_lossy()?;
-                    let title = self.pop_string_lossy()?;
-                    let destination = self.pop_ptr()?;
-                    let max_bytes_per_segment = target_dialog_max_bytes(signed_max, 32);
-                    let accepted = match api.show_user_dialog(UserDialogRequest::Segmented {
-                        title,
-                        prompt,
-                        segment_count: 4,
-                        max_bytes_per_segment,
-                        numeric: signed_max < 0,
-                    }) {
-                        Some(UserDialogResponse::Segmented(value)) => {
-                            let capacity =
-                                max_bytes_per_segment.saturating_mul(4).saturating_add(3);
-                            self.write_c_string_bounded(destination, &value, capacity)?;
-                            true
-                        }
-                        _ => false,
-                    };
-                    Some(Value::Int(i32::from(accepted)))
-                } else if (code, id) == (0xb0, 0x87) {
-                    // sub_478EC0: extended two-field template with independent
-                    // numeric filters and output buffers.
-                    let second_numeric = self.pop_int()? != 0;
-                    let second_max = self.pop_int()?;
-                    let second_initial = self.pop_string_lossy()?;
-                    let second_label = self.pop_string_lossy()?;
-                    let first_numeric = self.pop_int()? != 0;
-                    let first_max = self.pop_int()?;
-                    let first_initial = self.pop_string_lossy()?;
-                    let first_label = self.pop_string_lossy()?;
-                    let title = self.pop_string_lossy()?;
-                    let second_destination = self.pop_ptr()?;
-                    let first_destination = self.pop_ptr()?;
-                    let _template = self.pop_int()?;
-                    let first_max_bytes = target_dialog_max_bytes(first_max, 255);
-                    let second_max_bytes = target_dialog_max_bytes(second_max, 255);
-                    let accepted = match api.show_user_dialog(UserDialogRequest::TwoField {
-                        title,
-                        first_label,
-                        first_initial,
-                        first_max_bytes,
-                        first_numeric,
-                        second_label,
-                        second_initial,
-                        second_max_bytes,
-                        second_numeric,
-                    }) {
-                        Some(UserDialogResponse::TwoField([first, second])) => {
-                            self.write_c_string_bounded(
-                                first_destination,
-                                &first,
-                                first_max_bytes,
-                            )?;
-                            self.write_c_string_bounded(
-                                second_destination,
-                                &second,
-                                second_max_bytes,
-                            )?;
-                            true
-                        }
-                        _ => false,
-                    };
-                    Some(Value::Int(i32::from(accepted)))
-                } else if (code, id) == (0xb0, 0x8c) {
-                    // sub_478F80 builds one list from newline-delimited text and
-                    // writes the selected row through the caller buffer.
-                    let option_text = self.pop_string_lossy()?;
-                    let prompt = self.pop_string_lossy()?;
-                    let title = self.pop_string_lossy()?;
-                    let destination = self.pop_ptr()?;
-                    let options = option_text
-                        .split('\n')
-                        .map(|line| line.trim_end_matches('\r').to_string())
-                        .filter(|line| !line.is_empty())
-                        .collect::<Vec<_>>();
-                    let accepted = match api.show_user_dialog(UserDialogRequest::Selection {
-                        title,
-                        prompt,
-                        options,
-                    }) {
-                        Some(UserDialogResponse::Selection(value)) => {
-                            self.write_c_string_bounded(destination, &value, 779)?;
-                            true
-                        }
-                        _ => false,
-                    };
-                    Some(Value::Int(i32::from(accepted)))
-                } else if (code, id) == (0xb0, 0x8f) {
-                    // sub_478FD0 uses four mutable 10-byte text fields and two
-                    // caller-owned zero-based month/day indices.
-                    let day_destination = self.pop_ptr()?;
-                    let month_destination = self.pop_ptr()?;
-                    let fourth_destination = self.pop_ptr()?;
-                    let third_destination = self.pop_ptr()?;
-                    let second_destination = self.pop_ptr()?;
-                    let first_destination = self.pop_ptr()?;
-                    let read_initial = |vm: &Vm, pointer: u32| -> VmResult<String> {
-                        if pointer == 0 {
-                            Ok(String::new())
-                        } else {
-                            vm.read_c_string(pointer)
-                        }
-                    };
-                    let fields = [
-                        read_initial(self, first_destination)?,
-                        read_initial(self, second_destination)?,
-                        read_initial(self, third_destination)?,
-                        read_initial(self, fourth_destination)?,
-                    ];
-                    let month_index = if month_destination == 0 {
-                        0
-                    } else {
-                        self.read_int(month_destination, 2)? as i32
-                    };
-                    let day_index = if day_destination == 0 {
-                        0
-                    } else {
-                        self.read_int(day_destination, 2)? as i32
-                    };
-                    let accepted = match api.show_user_dialog(UserDialogRequest::DateFields {
-                        fields,
-                        month_index,
-                        day_index,
-                    }) {
-                        Some(UserDialogResponse::DateFields {
-                            fields,
-                            month_index,
-                            day_index,
-                        }) => {
-                            for (destination, value) in [
-                                first_destination,
-                                second_destination,
-                                third_destination,
-                                fourth_destination,
-                            ]
-                            .into_iter()
-                            .zip(fields.iter())
-                            {
-                                self.write_c_string_bounded(destination, value, 10)?;
-                            }
-                            if month_destination != 0 {
-                                self.write_int(month_destination, 2, month_index as u32)?;
-                                self.clear_shadow_values(month_destination, 4);
-                            }
-                            if day_destination != 0 {
-                                self.write_int(day_destination, 2, day_index as u32)?;
-                                self.clear_shadow_values(day_destination, 4);
-                            }
-                            true
-                        }
-                        _ => false,
-                    };
+                        self.pc = next_pc;
+                        return Ok(());
+                    }
+                    let response = api.show_user_dialog(request);
+                    let (accepted, writes) = self.user_dialog_writes(&sink, response)?;
+                    self.apply_host_writes(writes)?;
                     Some(Value::Int(i32::from(accepted)))
                 } else if (code, id) == (0xb0, 0xa0) {
                     // sub_479040 passes a pointer to nine DWORD initial values,

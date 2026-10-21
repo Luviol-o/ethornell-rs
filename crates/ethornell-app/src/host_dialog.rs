@@ -565,7 +565,7 @@ fn truncate_shift_jis(text: &str, max_bytes: usize) -> String {
     output
 }
 
-fn constrain_text(text: &str, max_bytes: usize, constraint: TextInputConstraint) -> String {
+pub(crate) fn constrain_text(text: &str, max_bytes: usize, constraint: TextInputConstraint) -> String {
     let filtered = match constraint {
         TextInputConstraint::Any => text.to_string(),
         TextInputConstraint::SignedDecimal => {

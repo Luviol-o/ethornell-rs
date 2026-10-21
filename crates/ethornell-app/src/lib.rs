@@ -33,6 +33,7 @@ mod graph_links;
 mod graph_movie;
 mod graph_sprite_targets;
 mod headless;
+mod dialog_protocol;
 mod host_dialog;
 mod host_installer;
 mod input_state;
@@ -19103,6 +19104,10 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
         let (text, outputs) = match request {
             HostRequest::Confirmation {text,..} => (text.clone(),1),
             HostRequest::Message {text} => (text.clone(),0),
+            HostRequest::UserDialog(request) => {
+                if self.host.pending.len()>=16 {return Err(VmError::Runtime("host request queue limit".into()));}
+                return Ok(Some(self.host.request_dialog(request.clone())));
+            }
             HostRequest::Native {opcode,args} => {
                 let (g,id)=(opcode.group,opcode.id);
                 if (g == 0x80 && matches!(id, 0x3B | 0x3C | 0x3F | 0xE0..=0xE3 | 0xF0..=0xFC)) || (g == 0x81 && matches!(id, 0x20 | 0x22..=0x26 | 0x38 | 0x3A | 0x3B)) || (g == 0xB0 && id == 0xF0) {

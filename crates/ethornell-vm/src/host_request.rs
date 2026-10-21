@@ -19,6 +19,9 @@ pub enum HostRequest {
     Message {
         text: String,
     },
+    /// A UserB0 input dialog. Answer with `Vm::complete_user_dialog`; the
+    /// VM writes the accepted text itself and pushes 1 or 0.
+    UserDialog(crate::UserDialogRequest),
 }
 
 #[cfg(test)]
@@ -232,7 +235,7 @@ mod tests {
     }
 
     #[test]
-    fn native_input_intercepts_before_sync_builtin_and_validates_all_writes() {
+    fn user_input_dialog_suspends_typed_and_validates_all_writes() {
         let mut vm = Vm::new();
         vm.start(&program(0xb0, "usr1", 0x84));
         vm.stack = vec![
@@ -247,18 +250,17 @@ mod tests {
                 .stop_reason,
             VmStopReason::WaitingForHost
         );
-        assert!(matches!(
-            &host.requests[0],
-            HostRequest::Native {
-                opcode: NativeOpcode {
-                    group: 0xb0,
-                    id: 0x84
-                },
-                ..
-            }
-        ));
+        assert_eq!(
+            host.requests,
+            [HostRequest::UserDialog(crate::UserDialogRequest::Input {
+                title: "caption".into(),
+                initial: "initial".into(),
+                max_bytes: 255,
+                numeric: false,
+            })]
+        );
         let before = vm.memory[0x3000];
-        let mut response = HostResponse {
+        let response = HostResponse {
             outputs: vec![Value::Int(1)],
             writes: vec![
                 HostMemoryWrite {
@@ -271,13 +273,37 @@ mod tests {
                 },
             ],
         };
-        assert!(vm.complete_host_request(1, response.clone()).is_err());
+        assert!(vm.complete_host_request(1, response).is_err());
         assert_eq!(vm.memory[0x3000], before);
-        response.writes.pop();
-        vm.complete_host_request(1, response).unwrap();
+        vm.complete_user_dialog(1, Some(crate::UserDialogResponse::Input("答え".into())))
+            .unwrap();
         vm.run_loaded(&mut host, &VmRunOptions::default());
-        assert_eq!(vm.memory[0x3000], 42);
+        assert_eq!(vm.read_c_string_bytes(0x3000).unwrap(), encoding_rs::SHIFT_JIS.encode("答え").0.to_vec());
         assert_eq!(vm.stack, vec![Value::Int(1)]);
+    }
+
+    #[test]
+    fn user_dialog_cancel_writes_nothing_and_pushes_zero() {
+        let mut vm = Vm::new();
+        vm.start(&program(0xb0, "usr1", 0x84));
+        vm.memory[0x3000] = 9;
+        vm.stack = vec![
+            Value::Ptr(0x3000),
+            Value::Str("caption".into()),
+            Value::Str(String::new()),
+            Value::Int(-4),
+        ];
+        let mut host = Host::default();
+        vm.run_loaded(&mut host, &VmRunOptions::default());
+        assert!(matches!(
+            &host.requests[0],
+            HostRequest::UserDialog(crate::UserDialogRequest::Input { max_bytes: 4, numeric: true, .. })
+        ));
+        assert!(vm.complete_user_dialog(2, None).is_err());
+        vm.complete_user_dialog(1, None).unwrap();
+        vm.run_loaded(&mut host, &VmRunOptions::default());
+        assert_eq!(vm.memory[0x3000], 9);
+        assert_eq!(vm.stack, vec![Value::Int(0)]);
     }
 
     #[test]
@@ -732,39 +758,24 @@ mod tests {
         root.run_loaded(&mut host, &VmRunOptions::default());
         assert_eq!(
             host.requests,
-            vec![HostRequest::Native {
-                opcode: NativeOpcode {
-                    group: 0xb0,
-                    id: 0x84
-                },
-                args: vec![
-                    Value::Ptr(out),
-                    Value::Str("確認".into()),
-                    Value::Str("確認".into()),
-                    Value::Int(255)
-                ]
-            }]
+            vec![HostRequest::UserDialog(crate::UserDialogRequest::Input {
+                title: "確認".into(),
+                initial: "確認".into(),
+                max_bytes: 255,
+                numeric: false,
+            })]
         );
         let offset = Vm::memory_addr(out) as usize;
         root.memory[offset] = 7;
-        root.complete_host_request(
-            1,
-            HostResponse {
-                outputs: vec![Value::Int(0)],
-                writes: vec![HostMemoryWrite {
-                    address: out,
-                    bytes: vec![42],
-                }],
-            },
-        )
-        .unwrap();
+        root.complete_user_dialog(1, Some(crate::UserDialogResponse::Input("*".into())))
+            .unwrap();
         // Accepted response is deferred; neither parent's bytes nor child's
         // local output are changed before its scheduler slice.
         assert_eq!(root.memory[offset], 7);
         assert_eq!(root.async_tasks[0].vm.memory[offset], 0);
         root.run_loaded(&mut host, &VmRunOptions::default());
         assert_eq!(root.memory[offset], 7);
-        assert_eq!(root.async_tasks[0].vm.memory[offset], 42);
+        assert_eq!(root.async_tasks[0].vm.memory[offset], b'*');
         assert!(
             root.complete_host_request(1, HostResponse::default())
                 .is_err()
@@ -892,6 +903,8 @@ pub struct HostResponse {
 pub(crate) struct PendingHostRequest {
     id: u64,
     output_count: usize,
+    /// Set for `HostRequest::UserDialog`: where the answer is written.
+    pub(crate) user_dialog: Option<crate::user_dialog::UserDialogSink>,
 }
 
 /// Measured Vec backing storage; not a process RSS estimate. Shared heap is
@@ -939,7 +952,11 @@ impl Vm {
                 "invalid or overlapping host request".into(),
             ));
         }
-        self.pending_host_request = Some(PendingHostRequest { id, output_count });
+        self.pending_host_request = Some(PendingHostRequest {
+            id,
+            output_count,
+            user_dialog: None,
+        });
         Ok(true)
     }
 
@@ -948,6 +965,10 @@ impl Vm {
         api: &mut A,
         opcode: NativeOpcode,
     ) -> VmResult<bool> {
+        // Typed UserB0 dialogs suspend after parsing (see user_dialog.rs).
+        if crate::user_dialog::is_user_dialog(opcode.group, opcode.id) {
+            return Ok(false);
+        }
         let Some(argc) = self.effective_arg_count(opcode.group, opcode.id) else {
             return Ok(false);
         };
@@ -1085,7 +1106,7 @@ impl Vm {
         std::mem::take(&mut self.async_reports)
     }
 
-    fn host_request_vm_mut(&mut self, id: u64) -> Option<&mut Vm> {
+    pub(crate) fn host_request_vm_mut(&mut self, id: u64) -> Option<&mut Vm> {
         if self
             .pending_host_request
             .as_ref()

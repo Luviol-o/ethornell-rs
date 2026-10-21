@@ -1180,6 +1180,7 @@ dependencies = [
  "pollster",
  "ruffle_core",
  "ruffle_render_wgpu",
+ "serde_json",
  "tracing",
  "wgpu 0.19.4",
  "winit 0.31.0-beta.3",

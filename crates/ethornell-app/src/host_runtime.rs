@@ -69,6 +69,8 @@ pub(super) struct HostServices {
     pub(super) enabled: bool,
     events: VecDeque<HostEvent>,
     pub(super) pending: BTreeMap<u64, usize>,
+    /// Pending UserB0 input dialogs, answered with a JSON response.
+    pub(super) dialogs: BTreeMap<u64, ethornell_vm::UserDialogRequest>,
     fatal: Option<String>,
     pub(super) input_trace: bool,
     input_trace_count: u32,
@@ -95,9 +97,26 @@ impl HostServices {
             "unsupported or denied host capability: {capability}"
         ));
     }
-    pub(super) fn request(&mut self, text: String, outputs: usize) -> u64 {
+    /// Event kind 5 names the dialog type; the host fetches the JSON payload
+    /// with `HostRuntime::request_payload` and answers with JSON text.
+    pub(super) fn request_dialog(&mut self, request: ethornell_vm::UserDialogRequest) -> u64 {
+        let id = Self::next_request_id();
+        self.pending.insert(id, 1);
+        self.events.push_back(HostEvent {
+            kind: 5,
+            request_id: id,
+            code: 1,
+            text: super::dialog_protocol::dialog_kind(&request).to_string(),
+        });
+        self.dialogs.insert(id, request);
+        id
+    }
+    fn next_request_id() -> u64 {
         static NEXT: AtomicU64 = AtomicU64::new(1);
-        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    }
+    pub(super) fn request(&mut self, text: String, outputs: usize) -> u64 {
+        let id = Self::next_request_id();
         self.pending.insert(id, outputs);
         self.events.push_back(HostEvent {
             kind: 2,
@@ -543,7 +562,43 @@ impl HostRuntime {
     pub fn poll_event(&mut self) -> Option<HostEvent> {
         self.runtime.api.host.events.pop_front()
     }
+    /// The JSON description of a kind-5 dialog request.
+    pub fn request_payload(&self, id: u64) -> Option<String> {
+        self.runtime
+            .api
+            .host
+            .dialogs
+            .get(&id)
+            .map(super::dialog_protocol::request_json)
+    }
+    /// Answer a kind-5 dialog request with its JSON response.
+    pub fn complete_dialog(&mut self, id: u64, response: &str) -> Result<()> {
+        let request = self
+            .runtime
+            .api
+            .host
+            .dialogs
+            .get(&id)
+            .ok_or_else(|| EthornellError::Other("unknown/stale request".into()))?;
+        let response = super::dialog_protocol::response_from_json(request, response)
+            .map_err(EthornellError::Other)?;
+        self.runtime
+            .vm
+            .complete_user_dialog(id, response)
+            .map_err(|e| EthornellError::Other(e.to_string()))?;
+        self.runtime.api.host.dialogs.remove(&id);
+        self.runtime.api.host.pending.remove(&id);
+        self.last_tick = None;
+        self.tick_remainder_ns = 0;
+        self.clear_input();
+        self.sync_audio()
+    }
     pub fn complete_request(&mut self, id: u64, result: i32) -> Result<()> {
+        if self.runtime.api.host.dialogs.contains_key(&id) {
+            return Err(EthornellError::Other(
+                "dialog request needs a JSON response".into(),
+            ));
+        }
         let outputs = *self
             .runtime
             .api
@@ -612,6 +667,27 @@ mod tests {
         api.host.enabled = true;
         api
     }
+    #[test]
+    fn user_dialog_requests_become_kind_five_events_with_json_payloads() {
+        let mut api = api();
+        let request = ethornell_vm::UserDialogRequest::Selection {
+            title: "Route".into(),
+            prompt: "Pick one".into(),
+            options: vec!["A".into(), "B".into()],
+        };
+        let id = api
+            .begin_host_request(&HostRequest::UserDialog(request.clone()))
+            .unwrap()
+            .unwrap();
+        let event = api.host.events.pop_front().unwrap();
+        assert_eq!((event.kind, event.request_id, event.text.as_str()), (5, id, "select"));
+        assert_eq!(api.host.pending.get(&id), Some(&1));
+        let payload: serde_json::Value =
+            serde_json::from_str(&super::super::dialog_protocol::request_json(&api.host.dialogs[&id]))
+                .unwrap();
+        assert_eq!(payload["options"][1], "B");
+    }
+
     #[test]
     fn input_route_trace_is_opt_in_numeric_bounded_and_does_not_enable_vm_trace() {
         let mut h=HostServices::default();h.enabled=true;
