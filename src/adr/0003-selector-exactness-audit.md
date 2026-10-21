@@ -192,4 +192,20 @@ then the output DWORD (the old tests and a "swap if the name exists"
 heuristic had name/output reversed) and leaves the output untouched on
 failure.
 
-Next: 80:90 onward in table order (`python3 src/tools/audit_mark.py --todo`).
+80:90..CF verified (2026-10-22):
+
+* 80:94/96/95/97: 1.622 fatal texts (the two handlers use different ones).
+* 80:98..9E: capacity and removal count are unsigned, a negative index or
+  start walks off the list (2); the game-specific 0x4CAD8 buffer hack is
+  gone (a load is a plain memcpy).
+* 80:A1 only queues {0, code, parameter}; the "0x7FFF quits" guess is gone.
+* 80:B0..B6 match, including that a cancelled CProcExclusion leaves its
+  waiter queued.
+* SDC: `compress_sdc` ports sub_493E90 (LZ, per-byte chains, 0x801 window,
+  2..17-byte matches); byte-exact against the target code run in Unicorn
+  (`src/tools/emu_sdc.py`, ignored test `sdc_compressor_matches_the_target_
+  vectors`). Seed = GetSystemTime wMilliseconds. Zero-length C0 and
+  zero-size/count C4 produce a 32-byte empty stream. C5 decodes into a host
+  buffer (no VM heap allocation). CF's SDC test includes the NUL.
+
+Next: 80:D0 onward in table order (`python3 src/tools/audit_mark.py --todo`).

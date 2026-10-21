@@ -22,14 +22,12 @@ impl Vm {
         source: u32,
         length: i32,
     ) -> VmResult<i32> {
+        // A zero length still produces the 32-byte header (sub_494470).
         let Ok(length) = usize::try_from(length) else {
             return Ok(0);
         };
-        if length == 0 {
-            return Ok(0);
-        }
         let source = self.resolve_range(source, length)?;
-        let encoded = encode_sdc(&self.memory[source], 0);
+        let encoded = encode_sdc(&self.memory[source], sdc_seed());
         let output = self.resolve_write_range(destination, encoded.len())?;
         self.memory[output].copy_from_slice(&encoded);
         self.clear_shadow_values(destination, encoded.len());
@@ -48,15 +46,21 @@ impl Vm {
         else {
             return Ok(0);
         };
+        // sub_447590 fails for a zero size or count without writing a
+        // length, so sub_496A00 encodes an empty stream (32 bytes).
         if record_size == 0 || record_count == 0 {
-            return Ok(0);
+            let encoded = encode_sdc(&[], sdc_seed());
+            let output = self.resolve_write_range(destination, encoded.len())?;
+            self.memory[output].copy_from_slice(&encoded);
+            self.clear_shadow_values(destination, encoded.len());
+            return Ok(encoded.len() as i32);
         }
         let byte_len = record_size
             .checked_mul(record_count)
             .ok_or_else(|| VmError::Runtime("DCFS source size overflow".into()))?;
         let source = self.resolve_range(source, byte_len)?;
         let dcfs = encode_dcfs(&self.memory[source], record_size, record_count)?;
-        let encoded = encode_sdc(&dcfs, 0);
+        let encoded = encode_sdc(&dcfs, sdc_seed());
         let output = self.resolve_write_range(destination, encoded.len())?;
         self.memory[output].copy_from_slice(&encoded);
         self.clear_shadow_values(destination, encoded.len());
@@ -223,7 +227,7 @@ impl Vm {
         let (x, y) = api.window_outer_position();
         write_u32(&mut raw, 20, x as u32);
         write_u32(&mut raw, 24, y as u32);
-        let encoded = encode_sdc(&raw, 0);
+        let encoded = encode_sdc(&raw, sdc_seed());
         let path = self.global_data_path(api);
         api.write_file_bytes(&path, &encoded)
     }
@@ -552,12 +556,97 @@ fn checked_global_range(offset: i32, length: i32) -> VmResult<std::ops::Range<us
     Ok(offset as usize..(offset + length) as usize)
 }
 
-fn encode_sdc(raw: &[u8], seed: u32) -> Vec<u8> {
-    let mut packed = Vec::with_capacity(raw.len() + raw.len().div_ceil(128));
-    for chunk in raw.chunks(128) {
-        packed.push((chunk.len() - 1) as u8);
-        packed.extend_from_slice(chunk);
+/// sub_493E90: LZ with one circular list per byte value (newest position
+/// first) over a 0x801-byte window; matches of 2..=17 bytes at distance
+/// 2..=0x801 (distance 1 is skipped), the first longest match wins.
+/// Literal runs of up to 128 bytes are flushed when full or before a match.
+fn compress_sdc(src: &[u8]) -> Vec<u8> {
+    const WINDOW: usize = 0x801;
+    // Nodes 0..256 are the per-byte sentinels, 256.. the window ring.
+    let mut next: Vec<usize> = (0..256 + WINDOW).collect();
+    let mut prev = next.clone();
+    let mut position = vec![0usize; 256 + WINDOW];
+    let insert = |p: usize, next: &mut Vec<usize>, prev: &mut Vec<usize>, position: &mut Vec<usize>| {
+        if p >= WINDOW {
+            let sentinel = src[p - WINDOW] as usize;
+            let tail = prev[sentinel];
+            prev[sentinel] = prev[tail];
+            next[prev[tail]] = sentinel;
+        }
+        let node = 256 + p % WINDOW;
+        let sentinel = src[p] as usize;
+        let first = next[sentinel];
+        next[node] = first;
+        prev[node] = sentinel;
+        position[node] = p;
+        prev[first] = node;
+        next[sentinel] = node;
+    };
+    let mut out = Vec::new();
+    let (mut p, mut literal_start, mut literals) = (0usize, 0usize, 0usize);
+    while p < src.len() {
+        let limit = (src.len() - p).min(17);
+        let (mut best, mut distance) = (0usize, 0usize);
+        let sentinel = src[p] as usize;
+        let mut node = next[sentinel];
+        while node != sentinel {
+            let q = position[node];
+            if p - q != 1 && limit > 1 {
+                let mut length = 1;
+                while length < limit && src[q + length] == src[p + length] {
+                    length += 1;
+                }
+                if length > 1 {
+                    if best < length {
+                        best = length;
+                        distance = p - q;
+                    }
+                    if length == limit {
+                        break;
+                    }
+                }
+            }
+            node = next[node];
+        }
+        if best == 0 {
+            insert(p, &mut next, &mut prev, &mut position);
+            p += 1;
+            literals += 1;
+        }
+        if literals >= 0x80 || (best > 1 && literals > 0) {
+            out.push((literals - 1) as u8);
+            out.extend_from_slice(&src[literal_start..literal_start + literals]);
+            literals = 0;
+            literal_start = p;
+        }
+        if best > 1 {
+            for _ in 0..best {
+                insert(p, &mut next, &mut prev, &mut position);
+                p += 1;
+            }
+            let code = (((best - 2) << 11) + (distance - 2) + 0x8000) as u16;
+            out.push((code >> 8) as u8);
+            out.push(code as u8);
+            literal_start = p;
+        }
     }
+    if literals > 0 {
+        out.push((literals - 1) as u8);
+        out.extend_from_slice(&src[literal_start..literal_start + literals]);
+    }
+    out
+}
+
+/// sub_494470 + sub_4942D0: "SDC FORMAT 1.00", seed (GetSystemTime
+/// wMilliseconds), packed and raw sizes, then the packed bytes masked by the
+/// seeded stream with their 16-bit sum and XOR.
+/// GetSystemTime().wMilliseconds (the local time has the same milliseconds).
+fn sdc_seed() -> u32 {
+    u32::from(crate::portable_local_system_time()[7])
+}
+
+fn encode_sdc(raw: &[u8], seed: u32) -> Vec<u8> {
+    let mut packed = compress_sdc(raw);
     let mut state = seed;
     for byte in &mut packed {
         *byte = byte.wrapping_add(next_sdc_random(&mut state));
@@ -774,6 +863,25 @@ use std::collections::BTreeMap;
             restored.read_flags.get("main").unwrap().contains(16),
             Some(true)
         );
+    }
+
+    /// Compares `compress_sdc` with sub_493E90 run under an emulator:
+    /// ETHORNELL_SDC_VECTORS=<dir> holding <name>.in / <name>.out pairs.
+    #[test]
+    #[ignore]
+    fn sdc_compressor_matches_the_target_vectors() {
+        let dir = std::env::var("ETHORNELL_SDC_VECTORS").expect("ETHORNELL_SDC_VECTORS");
+        let mut checked = 0;
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_some_and(|ext| ext == "in") {
+                let input = std::fs::read(&path).unwrap();
+                let expected = std::fs::read(path.with_extension("out")).unwrap();
+                assert_eq!(compress_sdc(&input), expected, "{}", path.display());
+                checked += 1;
+            }
+        }
+        assert!(checked > 0);
     }
 
     #[test]

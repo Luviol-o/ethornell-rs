@@ -8383,26 +8383,40 @@ impl Vm {
         Ok(Value::Int(i32::from(active)))
     }
 
+    /// sub_46C310's length checks (31, 31, 31, 255, 511 bytes) with the
+    /// caller's fatal texts: Sys80:94 (sub_48A730) or Sys80:96 (sub_48A960).
     fn validate_structured_history_record(
         record: &system80_state::StructuredHistoryRecord,
+        from_buffer: bool,
     ) -> VmResult<()> {
-        for (index, text) in record.short_text.iter().enumerate() {
-            if encoding_rs::SHIFT_JIS.encode(text).0.len() >= 32 {
-                return Err(VmError::Runtime(format!(
-                    "Sys80 structured-history short string {} exceeds 31 bytes",
-                    index + 1
-                )));
+        let messages: [&str; 5] = if from_buffer {
+            [
+                "アーカイブ名が{}文字を超えています",
+                "ファイル名が{}文字を超えています",
+                "名前が{}文字を超えています",
+                "メッセージが{}文字を超えています",
+                "読み仮名リストが{}文字を超えています",
+            ]
+        } else {
+            [
+                "指定されたアーカイブ名は{}文字を超えています",
+                "指定されたファイル名は{}文字を超えています",
+                "指定された名前は{}文字を超えています",
+                "指定されたメッセージは{}文字を超えています",
+                "",
+            ]
+        };
+        let fields = [
+            (&record.short_text[0], 32),
+            (&record.short_text[1], 32),
+            (&record.short_text[2], 32),
+            (&record.text, 256),
+            (&record.extended_text, 512),
+        ];
+        for ((text, limit), message) in fields.into_iter().zip(messages) {
+            if encoding_rs::SHIFT_JIS.encode(text).0.len() >= limit {
+                return Err(VmError::Runtime(message.replace("{}", &(limit - 1).to_string())));
             }
-        }
-        if encoding_rs::SHIFT_JIS.encode(&record.text).0.len() >= 256 {
-            return Err(VmError::Runtime(
-                "Sys80 structured-history text exceeds 255 bytes".into(),
-            ));
-        }
-        if encoding_rs::SHIFT_JIS.encode(&record.extended_text).0.len() >= 512 {
-            return Err(VmError::Runtime(
-                "Sys80 structured-history extended text exceeds 511 bytes".into(),
-            ));
         }
         Ok(())
     }
@@ -8426,7 +8440,7 @@ impl Vm {
             text: self.read_c_string(ptr + 256)?,
             extended_text: self.read_c_string(ptr + 512)?,
         };
-        Self::validate_structured_history_record(&record)?;
+        Self::validate_structured_history_record(&record, true)?;
         Ok(record)
     }
 
@@ -8494,7 +8508,7 @@ impl Vm {
             text,
             extended_text: String::new(),
         };
-        Self::validate_structured_history_record(&record)?;
+        Self::validate_structured_history_record(&record, false)?;
         self.system80_shared
             .lock()
             .map_err(|_| VmError::Runtime("system80 shared state poisoned".into()))?
@@ -8514,7 +8528,7 @@ impl Vm {
         });
         let Some(record) = record else {
             return Err(VmError::Runtime(format!(
-                "Sys80 structured-history index out of range: {index}"
+                "無効なヒストリインデックス [ {index} ] が指定されました"
             )));
         };
         self.write_structured_history_record(dst, &record, include_extended)?;
@@ -10128,7 +10142,8 @@ impl Vm {
                 let requested = self.pop_int()?.max(0) as usize;
                 let source = self.pop_ptr()?;
                 let destination = self.pop_ptr()?;
-                let sdc_header = b"SDC FORMAT 1.00";
+                // sub_494430: strcmp, so the terminating NUL is part of it.
+                let sdc_header = b"SDC FORMAT 1.00\0";
                 let has_sdc_header = self
                     .resolve_range(source, sdc_header.len())
                     .ok()
@@ -10526,8 +10541,9 @@ impl Vm {
             (0x80, 0x96) => self.sys80_96_append_structured_history_record()?,
             (0x80, 0x97) => self.sys80_95_97_read_structured_history(true)?,
             (0x80, 0x98) => {
+                // sub_46C730: either value 0 -> 2; capacity is unsigned.
                 let record_size = self.pop_int()?.max(0) as u32;
-                let capacity = self.pop_int()?.max(0) as u32;
+                let capacity = self.pop_int()? as u32;
                 let slot = self.pop_ptr()?;
                 Value::Int(self.sys_indexed_record_open(slot, capacity, record_size)?)
             }
@@ -10537,14 +10553,14 @@ impl Vm {
                 Value::Int(self.sys_indexed_record_count(dst, handle)?)
             }
             (0x80, 0x9d) => {
-                let index = self.pop_int()?.max(0) as u32;
+                let index = self.pop_int()?;
                 let handle = self.pop_ptr()?;
                 let dst = self.pop_ptr()?;
                 Value::Int(self.sys_indexed_record_load(dst, handle, index)?)
             }
             (0x80, 0x9e) => {
-                let count = self.pop_int()?.max(0) as u32;
-                let start = self.pop_int()?.max(0) as u32;
+                let count = self.pop_int()? as u32;
+                let start = self.pop_int()?;
                 let handle = self.pop_ptr()?;
                 Value::Int(self.sys_indexed_record_remove(handle, start, count))
             }

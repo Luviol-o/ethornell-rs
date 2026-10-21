@@ -110,6 +110,18 @@ impl Vm {
     }
 
     pub(crate) fn decode_sdc_records(&mut self, src: u32, dst: u32) -> VmResult<i32> {
+        let Some(unpacked) = self.decode_sdc_from_memory(src, dst)? else {
+            return Ok(0);
+        };
+        let range = self.resolve_write_range(dst, unpacked.len())?;
+        self.memory[range].copy_from_slice(&unpacked);
+        self.clear_shadow_values(dst, unpacked.len());
+        Ok(unpacked.len() as i32)
+    }
+
+    /// sub_4943E0 into a host buffer: None when the magic, the checksum or
+    /// the LZ stream is bad (the target returns 0 then).
+    fn decode_sdc_from_memory(&self, src: u32, dst: u32) -> VmResult<Option<Vec<u8>>> {
         const HEADER_SIZE: usize = 32;
         const MAGIC: &[u8; 16] = b"SDC FORMAT 1.00\0";
 
@@ -121,7 +133,7 @@ impl Vm {
                 header = %header.iter().take(16).map(|byte| format!("{byte:02X}")).collect::<String>(),
                 "SDC header magic mismatch"
             );
-            return Ok(0);
+            return Ok(None);
         }
 
         let seed = u32::from_le_bytes(header[16..20].try_into().unwrap());
@@ -138,7 +150,7 @@ impl Vm {
                     %error,
                     "SDC packed payload is outside VM memory"
                 );
-                return Ok(0);
+                return Ok(None);
             }
         };
         let mut packed = self.memory[packed].to_vec();
@@ -155,7 +167,7 @@ impl Vm {
                 expected_xor = format_args!("0x{expected_xor:04X}"),
                 "SDC checksum mismatch"
             );
-            return Ok(0);
+            return Ok(None);
         }
 
         let mut state = seed;
@@ -189,13 +201,10 @@ impl Vm {
                     %error,
                     "SDC LZ decompression failed"
                 );
-                return Ok(0);
+                return Ok(None);
             }
         };
-        let range = self.resolve_write_range(dst, unpacked.len())?;
-        self.memory[range].copy_from_slice(&unpacked);
-        self.clear_shadow_values(dst, unpacked.len());
-        Ok(unpacked.len() as i32)
+        Ok(Some(unpacked))
     }
 
     pub(crate) fn decode_sdc_struct_array(&mut self, src: u32, dst: u32) -> VmResult<i32> {
@@ -210,12 +219,11 @@ impl Vm {
             );
             return Ok(0);
         }
-        let temporary = self.alloc_heap(decoded_len as u32);
-        if temporary == 0 {
-            tracing::warn!(decoded_len, "SDC/DCFS temporary allocation failed");
+        // The target decodes into operator new[] memory, not the VM heap.
+        let Some(mut encoded) = self.decode_sdc_from_memory(src, dst)? else {
             return Ok(0);
-        }
-        let written = self.decode_sdc_records(src, temporary)?;
+        };
+        let written = encoded.len() as i32;
         if written <= 0 || written as usize > decoded_len {
             tracing::warn!(
                 src = format_args!("0x{src:08X}"),
@@ -223,7 +231,6 @@ impl Vm {
                 written,
                 "SDC/DCFS outer decompression failed or exceeded its target allocation"
             );
-            let _ = self.free_heap(temporary);
             return Ok(0);
         }
         if written as usize != decoded_len {
@@ -239,15 +246,13 @@ impl Vm {
                 "SDC/DCFS decoded byte count differs from allocation; continuing like target"
             );
         }
-        let range = self.resolve_range(temporary, decoded_len)?;
-        let encoded = self.memory[range].to_vec();
+        encoded.resize(encoded.len().max(decoded_len), 0);
         if encoded.get(..STRUCT_MAGIC.len()) != Some(STRUCT_MAGIC) {
             tracing::warn!(
                 src = format_args!("0x{src:08X}"),
                 decoded_header = %encoded.iter().take(16).map(|byte| format!("{byte:02X}")).collect::<String>(),
                 "DCFS structure magic mismatch"
             );
-            let _ = self.free_heap(temporary);
             return Ok(0);
         }
 
@@ -259,22 +264,19 @@ impl Vm {
                 record_count,
                 "DCFS structure dimensions are invalid"
             );
-            let _ = self.free_heap(temporary);
             return Ok(0);
         }
         let total_output = match record_size.checked_mul(record_count) {
             Some(total) => total,
             None => {
                 tracing::warn!(record_size, record_count, "DCFS output size overflow");
-                let _ = self.free_heap(temporary);
-                return Ok(0);
+                    return Ok(0);
             }
         };
         let first_end = match 24usize.checked_add(record_size) {
             Some(end) => end,
             None => {
-                let _ = self.free_heap(temporary);
-                return Ok(0);
+                    return Ok(0);
             }
         };
         let Some(first) = encoded.get(24..first_end) else {
@@ -284,7 +286,6 @@ impl Vm {
                 record_count,
                 "DCFS first record is truncated"
             );
-            let _ = self.free_heap(temporary);
             return Ok(0);
         };
         let mut records = Vec::with_capacity(total_output);
@@ -307,8 +308,7 @@ impl Vm {
                             %error,
                             "DCFS run-length stream is truncated"
                         );
-                        let _ = self.free_heap(temporary);
-                        return Ok(0);
+                                    return Ok(0);
                     }
                 };
                 if record.len().saturating_add(count) > record_size {
@@ -319,8 +319,7 @@ impl Vm {
                         record_size,
                         "DCFS run exceeds record boundary"
                     );
-                    let _ = self.free_heap(temporary);
-                    return Ok(0);
+                            return Ok(0);
                 }
                 if literal {
                     let end = input.saturating_add(count);
@@ -332,8 +331,7 @@ impl Vm {
                             decoded_len,
                             "DCFS literal run is truncated"
                         );
-                        let _ = self.free_heap(temporary);
-                        return Ok(0);
+                                    return Ok(0);
                     };
                     record.extend_from_slice(bytes);
                     input = end;
@@ -349,7 +347,6 @@ impl Vm {
         let range = self.resolve_write_range(dst, records.len())?;
         self.memory[range].copy_from_slice(&records);
         self.clear_shadow_values(dst, records.len());
-        let _ = self.free_heap(temporary);
         tracing::info!(
             src = format_args!("0x{src:08X}"),
             dst = format_args!("0x{dst:08X}"),
@@ -551,7 +548,6 @@ impl Vm {
             },
         );
 
-        self.ensure_indexed_record_globals(record_size)?;
 
         if std::env::var_os("DEBUG").is_some() {
             tracing::info!(
@@ -665,23 +661,24 @@ impl Vm {
         &mut self,
         dst: u32,
         handle: u32,
-        index: u32,
+        index: i32,
     ) -> VmResult<i32> {
         let Some(state) = self.indexed_record_tables.get(&Self::value_key(handle)) else {
             return Ok(1);
         };
-        let Some(entry) = state.records.get(index as usize).cloned() else {
+        let Some(entry) = usize::try_from(index)
+            .ok()
+            .and_then(|index| state.records.get(index))
+            .cloned()
+        else {
             return Ok(2);
         };
+        // sub_46C8E0: memcpy of the stored record.
         let size = state.record_size as usize;
         let record_size = state.record_size;
         let capacity = state.capacity;
-        self.ensure_writable(dst, size);
-        if Self::should_clear_indexed_record_target(dst) {
-            self.clear_record_buffer(dst, size);
-        }
-        let start = Self::memory_addr(dst) as usize;
-        self.memory[start..start + size].copy_from_slice(&entry.bytes);
+        let range = self.resolve_write_range(dst, size)?;
+        self.memory[range].copy_from_slice(&entry.bytes);
         self.clear_shadow_values(dst, size);
         let dst_start = Self::value_key(dst);
         self.mem_values.extend(
@@ -714,11 +711,15 @@ impl Vm {
         Ok(0)
     }
 
-    pub(crate) fn sys_indexed_record_remove(&mut self, handle: u32, start: u32, count: u32) -> i32 {
+    pub(crate) fn sys_indexed_record_remove(&mut self, handle: u32, start: i32, count: u32) -> i32 {
         let Some(state) = self.indexed_record_tables.get_mut(&Self::value_key(handle)) else {
             return 1;
         };
-        let start = start as usize;
+        // sub_46C940: skip `start` records (signed walk; running out is 2),
+        // then delete up to `count` (unsigned) records.
+        let Ok(start) = usize::try_from(start) else {
+            return 2;
+        };
         if start >= state.records.len() {
             return 2;
         }
@@ -727,15 +728,6 @@ impl Vm {
             .min(state.records.len());
         state.records.drain(start..end);
         0
-    }
-
-    fn ensure_indexed_record_globals(&mut self, record_size: u32) -> VmResult<()> {
-        const PRIMARY_BASE: u32 = 0x0004_cad8;
-        let Some(total) = record_size.checked_mul(2) else {
-            return Ok(());
-        };
-        self.ensure_writable(PRIMARY_BASE, total as usize);
-        Ok(())
     }
 
     fn ensure_writable(&mut self, ptr: u32, size: usize) {
@@ -756,11 +748,6 @@ impl Vm {
         self.memory[start..end].fill(0);
         self.clear_shadow_values(ptr, size);
         self.trace_watch_write(ptr, size, 0, "clear_record_buffer");
-    }
-
-    fn should_clear_indexed_record_target(ptr: u32) -> bool {
-        const PRIMARY_GLOBAL_RECORD: u32 = 0x0004_cad8;
-        Self::memory_addr(ptr) != PRIMARY_GLOBAL_RECORD
     }
 
     fn copy_record_into_table(&mut self, dst: u32, src: u32, size: usize) -> VmResult<()> {

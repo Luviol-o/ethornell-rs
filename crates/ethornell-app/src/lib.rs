@@ -19953,10 +19953,8 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
     }
 
     fn post_queued_event(&mut self, code: i32, parameter: i32) {
+        // sub_48AC70 -> sub_497060(0, code, parameter): queue only.
         self.queued_system_events.push_back([0, code, parameter]);
-        if code == 0x7fff {
-            self.quit_requested = true;
-        }
         tracing::info!(code, parameter, "PostQueuedEvent");
     }
 
