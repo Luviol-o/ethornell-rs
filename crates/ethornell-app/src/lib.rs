@@ -18,9 +18,9 @@ mod display_tree;
 mod effects;
 mod frame_presenter;
 mod file_policy;
-/// The web build's file roots (see `file_policy::web`).
-#[cfg(target_arch = "wasm32")]
-pub use file_policy::web as web_files;
+/// File roots for hosts without directory descriptors (web, consoles).
+#[cfg(hosted_files)]
+pub use file_policy::hosted as hosted_files;
 pub mod host_runtime;
 mod graph;
 mod graph_bitmap_nodes;

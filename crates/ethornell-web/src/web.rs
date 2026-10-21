@@ -1,4 +1,4 @@
-use ethornell_app::web_files::{self, ResourceFiles, UserStore};
+use ethornell_app::hosted_files::{self, ResourceFiles, UserStore};
 use ethornell_app::host_runtime::{HostConfig, HostRuntime};
 use ethornell_archive::ArchiveSource;
 use ethornell_core::clock::{self, WallTime};
@@ -207,7 +207,7 @@ impl WebEngine {
                 Some((entry.get(0).as_string()?, bytes))
             })
             .collect();
-        web_files::install(Arc::new(PickedFolder { files }), Arc::new(PageStorage), user_files);
+        hosted_files::install(Arc::new(PickedFolder { files }), Arc::new(PageStorage), user_files);
         let host = HostRuntime::create(HostConfig {
             resource_root: "/game".into(),
             user_root: "/user".into(),

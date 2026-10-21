@@ -32,24 +32,24 @@ impl From<std::fs::Metadata> for PolicyMetadata {
     }
 }
 /// Held for the session: the host's exclusive claim on the user root.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(hosted_files))]
 pub(crate) type WriterLock = std::fs::File;
-#[cfg(target_arch = "wasm32")]
+#[cfg(hosted_files)]
 pub(crate) type WriterLock = ();
 
 #[derive(Clone, Debug)]
 pub(crate) struct FilePolicy {
     pub resource: PathBuf,
     pub user: PathBuf,
-    #[cfg(unix)]
+    #[cfg(fd_policy)]
     resource_dir: std::sync::Arc<std::fs::File>,
-    #[cfg(unix)]
+    #[cfg(fd_policy)]
     user_dir: std::sync::Arc<std::fs::File>,
-    #[cfg(target_arch = "wasm32")]
-    web: std::sync::Arc<web::WebRoots>,
+    #[cfg(hosted_files)]
+    hosted: std::sync::Arc<hosted::HostedRoots>,
 }
-#[cfg(target_arch = "wasm32")]
-pub mod web;
+#[cfg(hosted_files)]
+pub mod hosted;
 thread_local! { static ACTIVE: RefCell<Option<FilePolicy>> = const { RefCell::new(None) }; }
 pub(crate) fn active() -> Option<FilePolicy> {
     ACTIVE.with(|p| p.borrow().clone())
@@ -96,7 +96,7 @@ pub(crate) fn user_data_alias(name: &str) -> String {
     normalized
 }
 
-#[cfg(unix)]
+#[cfg(fd_policy)]
 unsafe fn errno_ptr() -> *mut libc::c_int {
     #[cfg(target_vendor = "apple")]
     {
@@ -112,7 +112,7 @@ unsafe fn errno_ptr() -> *mut libc::c_int {
     }
 }
 
-#[cfg(unix)]
+#[cfg(fd_policy)]
 fn next_dir_entry(stream: *mut libc::DIR) -> io::Result<*mut libc::dirent> {
     unsafe {
         *errno_ptr() = 0;
@@ -126,7 +126,7 @@ fn next_dir_entry(stream: *mut libc::DIR) -> io::Result<*mut libc::dirent> {
 
 // Enumerate the opened directory, not a checked path that can be swapped before
 // read_dir. Every recursive descent is opened relative to that same descriptor.
-#[cfg(unix)]
+#[cfg(fd_policy)]
 fn walk_directory(
     dir: &std::fs::File,
     prefix: &Path,
@@ -228,7 +228,7 @@ fn walk_directory(
     Ok(())
 }
 
-#[cfg(unix)]
+#[cfg(fd_policy)]
 fn case_component(
     dir: &std::fs::File,
     requested: &std::ffi::OsStr,
@@ -296,9 +296,9 @@ fn case_component(
     ));
 }
 
-#[cfg(unix)]
+#[cfg(fd_policy)]
 impl FilePolicy {
-    #[cfg(unix)]
+    #[cfg(fd_policy)]
     pub fn lock_writer(&self) -> io::Result<WriterLock> {
         use std::os::{fd::AsRawFd, unix::fs::OpenOptionsExt};
         use std::{ffi::CString, os::fd::FromRawFd};
@@ -320,7 +320,7 @@ impl FilePolicy {
         }
         Ok(file)
     }
-    #[cfg(unix)]
+    #[cfg(fd_policy)]
     pub fn open_resource(&self, name: &str) -> io::Result<std::fs::File> {
         let normalized = name.replace('\\', "/");
         if normalized.starts_with("bgi-user/") {
@@ -643,7 +643,7 @@ impl FilePolicy {
         )?;
         Ok(output)
     }
-    #[cfg(unix)]
+    #[cfg(fd_policy)]
     fn parent(&self, name: &str, create: bool) -> io::Result<(std::fs::File, std::ffi::CString)> {
         use std::{
             ffi::CString,
@@ -740,7 +740,7 @@ impl FilePolicy {
         }
         Ok(())
     }
-    #[cfg(unix)]
+    #[cfg(fd_policy)]
     pub fn rename(&self, from: &str, to: &str) -> io::Result<()> {
         use std::os::fd::AsRawFd;
         // Both source and destination are resolved under the USER root; a
@@ -763,7 +763,7 @@ impl FilePolicy {
             .and_then(|_| to_dir.sync_all())
             .map_err(|e| io::Error::new(e.kind(), "rename committed; durability uncertain"))
     }
-    #[cfg(unix)]
+    #[cfg(fd_policy)]
     pub fn delete(&self, name: &str) -> io::Result<()> {
         use std::os::fd::AsRawFd;
         let (dir, name) = self.parent(name, false)?;
@@ -772,7 +772,7 @@ impl FilePolicy {
         }
         dir.sync_all()
     }
-    #[cfg(unix)]
+    #[cfg(fd_policy)]
     pub fn read_user(&self, name: &str) -> io::Result<Vec<u8>> {
         use std::{
             io::Read,
@@ -808,7 +808,7 @@ impl FilePolicy {
     }
     /// Save writes use directory FDs + O_NOFOLLOW for every path component and
     /// atomic rename within that directory; no symlink parent can redirect IO.
-    #[cfg(unix)]
+    #[cfg(fd_policy)]
     pub fn atomic_write(&self, name: &str, bytes: &[u8]) -> io::Result<()> {
         use std::{
             ffi::CString,
@@ -865,7 +865,7 @@ impl FilePolicy {
 // Host-driven IO is currently available on Unix (Android/macOS/Linux). Keep
 // Windows desktop compiling without accidentally selecting a permissive host
 // implementation. Desktop paths never install this policy.
-#[cfg(not(any(unix, target_arch = "wasm32")))]
+#[cfg(not(any(fd_policy, hosted_files)))]
 impl FilePolicy {
     fn unavailable<T>() -> io::Result<T> {
         Err(io::Error::new(
@@ -922,7 +922,7 @@ impl FilePolicy {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, fd_policy))]
 mod tests {
     use super::*;
     #[test]
@@ -1226,7 +1226,7 @@ mod tests {
         std::fs::remove_dir_all(base).unwrap();
     }
     #[test]
-    #[cfg(unix)]
+    #[cfg(fd_policy)]
     fn nofollow_blocks_symlink_parents_and_leaves_old_save() {
         use std::os::unix::fs::symlink;
         let (base, p) = roots("link");

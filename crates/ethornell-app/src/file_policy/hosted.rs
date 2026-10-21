@@ -1,6 +1,8 @@
-//! The web build's policy roots. There are no host files: the page hands the
-//! picked game folder over as [`ResourceFiles`] (read in place, never copied)
-//! and keeps user data in [`UserStore`], which it persists. Names resolve as
+//! Policy roots handed over by the host, for targets without directory
+//! descriptors: the web page passes the picked game folder as
+//! [`ResourceFiles`] (read in place, never copied), the consoles their game
+//! directory. User data lives in memory and every change goes to
+//! [`UserStore`], which the host persists. Names resolve as
 //! in the Unix policy: `bgi-resource/` and `bgi-user/` select a root, a bare
 //! name tries the user root and then the resource root, and components match
 //! ignoring ASCII case.
@@ -116,16 +118,16 @@ impl<F> Tree<F> {
     }
 }
 
-pub(crate) struct WebRoots {
+pub(crate) struct HostedRoots {
     resources: Arc<dyn ResourceFiles>,
     store: Arc<dyn UserStore>,
     resource_tree: Tree<u64>,
     user_tree: Mutex<Tree<Vec<u8>>>,
 }
 
-impl std::fmt::Debug for WebRoots {
+impl std::fmt::Debug for HostedRoots {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("WebRoots")
+        f.write_str("HostedRoots")
     }
 }
 
@@ -152,7 +154,7 @@ fn not_found() -> io::Error {
     io::Error::from(io::ErrorKind::NotFound)
 }
 
-impl WebRoots {
+impl HostedRoots {
     fn metadata_in(&self, root: Root, key: &str) -> Option<PolicyMetadata> {
         match root {
             Root::Resource => {
@@ -295,7 +297,7 @@ impl FilePolicy {
         let backend = BACKEND.get().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
-                "host_policy:101:0 no web file roots",
+                "host_policy:101:0 no hosted file roots",
             )
         })?;
         let mut resource_tree = Tree::default();
@@ -314,7 +316,7 @@ impl FilePolicy {
         Ok(Self {
             resource: resource.to_path_buf(),
             user: user.to_path_buf(),
-            web: Arc::new(WebRoots {
+            hosted: Arc::new(HostedRoots {
                 resources: backend.resources.clone(),
                 store: backend.store.clone(),
                 resource_tree,
@@ -331,11 +333,11 @@ impl FilePolicy {
     pub fn open_manager(&self) -> ethornell_core::Result<ethornell_archive::ResourceManager> {
         use std::io::{Seek, SeekFrom};
         let mut files = Vec::new();
-        for (actual, len) in self.web.resource_tree.files.values() {
+        for (actual, len) in self.hosted.resource_tree.files.values() {
             if *len < 12 {
                 continue;
             }
-            let mut source = self.web.resources.open(actual)?;
+            let mut source = self.hosted.resources.open(actual)?;
             let mut header = [0u8; 12];
             source.read_exact(&mut header)?;
             if ethornell_archive::detect_archive_format_from_bytes(&header)
@@ -363,20 +365,20 @@ impl FilePolicy {
                 .strip_prefix("bgi-resource/")
                 .unwrap_or(&normalized),
         )?;
-        self.web.read_in(Root::Resource, &key, limit)
+        self.hosted.read_in(Root::Resource, &key, limit)
     }
     pub fn metadata(&self, name: &str) -> Option<PolicyMetadata> {
         let normalized = name.replace('\\', "/");
         if let Some(rest) = normalized.strip_prefix("bgi-user/") {
-            return self.web.metadata_in(Root::User, &key_of(rest).ok()?);
+            return self.hosted.metadata_in(Root::User, &key_of(rest).ok()?);
         }
         if let Some(rest) = normalized.strip_prefix("bgi-resource/") {
-            return self.web.metadata_in(Root::Resource, &key_of(rest).ok()?);
+            return self.hosted.metadata_in(Root::Resource, &key_of(rest).ok()?);
         }
         let key = key_of(&normalized).ok()?;
-        self.web
+        self.hosted
             .metadata_in(Root::User, &key)
-            .or_else(|| self.web.metadata_in(Root::Resource, &key))
+            .or_else(|| self.hosted.metadata_in(Root::Resource, &key))
     }
     pub fn user_metadata(&self, name: &str) -> Option<PolicyMetadata> {
         self.metadata(&user_data_alias(name))
@@ -394,18 +396,18 @@ impl FilePolicy {
         let normalized = name.replace('\\', "/");
         if let Some(rest) = normalized.strip_prefix("bgi-resource/") {
             return self
-                .web
+                .hosted
                 .read_in(Root::Resource, &key_of(rest)?, 256 * 1024 * 1024);
         }
         if let Some(rest) = normalized.strip_prefix("bgi-user/") {
             return self
-                .web
+                .hosted
                 .read_in(Root::User, &key_of(rest)?, USER_FILE_LIMIT);
         }
         let key = key_of(&normalized)?;
-        match self.web.read_in(Root::User, &key, USER_FILE_LIMIT) {
+        match self.hosted.read_in(Root::User, &key, USER_FILE_LIMIT) {
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                self.web.read_in(Root::Resource, &key, 256 * 1024 * 1024)
+                self.hosted.read_in(Root::Resource, &key, 256 * 1024 * 1024)
             }
             other => other,
         }
@@ -437,7 +439,7 @@ impl FilePolicy {
             max_count.clamp(1, 10_000)
         };
         Ok(self
-            .web
+            .hosted
             .walk(root, &dir, recursive)?
             .into_iter()
             .filter(|(name, is_dir)| {
@@ -451,9 +453,9 @@ impl FilePolicy {
             .collect())
     }
     pub fn create_directory(&self, name: &str) -> io::Result<()> {
-        let (key, actual) = self.web.user_target(name, false)?;
+        let (key, actual) = self.hosted.user_target(name, false)?;
         let mut tree = self
-            .web
+            .hosted
             .user_tree
             .lock()
             .map_err(|_| io::Error::other("user tree"))?;
@@ -470,14 +472,14 @@ impl FilePolicy {
         {
             // As on Unix: materialize the user-side UserData directory.
             let marker = format!("{}/.probe-parent", normalized.trim_end_matches('/'));
-            self.web.user_target(&marker, true)?;
+            self.hosted.user_target(&marker, true)?;
         }
         if normalized.starts_with("bgi-resource/") {
             return Err(io::Error::from(io::ErrorKind::PermissionDenied));
         }
         let key = key_of(normalized.strip_prefix("bgi-user/").unwrap_or(&normalized))?;
         let tree = self
-            .web
+            .hosted
             .user_tree
             .lock()
             .map_err(|_| io::Error::other("user tree"))?;
@@ -488,48 +490,48 @@ impl FilePolicy {
         }
     }
     pub fn rename(&self, from: &str, to: &str) -> io::Result<()> {
-        let (from_key, from_actual) = self.web.user_target(from, false)?;
-        let (to_key, to_actual) = self.web.user_target(to, true)?;
+        let (from_key, from_actual) = self.hosted.user_target(from, false)?;
+        let (to_key, to_actual) = self.hosted.user_target(to, true)?;
         let mut tree = self
-            .web
+            .hosted
             .user_tree
             .lock()
             .map_err(|_| io::Error::other("user tree"))?;
         let (_, bytes) = tree.files.remove(&from_key).ok_or_else(not_found)?;
-        self.web.store.persist(&from_actual, None);
-        self.web.store.persist(&to_actual, Some(&bytes));
+        self.hosted.store.persist(&from_actual, None);
+        self.hosted.store.persist(&to_actual, Some(&bytes));
         tree.files.insert(to_key, (to_actual, bytes));
         Ok(())
     }
     pub fn delete(&self, name: &str) -> io::Result<()> {
-        let (key, actual) = self.web.user_target(name, false)?;
+        let (key, actual) = self.hosted.user_target(name, false)?;
         let mut tree = self
-            .web
+            .hosted
             .user_tree
             .lock()
             .map_err(|_| io::Error::other("user tree"))?;
         tree.files.remove(&key).ok_or_else(not_found)?;
-        self.web.store.persist(&actual, None);
+        self.hosted.store.persist(&actual, None);
         Ok(())
     }
     pub fn read_user(&self, name: &str) -> io::Result<Vec<u8>> {
-        let (key, _) = self.web.user_target(name, false)?;
-        self.web.read_in(Root::User, &key, USER_FILE_LIMIT)
+        let (key, _) = self.hosted.user_target(name, false)?;
+        self.hosted.read_in(Root::User, &key, USER_FILE_LIMIT)
     }
     pub fn atomic_write(&self, name: &str, bytes: &[u8]) -> io::Result<()> {
         if bytes.len() as u64 > USER_FILE_LIMIT {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "save too large"));
         }
-        let (key, actual) = self.web.user_target(name, true)?;
+        let (key, actual) = self.hosted.user_target(name, true)?;
         let mut tree = self
-            .web
+            .hosted
             .user_tree
             .lock()
             .map_err(|_| io::Error::other("user tree"))?;
         if tree.dirs.contains_key(&key) {
             return Err(io::Error::from(io::ErrorKind::IsADirectory));
         }
-        self.web.store.persist(&actual, Some(bytes));
+        self.hosted.store.persist(&actual, Some(bytes));
         tree.files.insert(key, (actual, bytes.to_vec()));
         Ok(())
     }
