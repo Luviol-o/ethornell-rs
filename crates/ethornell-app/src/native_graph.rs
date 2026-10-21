@@ -4095,11 +4095,6 @@ impl RuntimeTraceApi {
                 );
                 ethornell_vm::Value::None
             }
-            (0x90, 0xA1) => {
-                let args = pop_args(stack, 6);
-                tracing::debug!(args = ?summarize_values(&args), "GraphDrawItemSelectionGrid");
-                ethornell_vm::Value::None
-            }
             (0x90, 0xA4) => {
                 let style_b = pop_int_value(stack).unwrap_or_default();
                 let style_a = pop_int_value(stack).unwrap_or_default();

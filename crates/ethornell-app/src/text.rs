@@ -803,6 +803,95 @@ impl RuntimeTraceApi {
         true
     }
 
+    /// Graph90:A1 (sub_43BA30). The Window's text layer is cleared
+    /// (sub_42BDA0), then item `i` goes to row `i / columns` and column
+    /// `i % columns`. Column `c` starts at `left + c * width / columns` of the
+    /// text area; a centred item sits at that column's middle minus half its
+    /// width. Rows are one line pitch (glyph height plus line spacing) apart.
+    /// A glyph advances the full glyph height for a double-byte character and
+    /// half of it otherwise. The target can colour items from a per-Window
+    /// table (CDspObjWindow+0x394), which is not modelled; `color` is used.
+    pub(crate) fn draw_window_item_grid(
+        &mut self,
+        window: i32,
+        items: &[String],
+        columns: i32,
+        centered: bool,
+        color: i32,
+    ) -> bool {
+        if !Self::is_window_surface_handle(window) || columns < 1 {
+            return false;
+        }
+        let Some(surface) = self.graph_surfaces.get(&window) else {
+            return false;
+        };
+        let (left, top) = (surface.valid_left, surface.valid_top);
+        let area_width = surface.valid_right - left + 1;
+        let spacing_percent = surface.line_spacing_percent;
+        let state = self.window_text_state(Some(window));
+        let glyph = state.font_size.round().max(1.0) as i32;
+        let pitch = glyph + glyph * spacing_percent / 100;
+        let color = [
+            ((color >> 16) & 0xff) as f32 / 255.0,
+            ((color >> 8) & 0xff) as f32 / 255.0,
+            (color & 0xff) as f32 / 255.0,
+            1.0,
+        ];
+
+        for node in self.item_grid_nodes.remove(&window).unwrap_or_default() {
+            self.text_nodes.remove(&node);
+        }
+        self.clear_bitmap_text(window);
+
+        let mut nodes = Vec::with_capacity(items.len());
+        for (index, item) in items.iter().enumerate() {
+            let index = index as i32;
+            let column = index % columns;
+            let column_left = left + column * area_width / columns;
+            let width: i32 = item
+                .chars()
+                .map(|ch| {
+                    let double_byte = encoding_rs::SHIFT_JIS.encode(ch.encode_utf8(&mut [0; 4])).0.len() > 1;
+                    if double_byte { glyph } else { glyph / 2 }
+                })
+                .sum();
+            let x = if centered {
+                column_left + area_width / columns / 2 - (width as u32 >> 1) as i32
+            } else {
+                column_left
+            };
+            let y = top + pitch * (index / columns);
+            while self.text_nodes.contains_key(&self.next_screen_text_child) {
+                self.next_screen_text_child = self.next_screen_text_child.saturating_sub(1);
+            }
+            let node = self.next_screen_text_child;
+            self.next_screen_text_child = self.next_screen_text_child.saturating_sub(1);
+            self.text_nodes.insert(
+                node,
+                RuntimeTextNode {
+                    text: item.clone(),
+                    enabled: true,
+                    owner_object: None,
+                    screen_attached: false,
+                    target_surface: Some(window),
+                    x: x as f32,
+                    y: y as f32,
+                    size: glyph as f32,
+                    line_height: pitch as f32,
+                    formatted_layout: false,
+                    color,
+                    z: MESSAGE_TEXT_Z,
+                    ruby_spans: Vec::new(),
+                    style_spans: Vec::new(),
+                },
+            );
+            nodes.push(node);
+        }
+        tracing::debug!(window, items = items.len(), columns, centered, "GraphDrawItemSelectionGrid");
+        self.item_grid_nodes.insert(window, nodes);
+        true
+    }
+
     pub(crate) fn release_screen_text_node(&mut self, node: i32) -> bool {
         let root_was_text = self.text_nodes.remove(&node).is_some();
         let mut removed = root_was_text;

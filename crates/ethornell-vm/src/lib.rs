@@ -1027,6 +1027,21 @@ pub struct GraphIconRecord {
 pub trait GraphApi {
     fn call_graph(&mut self, call: &mut NativeCallFrame) -> VmResult<Value>;
 
+    /// Graph90:A1 (sub_492090 -> sub_43BA30): clear a Window's text layer
+    /// and draw `items` row by row across `columns` equal columns, centred
+    /// in each column or at its left edge, in packed RGB `color`. Returns
+    /// false when `window` is not a Window object.
+    fn draw_item_selection_grid(
+        &mut self,
+        _window: i32,
+        _items: &[String],
+        _columns: i32,
+        _centered: bool,
+        _color: i32,
+    ) -> bool {
+        false
+    }
+
     /// Returns the two DWORD globals written by target helper sub_434410
     /// when Graph92:9B is called with selector 256.
     fn system92_text_output_pair(&self) -> [i32; 2] {
@@ -4156,7 +4171,36 @@ impl Vm {
                     self.note_stub("graph", code, id);
                     return Err(VmError::UnknownDispatch { group: code, id });
                 }
-                let result = if (code, id) == (0x90, 0xbc) {
+                let result = if (code, id) == (0x90, 0xa1) {
+                    // sub_47F0F0 pops colour, layout, column count, the item
+                    // string table, item count and the Window. sub_491F30
+                    // checks the count (1..=16) before the column count (at
+                    // most 16); every failure is a script error. A column
+                    // count below 1 makes sub_43BA30 divide by zero.
+                    let color = self.pop_int()?;
+                    let layout = self.pop_int()?;
+                    let columns = self.pop_int()?;
+                    let table = self.pop_ptr()?;
+                    let count = self.pop_int()?;
+                    let window = self.pop_int()?;
+                    if !(1..=16).contains(&count) {
+                        return Err(VmError::Runtime(format!(
+                            "Graph90:A1 item count {count} is out of range"
+                        )));
+                    }
+                    if !(1..=16).contains(&columns) {
+                        return Err(VmError::Runtime(format!(
+                            "Graph90:A1 column count {columns} is out of range"
+                        )));
+                    }
+                    let items = self.read_counted_string_pointer_list(table, count as usize)?;
+                    if !api.draw_item_selection_grid(window, &items, columns, layout != 0, color) {
+                        return Err(VmError::Runtime(format!(
+                            "Graph90:A1 handle 0x{window:08X} is not a Window"
+                        )));
+                    }
+                    Value::None
+                } else if (code, id) == (0x90, 0xbc) {
                     let object = self.pop_value()?;
                     let state_buffer = self.pop_ptr()?;
                     let exists = api.graph_input_object_exists(object.as_i32());
@@ -13910,6 +13954,77 @@ mod tests {
         assert_eq!(&vm.memory[0x100..0x105], b"ab\0c\0");
         assert_eq!(vm.write_enumerated_names(0x200, 4, &names).unwrap(), Value::Int(-1));
         assert_eq!(&vm.memory[0x200..0x203], b"ab\0");
+    }
+
+    #[derive(Default)]
+    struct ItemGridApi {
+        drawn: Vec<(i32, Vec<String>, i32, bool, i32)>,
+    }
+
+    impl SysApi for ItemGridApi {
+        fn call_sys(&mut self, _call: &mut NativeCallFrame) -> super::VmResult<Value> {
+            Ok(Value::None)
+        }
+    }
+
+    impl GraphApi for ItemGridApi {
+        fn call_graph(&mut self, _call: &mut NativeCallFrame) -> super::VmResult<Value> {
+            Ok(Value::None)
+        }
+
+        fn draw_item_selection_grid(
+            &mut self,
+            window: i32,
+            items: &[String],
+            columns: i32,
+            centered: bool,
+            color: i32,
+        ) -> bool {
+            self.drawn.push((window, items.to_vec(), columns, centered, color));
+            window == 0xB000_0001_u32 as i32
+        }
+    }
+
+    impl SoundApi for ItemGridApi {
+        fn call_sound(&mut self, _call: &mut NativeCallFrame) -> super::VmResult<Value> {
+            Ok(Value::None)
+        }
+    }
+
+    #[test]
+    fn item_grid_reads_the_string_table_and_checks_its_operands() {
+        let grid = test_instruction(0, 0x90, "grp1", vec![0x90, 0xa1], Vec::new());
+        let window = 0xB000_0001_u32 as i32;
+        let mut vm = Vm::new();
+        vm.write_c_string(0x200, "Yes").unwrap();
+        vm.write_c_string(0x210, "No").unwrap();
+        vm.write_int(0x100, 2, 0x200).unwrap();
+        vm.write_int(0x104, 2, 0x210).unwrap();
+        let operands = |window: i32, count: i32, columns: i32| {
+            [
+                Value::Int(window),
+                Value::Int(count),
+                Value::Ptr(0x100),
+                Value::Int(columns),
+                Value::Int(1),
+                Value::Int(0x00ff_00ff),
+            ]
+        };
+        let mut api = ItemGridApi::default();
+
+        vm.stack.extend(operands(window, 2, 2));
+        vm.dispatch(&grid, &mut api).unwrap();
+        assert!(vm.stack.is_empty());
+        assert_eq!(
+            api.drawn,
+            [(window, vec!["Yes".to_string(), "No".to_string()], 2, true, 0x00ff_00ff)]
+        );
+
+        for (window, count, columns) in [(window, 17, 2), (window, 2, 17), (window, 2, 0), (5, 2, 2)] {
+            vm.stack.clear();
+            vm.stack.extend(operands(window, count, columns));
+            assert!(vm.dispatch(&grid, &mut api).is_err(), "{window} {count} {columns}");
+        }
     }
 
     #[test]

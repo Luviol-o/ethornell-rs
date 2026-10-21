@@ -684,6 +684,8 @@ struct RuntimeTraceApi {
     bitmap_text_runs: BTreeMap<i32, Vec<RuntimeTextNode>>,
     screen_text_children: BTreeMap<i32, Vec<i32>>,
     next_screen_text_child: i32,
+    /// Text nodes Graph90:A1 drew into each Window's text layer.
+    item_grid_nodes: BTreeMap<i32, Vec<i32>>,
     sound_slots: BTreeMap<i32, SoundSlot>,
     bgm_slots: BTreeMap<i32, SoundSlot>,
     /// Target BGM gain bank set by A0:08 (dword_55FF18 / sub_4A3270).
@@ -1025,6 +1027,7 @@ impl RuntimeTraceApi {
             bitmap_text_runs: BTreeMap::new(),
             screen_text_children: BTreeMap::new(),
             next_screen_text_child: -100_000,
+            item_grid_nodes: BTreeMap::new(),
             sound_slots: BTreeMap::new(),
             bgm_slots: BTreeMap::new(),
             bgm_primary_volumes: [128; 16],
@@ -9607,6 +9610,52 @@ mod input_tests {
             GraphApi::native_message_is_animating(&api),
             "Sys input queries must not reveal text; CProcDspMsg owns progression"
         );
+    }
+
+    #[test]
+    fn item_grid_lays_items_out_in_window_columns() {
+        let manager =
+            ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let mut api = super::RuntimeTraceApi::new(manager);
+        let window = api.alloc_window_surface(320, 96).unwrap();
+        {
+            let surface = api.graph_surfaces.get_mut(&window).unwrap();
+            surface.valid_left = 10;
+            surface.valid_top = 4;
+            surface.valid_right = 209;
+            surface.line_spacing_percent = 50;
+        }
+        api.surface_text_states.entry(window).or_default().font_size = 20;
+        let items = ["はい".to_string(), "No".to_string(), "Ok".to_string()];
+
+        assert!(GraphApi::draw_item_selection_grid(&mut api, window, &items, 2, true, 0x00ff_0000));
+        let mut nodes = api
+            .text_nodes
+            .values()
+            .filter(|node| node.target_surface == Some(window))
+            .map(|node| (node.text.clone(), node.x, node.y, node.color))
+            .collect::<Vec<_>>();
+        nodes.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.2.total_cmp(&b.2)));
+        // Columns of 100 pixels from x=10; centres at 60 and 160. Two
+        // double-byte glyphs are 40 wide, two single-byte ones 20.
+        assert_eq!(
+            nodes,
+            [
+                ("はい".to_string(), 40.0, 4.0, [1.0, 0.0, 0.0, 1.0]),
+                ("Ok".to_string(), 50.0, 34.0, [1.0, 0.0, 0.0, 1.0]),
+                ("No".to_string(), 150.0, 4.0, [1.0, 0.0, 0.0, 1.0]),
+            ]
+        );
+
+        assert!(GraphApi::draw_item_selection_grid(&mut api, window, &items[..1], 1, false, 0));
+        let remaining = api
+            .text_nodes
+            .values()
+            .filter(|node| node.target_surface == Some(window))
+            .map(|node| (node.text.as_str(), node.x))
+            .collect::<Vec<_>>();
+        assert_eq!(remaining, [("はい", 10.0)]);
+        assert!(!GraphApi::draw_item_selection_grid(&mut api, 1234, &items, 1, false, 0));
     }
 
     #[test]
@@ -21528,6 +21577,17 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
 }
 
 impl ethornell_vm::GraphApi for RuntimeTraceApi {
+    fn draw_item_selection_grid(
+        &mut self,
+        window: i32,
+        items: &[String],
+        columns: i32,
+        centered: bool,
+        color: i32,
+    ) -> bool {
+        self.draw_window_item_grid(window, items, columns, centered, color)
+    }
+
     fn native_graph_procedure_is_active(&self, opcode: ethornell_vm::NativeOpcode) -> bool {
         match (opcode.group, opcode.id) {
             (0x90, 0x20..=0x24) | (0x90, 0x28..=0x29) | (0x90, 0x2C) => {
@@ -23676,10 +23736,6 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                     valid,
                     "start target item-selection procedure"
                 );
-            }
-            (0x90, 0xa1) => {
-                let args = pop_args(stack, 6);
-                tracing::debug!(args = ?summarize_values(&args), "GraphDrawItemSelectionGrid");
             }
             (0x90, 0xa4) => {
                 let style_b = pop_int_value(stack).unwrap_or_default();
