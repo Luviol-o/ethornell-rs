@@ -4312,8 +4312,66 @@ impl RuntimeTraceApi {
                 ethornell_vm::Value::Int(i32::from(loaded))
             }
             (0x90, 0xC8) => {
-                let args = pop_args(stack, 18);
-                tracing::debug!(args = ?summarize_values(&args), "GraphTransformBitmapGeneral");
+                // sub_47FFF0 pops in reverse push order; `arg(n)` is the n-th
+                // pushed operand: destination, x, y, source, anchor x/y,
+                // scale x/y, translation x/y/z, pitch, heading, bank, axis
+                // order, perspective distance, blend mode, blend parameter.
+                let args = pop_args(stack, 18).iter().map(value_to_i32).collect::<Vec<_>>();
+                let arg = |pushed: usize| args.get(17 - pushed).copied().unwrap_or_default();
+                let (destination, source) = (arg(0), arg(3));
+                let blit = crate::perspective_blit::PerspectiveBlit {
+                    dest_x: arg(1),
+                    dest_y: arg(2),
+                    anchor_x: arg(4),
+                    anchor_y: arg(5),
+                    scale_x: arg(6),
+                    scale_y: arg(7),
+                    translate_x: arg(8),
+                    translate_y: arg(9),
+                    translate_z: arg(10),
+                    pitch: arg(11),
+                    heading: arg(12),
+                    bank: arg(13),
+                    order: arg(14),
+                    distance: arg(15),
+                    mode: arg(16),
+                    parameter: arg(17),
+                };
+                // sub_404FE0 reports a missing destination or source as a
+                // script error.
+                let Some(mut target) = self.graph_bitmap_image(destination) else {
+                    return Some(Err(ethornell_vm::VmError::Runtime(format!(
+                        "Graph90:C8 destination bitmap {destination} does not exist"
+                    ))));
+                };
+                let Some(source_image) = self.graph_bitmap_image(source) else {
+                    return Some(Err(ethornell_vm::VmError::Runtime(format!(
+                        "Graph90:C8 source bitmap {source} does not exist"
+                    ))));
+                };
+                let target_format = self.bitmap_formats.get(&destination).copied().unwrap_or(2);
+                let source_format = self.bitmap_formats.get(&source).copied().unwrap_or(2);
+                let corners = crate::perspective_blit::project_corners(
+                    source_image.width,
+                    source_image.height,
+                    &blit,
+                );
+                let spans = crate::perspective_blit::rasterize(&corners, target.height as i32);
+                let surface = crate::perspective_blit::Surface {
+                    image: &source_image,
+                    format: source_format,
+                };
+                let changed = crate::perspective_blit::draw(
+                    &mut target,
+                    target_format,
+                    &surface,
+                    spans.as_ref(),
+                    &blit,
+                );
+                tracing::debug!(destination, source, ?blit, changed, "GraphTransformBitmapGeneral");
+                if changed {
+                    self.store_runtime_bitmap(destination, target, target_format);
+                }
                 ethornell_vm::Value::None
             }
             (0x90, 0xCA) => {

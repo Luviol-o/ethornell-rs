@@ -48,6 +48,7 @@ mod native_sound;
 mod native_system;
 mod native_system_ext;
 mod native_user;
+mod perspective_blit;
 mod platform;
 mod resource_lookup;
 mod ruby_registry;

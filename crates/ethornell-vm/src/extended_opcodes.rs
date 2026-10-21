@@ -283,8 +283,9 @@ fn fixed_to_float(value: i32) -> f32 {
     value as f32 * (1.0 / 65_536.0)
 }
 
-/// sub_455940: round to the nearest 16.16 value (ties to even, MXCSR
-/// rounding cleared) and snap a fraction within 0x40 of an integer to it.
+/// sub_455940: round to the nearest 16.16 value (cvtps2dq in the default
+/// ties-to-even mode; the handlers' `and 0F3FFh` touches exception masks, not
+/// the rounding bits) and snap a fraction within 0x40 of an integer to it.
 /// Out-of-range and NaN lanes become the cvtps2dq indefinite value.
 fn float_to_fixed(value: f32) -> i32 {
     let scaled = (value * 65_536.0).round_ties_even();
