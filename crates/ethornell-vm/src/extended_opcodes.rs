@@ -171,6 +171,10 @@ impl Vm {
         }
         let values = args.iter().map(Value::as_i32).collect::<Vec<_>>();
         self.extended_opcodes.last_legacy_3d_call = Some((id, values.clone()));
+        args.reverse();
+        if let Some(result) = self.execute_logic(id, &args)? {
+            return Ok(returns_value.then_some(Value::Int(result)));
+        }
 
         let result = match id {
             0x00 => {
@@ -326,12 +330,13 @@ fn legacy_3d_abi(id: u8) -> Option<(usize, bool)> {
         0x64 => (5, true),
         0x65 => (3, true),
         0x66 => (5, true),
-        0x67 | 0x68 | 0x69 => (4, true),
-        0x6a => (7, true),
-        0x70 => (9, true),
-        0x72 => (5, true),
-        0x74 => (8, true),
-        0x75 => (7, true),
+        0x67 => (3, true),
+        0x68 | 0x69 => (4, true),
+        0x6a => (5, true),
+        0x70 => (7, true),
+        0x72 => (11, true),
+        0x74 => (5, true),
+        0x75 => (9, true),
         0x78 => (5, true),
         0x79 => (4, true),
         // sub_4787C0 pops five integers and one pointer.
@@ -444,12 +449,107 @@ mod tests {
         assert_eq!(vm.read_i64(0x1200_0110).unwrap(), 42);
     }
 
+    /// Pushes call-order arguments and runs one 0xD0 selector.
+    fn d0(vm: &mut Vm, id: u8, args: &[Value]) -> Option<Value> {
+        vm.stack.extend(args.iter().cloned());
+        vm.execute_legacy_3d(id).unwrap()
+    }
+
     #[test]
-    fn legacy_device_create_writes_the_output_handle() {
+    fn grid_field_runs_through_the_script_stack() {
         let mut vm = Vm::new();
-        vm.stack
-            .extend([Value::Ptr(0x1200_0100), Value::Int(0), Value::Int(0)]);
-        assert_eq!(vm.execute_legacy_3d(0x00).unwrap(), Some(Value::Int(1)));
-        assert_eq!(vm.read_int(0x1200_0100, 2).unwrap(), 1);
+        let (out, tiles, pair, dirs, count) = (
+            0x1200_0100,
+            0x1200_0200,
+            0x1200_0400,
+            0x1200_0500,
+            0x1200_0540,
+        );
+        // The first handle is 0 (dword_5669E4 starts at 0); kind != 0 fails.
+        assert_eq!(
+            d0(
+                &mut vm,
+                0x00,
+                &[Value::Ptr(out), Value::Int(1), Value::Int(1)]
+            ),
+            Some(Value::Int(0))
+        );
+        assert_eq!(
+            d0(
+                &mut vm,
+                0x00,
+                &[Value::Ptr(out), Value::Int(0), Value::Int(1)]
+            ),
+            Some(Value::Int(1))
+        );
+        let grid = vm.read_int(out, 2).unwrap() as i32;
+        assert_eq!(grid, 0);
+        // A 3x2 map with a wall at (1,0).
+        for index in 0..6u32 {
+            for word in 0..4u32 {
+                let value = if index == 1 && word == 2 { 2 } else { 0 };
+                vm.write_int(tiles + index * 16 + word * 4, 2, value)
+                    .unwrap();
+            }
+        }
+        let int = Value::Int;
+        assert_eq!(
+            d0(
+                &mut vm,
+                0x04,
+                &[int(grid), int(3), int(2), Value::Ptr(tiles)]
+            ),
+            Some(int(0))
+        );
+        assert_eq!(
+            d0(&mut vm, 0x10, &[Value::Ptr(out), int(grid)]),
+            Some(int(0))
+        );
+        let unit = vm.read_int(out, 2).unwrap() as i32;
+        assert_eq!(unit, 0x2000_0000);
+        assert_eq!(
+            d0(&mut vm, 0x14, &[int(grid), int(unit), int(0), int(0)]),
+            Some(int(0))
+        );
+        vm.write_int(pair, 2, 0).unwrap();
+        vm.write_int(pair + 4, 2, 1).unwrap();
+        assert_eq!(
+            d0(&mut vm, 0x16, &[int(grid), int(unit), Value::Ptr(pair)]),
+            Some(int(0))
+        );
+        assert_eq!(
+            d0(
+                &mut vm,
+                0x20,
+                &[int(grid), int(unit), int(1), int(0), int(-1), int(-1)]
+            ),
+            Some(int(0))
+        );
+        // Around the wall: down, right, right, up.
+        assert_eq!(
+            d0(
+                &mut vm,
+                0x21,
+                &[
+                    Value::Ptr(dirs),
+                    Value::Ptr(count),
+                    int(grid),
+                    int(unit),
+                    int(2),
+                    int(0)
+                ]
+            ),
+            Some(int(0))
+        );
+        assert_eq!(vm.read_int(count, 2).unwrap(), 4);
+        let path: Vec<u32> = (0..4)
+            .map(|i| vm.read_int(dirs + i * 4, 2).unwrap())
+            .collect();
+        assert_eq!(path, [3, 5, 5, 2]);
+        // Unknown handle -> status 1, unknown unit -> 4.
+        assert_eq!(d0(&mut vm, 0x12, &[int(7), int(unit)]), Some(int(1)));
+        assert_eq!(d0(&mut vm, 0x12, &[int(grid), int(5)]), Some(int(4)));
+        assert_eq!(d0(&mut vm, 0x01, &[int(grid)]), Some(int(1)));
+        assert_eq!(d0(&mut vm, 0x01, &[int(grid)]), Some(int(0)));
     }
 }

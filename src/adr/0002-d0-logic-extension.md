@@ -58,8 +58,26 @@ Float arguments arrive as 16.16 fixed and are multiplied by
 ## Progress / next step
 
 * [x] Raw export of the whole closure checked in (`src/raw/bgi1622/d0.*`).
-* [ ] `logic_grid_field.c`: handler ABI table, `DCTELgclFldMngr` /
-      `DCTELgclGrdFldMngr` layout and methods, `DCTELgclGrdFld`.
-* [ ] Rust port of the grid field + tests.
-* [ ] Evaluator (D0:80–8E).
-* [ ] Space manager (D0:40–7A).
+* [x] `src/engine/logic_grid_field.c`: all 19 grid selectors (D0:00–2D), their
+      script argument order, the manager/unit/field layouts, the movement
+      search, line of fire, directions. Handler argument order was derived
+      mechanically from `d0.asm` (a small symbolic run over each handler's
+      pops and pushes); the table is at the end of the C file.
+* [x] Rust: `crates/ethornell-vm/src/logic/{mod,grid,spline}.rs`, wired in
+      front of `execute_legacy_3d`. `CSpline` is ported exactly (coefficient
+      form, 100-point cap) rather than reusing the app's animation spline,
+      whose arithmetic differs.
+* [x] `legacy_3d_abi` argument counts fixed for D0:67/6A/70/72/74/75 (they
+      did not match the handlers and would have misaligned the stack).
+* [ ] Evaluator (D0:80–8E): `DCTESLGEvaluator`, 0x453C20/0x4583E0..0x45BB60,
+      uses the grid's sorted reachable list (MSVC `qsort`, not stable — port
+      the CRT algorithm), `GrdFldMngr` vtbl+10/+14 and unit+0x2C caches.
+* [ ] Space manager (D0:40–7A): `DCTELgclSpcMngr`, 0x455840..0x457A10,
+      SSE float math; ctor `sub_4559B0` allocates 0x1800 bytes (64 bodies?).
+
+Deviations from the target, all where it would corrupt memory or crash:
+units never placed (x = -1) are skipped when marking occupancy and zones
+(the target writes at index -(w+1)); a target height outside 0..31 in D0:28
+is out of range (the target reads past a 32-entry stack array); D0:04 rejects
+maps over 4M tiles or with a negative area; null output pointers are not
+written.

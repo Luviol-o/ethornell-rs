@@ -19,6 +19,7 @@ mod debug;
 mod extended_opcodes;
 mod host_request;
 mod input;
+mod logic;
 pub mod native_call;
 pub mod native_input;
 pub mod native_motion;
@@ -2313,6 +2314,7 @@ pub struct Vm {
     next_thread_id: i32,
     collect_diagnostics: bool,
     extended_opcodes: extended_opcodes::ExtendedOpcodeState,
+    logic: logic::LogicState,
 }
 
 #[derive(Debug, Clone, Default)]
