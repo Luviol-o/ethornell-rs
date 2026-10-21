@@ -75,6 +75,45 @@ Float arguments arrive as 16.16 fixed and are multiplied by
 * [ ] Space manager (D0:40–7A): `DCTELgclSpcMngr`, 0x455840..0x457A10,
       SSE float math; ctor `sub_4559B0` allocates 0x1800 bytes (64 bodies?).
 
+### Evaluator notes (read 2026-10-21, not yet in C)
+
+Handlers (script args in call order; "job" = queued on the worker thread
+when the async flag is set, else run inline):
+
+| Sel | Args | Wrapper → work | Result |
+|---|---|---|---|
+| D0:80 | (out*) | 497DC0: job record 0x78 + thread, evaluator 0x160 | **no push**; 0 / 13 |
+| D0:81 | (h) | 497EE0: stop thread, delete | raw 0 / 1 |
+| D0:84 | (h, n) | 4980B0 → 458530: eval[8] (+0x20) = n, n < 1 → 0x90000002 | busy 14 |
+| D0:87 | (out*, h) | 498050: *out = job result, then result = 0xFFFF0000 | raw 0 / busy 14 |
+| D0:88 | (h, grid, n, units*, async) | 498110 → 458550: load n (1..64) unit records of 2100 bytes, snapshot grid | job type 0 |
+| D0:8A | (out_a*, out_b*, h, p3, p4) | 4983B0 → 458A70 (3.3 KB): decide; always async, writes both outputs from the thread | job type 2 |
+| D0:8C | (h, grid) | 498210 → 4586B0: re-snapshot the grid (clone via vtbl+20, sub_4532A0) | busy 14 |
+| D0:8D | (h, index, unit*, flag, async) | 498280 → 4586E0: replace one unit record, rebuild its threat maps | job type 1 |
+| D0:8E | (out*, h, index) | 498350 → 458A40: copy a unit record (0x834) out | busy 14 |
+
+Evaluator (0x160 dwords): [2] thread count (= `[dword_56670C+4]`, an engine
+global), [3] `DCDstrbtdPrcssng` pool running `sub_45BB20 → sub_45A530`,
+[4] grid snapshot, [5] per-thread grid clones, [8] set by D0:84, [9] unit
+count, [10] unit records (0x8DC each; the first 0x834 are the script's),
+[11] acting unit, [12..] per-unit ints, [82]/[83]/[84] candidate count /
+next / array (76 bytes each), [85] = 50, [86] = 67, +0x130 = {0x18000,
+0x10000, 0xAB85} (1.5, 1.0, ~0.67).
+
+Unit record: +0 grid unit id (0 = empty slot), +2100/+2104 position,
+[527] = dir − 2, [141]/[142] go to `sub_453C20`, [533]/[534] reach maps,
+[535..566] 16 pairs of threat maps keyed by `sub_459880` (20-byte weapon
+profile: kind, range, bonus, arc, …). `sub_453C20` caches per profile, on
+the grid unit's +0x2C list, a 7-int record per tile: [0] covered, [1..6]
+hit counts by attack direction (vtbl+C). `sub_4541A0` fetches by key.
+
+Threads: workers pop candidates from the shared queue under the pool's
+lock, evaluate on a private copy of the unit records and a private grid
+clone, and write the score into the candidate; the caller then sorts with
+`qsort` (`sub_45BB40`, by +24 descending). Nothing depends on which thread
+took which candidate, so a single-threaded port in queue order gives the
+same result (decision 3 holds).
+
 Deviations from the target, all where it would corrupt memory or crash:
 units never placed (x = -1) are skipped when marking occupancy and zones
 (the target writes at index -(w+1)); a target height outside 0..31 in D0:28
