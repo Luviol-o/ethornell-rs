@@ -15662,7 +15662,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_START_OBJECT_CONTROL_PARAMETERS,
         returns: "CProcCtrlDspObj completion",
         scheduling: NativeSchedulingEffect::WaitProcedure,
-        notes: "sub_47A6A0 pops scope, input flag, frame rate, duration, alpha, object (alpha only). CProcCtrlDspObj (sub_491B40 -> sub_431BD0/sub_431D90/sub_431E80): the scope must be < 0x10000 and the alpha <= 0x100, a zero frame rate is a script error, a missing object too. The control captures the object's position/alpha/fixed-parameter integer, updates through sub_432160 (curve weights from sub_41A690, optional 1000*n/rate step limiter) on every procedure tick and publishes progress*1000 and status (0 natural, 1 forced, -1 aborted). Callback code 0 aborts, code 1 with a non-zero payload or input flag finishes at the end values; registered input ends it as well.",
+        notes: "BGI 1.622 sub_47B1A0 -> sub_492640 (CProcCtrlDspObj): scope (sub_498720) and transparency (sub_498920) checks, zero rate and unknown object fatal; returns 2 (waits).",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_START_NODE_CONTROL,
@@ -15670,7 +15670,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_START_NODE_CONTROL_PARAMETERS,
         returns: "CProcCtrlDspObj completion",
         scheduling: NativeSchedulingEffect::WaitProcedure,
-        notes: "sub_47A890 pops scope, input flag, frame rate, duration, alpha, curve, y, x, object. CProcCtrlDspObj (sub_491B40 -> sub_431BD0/sub_431D90/sub_431E80): the scope must be < 0x10000 and the alpha <= 0x100, a zero frame rate is a script error, a missing object too. The control captures the object's position/alpha/fixed-parameter integer, updates through sub_432160 (curve weights from sub_41A690, optional 1000*n/rate step limiter) on every procedure tick and publishes progress*1000 and status (0 natural, 1 forced, -1 aborted). Callback code 0 aborts, code 1 with a non-zero payload or input flag finishes at the end values; registered input ends it as well.",
+        notes: "sub_47B390 -> sub_492640 with a position: same checks; x, y, curve, transparency, duration, rate, input.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_START_OBJECT_CONTROL_EX,
@@ -15678,7 +15678,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_START_OBJECT_CONTROL_EX_PARAMETERS,
         returns: "CProcCtrlDspObj completion",
         scheduling: NativeSchedulingEffect::WaitProcedure,
-        notes: "sub_47A790 pops scope, input flag, rate numerator, frame rate, duration, alpha, object (alpha only). CProcCtrlDspObj (sub_491B40 -> sub_431BD0/sub_431D90/sub_431E80): the scope must be < 0x10000 and the alpha <= 0x100, a zero frame rate is a script error, a missing object too. The control captures the object's position/alpha/fixed-parameter integer, updates through sub_432160 (curve weights from sub_41A690, optional 1000*n/rate step limiter) on every procedure tick and publishes progress*1000 and status (0 natural, 1 forced, -1 aborted). Callback code 0 aborts, code 1 with a non-zero payload or input flag finishes at the end values; registered input ends it as well.",
+        notes: "sub_47B290 -> sub_492640: transparency with rate numerator/denominator; same checks.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_START_NODE_CONTROL_EX,
@@ -15686,7 +15686,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_START_NODE_CONTROL_EX_PARAMETERS,
         returns: "CProcCtrlDspObj completion",
         scheduling: NativeSchedulingEffect::WaitProcedure,
-        notes: "sub_47A9B0 pops scope, input flag, rate numerator, frame rate, duration, alpha, curve, y, x, object. CProcCtrlDspObj (sub_491B40 -> sub_431BD0/sub_431D90/sub_431E80): the scope must be < 0x10000 and the alpha <= 0x100, a zero frame rate is a script error, a missing object too. The control captures the object's position/alpha/fixed-parameter integer, updates through sub_432160 (curve weights from sub_41A690, optional 1000*n/rate step limiter) on every procedure tick and publishes progress*1000 and status (0 natural, 1 forced, -1 aborted). Callback code 0 aborts, code 1 with a non-zero payload or input flag finishes at the end values; registered input ends it as well.",
+        notes: "sub_47B4B0 -> sub_492640: position and transparency with rate numerator/denominator.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_START_SPECIAL_OBJECT_CONTROL,
@@ -15694,7 +15694,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_START_SPECIAL_OBJECT_CONTROL_PARAMETERS,
         returns: "CProcCtrlDspObjSp completion",
         scheduling: NativeSchedulingEffect::WaitProcedure,
-        notes: "Target installs the special display-object control procedure through sub_491C40.",
+        notes: "sub_47B5F0 -> sub_492740/sub_432D30: three-point path; unknown object, zero rate and the X-direction check (sub_495220) are fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_START_OBJECT_MOTION_CONTROL,
@@ -15702,7 +15702,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_START_OBJECT_MOTION_CONTROL_PARAMETERS,
         returns: "CProcCtrlDspObj completion",
         scheduling: NativeSchedulingEffect::WaitProcedure,
-        notes: "sub_47AC80 -> sub_491D60/sub_431D90: priority >= 0x10000, fixed parameter outside -1..256, alpha > 256, divisor 0 and a missing object are fatal; installs a CProcCtrlDspObj moving position/alpha/fixed parameter from the current values with the given curves, duration and update interval 1000*numerator/divisor (sub_432160 caps each poll at the next deadline).",
+        notes: "sub_47B780 -> sub_492860: scope, addition level (sub_4988C0) and transparency checks, then rate and object.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_START_SPLINE_OBJECT_CONTROL,
@@ -15710,7 +15710,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_START_SPLINE_OBJECT_CONTROL_PARAMETERS,
         returns: "CProcCtrlDspObjBC completion",
         scheduling: NativeSchedulingEffect::WaitProcedure,
-        notes: "Target installs CProcCtrlDspObjBC through sub_491E60; sub_432490 builds three natural CSpline axes from the captured current fixed vector plus script points. sub_4325E0 samples CDspObj vtable+0x1C before/after applying fixed XYZ (+60), alpha (+72), and fixed parameter (+80); a changed unsigned manager key triggers sub_443300 -> sub_4307D0 remove/reinsert, allowing animated fixed Z to change equal-priority composition order.",
+        notes: "sub_47B8F0 -> sub_492960/sub_432860: spline points; scope, addition, transparency, rate, object, point count with the 1.622 texts.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_START_SHAKE_OBJECT_CONTROL,
@@ -15718,7 +15718,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_START_SHAKE_OBJECT_CONTROL_PARAMETERS,
         returns: "CProcShakeDspObj completion",
         scheduling: NativeSchedulingEffect::WaitProcedure,
-        notes: "Target installs CProcShakeDspObj through sub_491F90/sub_43C7A0; this is the display-object shake procedure, not a spline control.",
+        notes: "sub_47BA80 -> sub_492A90/sub_43CC60 (CProcShakeDspObj): unknown object is ignored; pattern < 6, frequency, repeat count, rate >= frequency are fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_SET_OBJECT_DRAW_ENABLED,
@@ -20056,6 +20056,9 @@ const PORTABLE_EQUIVALENT_OPCODES: &[NativeOpcode] = &[
     opcodes::GRAPH90_SCALE_BITMAP_REGION,
     opcodes::GRAPH90_TRANSFORM_BITMAP,
     opcodes::GRAPH90_BLIT_BITMAP_REGION,
+    opcodes::GRAPH90_START_SPECIAL_OBJECT_CONTROL,
+    opcodes::GRAPH90_START_SPLINE_OBJECT_CONTROL,
+    opcodes::GRAPH90_START_SHAKE_OBJECT_CONTROL,
 ];
 
 const PARTIAL_IMPLEMENTATION_OPCODES: &[NativeOpcode] = &[
@@ -20162,9 +20165,6 @@ const PARTIAL_IMPLEMENTATION_OPCODES: &[NativeOpcode] = &[
     opcodes::GRAPH91_SET_MULTILAYER_LAYER_SOURCE_VELOCITY,
     opcodes::GRAPH91_SET_MULTILAYER_LAYER_TRANSFORM_VELOCITY,
     opcodes::GRAPH90_SET_DISPLAY_OPTIONS,
-    opcodes::GRAPH90_START_SPECIAL_OBJECT_CONTROL,
-    opcodes::GRAPH90_START_SPLINE_OBJECT_CONTROL,
-    opcodes::GRAPH90_START_SHAKE_OBJECT_CONTROL,
     opcodes::GRAPH90_SET_OBJECT_PROPERTY,
     opcodes::GRAPH90_SET_OBJECT_HIT_MASK_BITMAP,
     opcodes::GRAPH90_HIT_TEST_OBJECT_AT_POINTER,

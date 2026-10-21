@@ -5241,29 +5241,21 @@ impl RuntimeTraceApi {
         input_descriptor: i32,
         source: &'static str,
     ) -> ethornell_vm::VmResult<u64> {
-        // Every control starter checks the input scope with sub_497BB0
-        // (< 0x10000) before the transparency (sub_497DB0).
-        if input_descriptor as u32 >= 0x1_0000 {
+        // The control handlers check the input scope (sub_498720) and the
+        // transparency (sub_498920); sub_492640 then rejects a zero update
+        // rate and an unknown object (sub_443640).
+        let _ = source;
+        target_checks::priority(input_descriptor)?;
+        target_checks::effect_level(target_transparency)?;
+        if update_denominator == 0 {
             return Err(ethornell_vm::VmError::Runtime(format!(
-                "{source} input scope {input_descriptor} is out of range"
+                "無効なフレームレート [ {update_denominator} ] が指定されました"
             )));
         }
         if !self.graph_handle_exists(object) {
-            return Err(ethornell_vm::VmError::Runtime(format!(
-                "{source} object #{object} is not registered"
-            )));
-        }
-        if !(0..=256).contains(&target_transparency) {
-            return Err(ethornell_vm::VmError::Runtime(format!(
-                "{source} transparency {target_transparency} is outside 0..=256"
-            )));
-        }
-        // sub_491B40 returns 0x80000001 when the update denominator pointer is
-        // null; sub_431D90 subsequently computes 1000*numerator/denominator.
-        if update_denominator == 0 {
-            return Err(ethornell_vm::VmError::Runtime(format!(
-                "{source} update denominator must not be zero"
-            )));
+            return Err(ethornell_vm::VmError::Runtime(
+                "無効なオブジェクトハンドルが指定されました".into(),
+            ));
         }
 
         let native_position = self
@@ -5366,26 +5358,19 @@ impl RuntimeTraceApi {
         input_descriptor: i32,
         source: &'static str,
     ) -> ethornell_vm::VmResult<u64> {
-        // Every control starter checks the input scope with sub_497BB0
-        // (< 0x10000) before the transparency (sub_497DB0).
-        if input_descriptor as u32 >= 0x1_0000 {
-            return Err(ethornell_vm::VmError::Runtime(format!(
-                "{source} input scope {input_descriptor} is out of range"
-            )));
-        }
+        // sub_47B5F0: scope (sub_498720) and transparency (sub_498920);
+        // sub_492740: unknown object, then sub_432D30's zero rate and the
+        // path's X direction check (sub_495220).
+        target_checks::priority(input_descriptor)?;
+        target_checks::effect_level(target_transparency)?;
         if !self.graph_handle_exists(object) {
-            return Err(ethornell_vm::VmError::Runtime(format!(
-                "{source} object #{object} is not registered"
-            )));
-        }
-        if !(0..=256).contains(&target_transparency) {
-            return Err(ethornell_vm::VmError::Runtime(format!(
-                "{source} transparency {target_transparency} is outside 0..=256"
-            )));
+            return Err(ethornell_vm::VmError::Runtime(
+                "無効なオブジェクトハンドルが指定されました".into(),
+            ));
         }
         if sample_rate_hz == 0 {
             return Err(ethornell_vm::VmError::Runtime(format!(
-                "{source} sample rate must not be zero"
+                "無効なフレームレート [ {sample_rate_hz} ] が指定されました"
             )));
         }
 
@@ -5423,8 +5408,10 @@ impl RuntimeTraceApi {
             input_enabled,
             input_descriptor,
         ) else {
+            let _ = source;
             return Err(ethornell_vm::VmError::Runtime(format!(
-                "{source} rejected its native three-point path or sample rate"
+                "指定された経由Ｘ座標 [ {} ] / 目標Ｘ座標 [ {} ] ではＸ方向のベクトルの一貫性がとれません",
+                middle_position.0, target_position.0
             )));
         };
         self.register_native_control_input_latch(control_id, input_enabled, input_descriptor);
@@ -5463,10 +5450,29 @@ impl RuntimeTraceApi {
         input_descriptor: i32,
         source: &'static str,
     ) -> ethornell_vm::VmResult<u64> {
+        // sub_492A90: an unknown object returns -1, which the handler
+        // (sub_47BA80) ignores; then sub_43CC60's checks.
+        let _ = source;
         if !self.graph_handle_exists(object) {
-            return Err(ethornell_vm::VmError::Runtime(format!(
-                "{source} object #{object} is not registered"
-            )));
+            return Ok(0);
+        }
+        let fatal = |message: String| Err(ethornell_vm::VmError::Runtime(message));
+        if mode as u32 >= 6 {
+            return fatal(format!("無効な振動パターン [ {mode} ] が指定されました"));
+        }
+        if frequency_hz == 0 {
+            return fatal(format!("無効な周波数 [ {frequency_hz} ] が指定されました"));
+        }
+        if cycles == 0 {
+            return fatal(format!("無効な繰り返し回数 [ {cycles} ] が指定されました"));
+        }
+        if sample_rate_hz == 0 {
+            return fatal(format!("無効なフレームレート [ {sample_rate_hz} ] が指定されました"));
+        }
+        if (sample_rate_hz as u32) < frequency_hz as u32 {
+            return fatal(format!(
+                "無効なフレームレート [ {sample_rate_hz} ] が指定されました\n\nフレームレートは周波数と等しいか高くなければなりません"
+            ));
         }
         let native_position = self
             .graph_object_properties
@@ -23140,28 +23146,28 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                 "Graph90:29 missing recovered spline-control arguments".to_string(),
             ));
         };
-        if !self.graph_handle_exists(schedule.target_object) {
+        // sub_47B8F0: scope, addition level and transparency checks;
+        // sub_492960: zero rate, unknown object, then sub_432860's point
+        // count.
+        target_checks::priority(schedule.input_descriptor)?;
+        target_checks::addition_level(schedule.fixed_parameter_target)?;
+        target_checks::effect_level(schedule.target_alpha)?;
+        if schedule.update_denominator == 0 {
             return Err(ethornell_vm::VmError::Runtime(format!(
-                "Graph90:29 object #{} is not registered",
-                schedule.target_object
+                "無効なフレームレート [ {} ] が指定されました",
+                schedule.update_denominator
             )));
+        }
+        if !self.graph_handle_exists(schedule.target_object) {
+            return Err(ethornell_vm::VmError::Runtime(
+                "無効なオブジェクトハンドルが指定されました".into(),
+            ));
         }
         if points.is_empty() {
-            // sub_432490 rejects point_count <= 0 with 0x80000001.
-            return Err(ethornell_vm::VmError::Runtime(
-                "Graph90:29 requires at least one spline point".to_string(),
-            ));
-        }
-        if !(0..=256).contains(&schedule.target_alpha) {
             return Err(ethornell_vm::VmError::Runtime(format!(
-                "Graph90:29 transparency {} is outside 0..=256",
-                schedule.target_alpha
+                "無効な座標数 [ {} ] が指定されました",
+                points.len()
             )));
-        }
-        if schedule.update_denominator == 0 {
-            return Err(ethornell_vm::VmError::Runtime(
-                "Graph90:29 update denominator must not be zero".to_string(),
-            ));
         }
 
         // The VM dispatcher has already copied all twelve BP arguments into
@@ -25635,13 +25641,10 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                 let args = pop_args(stack, 12);
                 // sub_47AC80 also checks the fixed-parameter target with
                 // sub_497D50 (-1..=256) before sub_491D60.
-                if let Some(schedule) = animation::ScheduledObjectControl::from_popped_args(&args)
-                    && !(-1..=256).contains(&schedule.fixed_parameter_target)
-                {
-                    return Err(ethornell_vm::VmError::Runtime(format!(
-                        "Graph90:28 fixed parameter {} is outside -1..=256",
-                        schedule.fixed_parameter_target
-                    )));
+                // sub_47B780: scope, addition level, then the shared checks.
+                if let Some(schedule) = animation::ScheduledObjectControl::from_popped_args(&args) {
+                    target_checks::priority(schedule.input_descriptor)?;
+                    target_checks::addition_level(schedule.fixed_parameter_target)?;
                 }
                 let procedure_object = animation::ScheduledObjectControl::from_popped_args(&args)
                     .map(|schedule| schedule.target_object);
