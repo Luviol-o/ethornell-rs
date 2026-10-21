@@ -9597,6 +9597,9 @@ impl Vm {
                 Value::None
             }
             (0x81, 0x6b) => {
+                // sub_4649E0 returns 0 without touching the destination while
+                // no error has been captured; errdtctn._bp polls this and
+                // starts its error report on any non-zero result.
                 let destination = self.pop_ptr()?;
                 let message = self
                     .system81_shared
@@ -9604,11 +9607,16 @@ impl Vm {
                     .expect("system81 state poisoned")
                     .captured_error
                     .clone();
-                if destination != 0 {
-                    self.write_c_string(destination, &message)?;
+                match message {
+                    None => Value::Int(0),
+                    Some(message) => {
+                        if destination != 0 {
+                            self.write_c_string(destination, &message)?;
+                        }
+                        let (bytes, _, _) = encoding_rs::SHIFT_JIS.encode(&message);
+                        Value::Int(bytes.len().saturating_add(1).min(i32::MAX as usize) as i32)
+                    }
                 }
-                let (bytes, _, _) = encoding_rs::SHIFT_JIS.encode(&message);
-                Value::Int(bytes.len().saturating_add(1).min(i32::MAX as usize) as i32)
             }
             (0x81, 0x6d) => {
                 let version = api.pixel_shader_version();
@@ -17569,6 +17577,24 @@ mod tests {
             .extend([Value::Str("Main".into()), Value::Str(":".into())]);
         vm.dispatch(&instruction, &mut TraceApi).unwrap();
         assert_eq!(vm.stack, [Value::Int(2), Value::Int(-1)]);
+    }
+
+    #[test]
+    fn captured_error_query_returns_zero_until_an_error_is_captured() {
+        let query = test_instruction(0x10, 0x81, "sys2", vec![0x81, 0x6b], Vec::new());
+        let mut vm = Vm::new();
+        vm.memory[0x100] = b'x';
+        vm.stack.push(Value::Ptr(0x100));
+        vm.dispatch(&query, &mut TraceApi).unwrap();
+        assert_eq!(vm.stack, [Value::Int(0)]);
+        assert_eq!(vm.memory[0x100], b'x');
+        vm.stack.clear();
+
+        vm.system81_shared.lock().unwrap().captured_error = Some("err".into());
+        vm.stack.push(Value::Ptr(0x100));
+        vm.dispatch(&query, &mut TraceApi).unwrap();
+        assert_eq!(vm.stack, [Value::Int(4)]);
+        assert_eq!(vm.read_c_string(0x100).unwrap(), "err");
     }
 
     #[test]

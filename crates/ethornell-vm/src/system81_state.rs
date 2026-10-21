@@ -79,7 +79,8 @@ pub(crate) struct System81SharedState {
     pub(crate) pause_on_deactivate: i32,
     pub(crate) print_screen_hotkeys_enabled: bool,
     pub(crate) error_capture_mode: i32,
-    pub(crate) captured_error: String,
+    /// sub_4649E0 reads a nullable error buffer; `None` is the null pointer.
+    pub(crate) captured_error: Option<String>,
     pub(crate) pixel_shader_version: u16,
 }
 
@@ -109,7 +110,7 @@ impl Default for System81SharedState {
             pause_on_deactivate: 0,
             print_screen_hotkeys_enabled: false,
             error_capture_mode: 0,
-            captured_error: String::new(),
+            captured_error: None,
             pixel_shader_version: 0,
         }
     }
