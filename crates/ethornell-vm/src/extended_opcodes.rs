@@ -1,5 +1,4 @@
 use super::{Value, Vm, VmError, VmResult};
-use std::collections::BTreeSet;
 
 #[derive(Debug, Default)]
 pub(super) struct ExtendedOpcodeState {
@@ -8,8 +7,6 @@ pub(super) struct ExtendedOpcodeState {
     last_modal_list: Option<(i32, String)>,
     last_resource_transform: [i32; 7],
     last_resource_blend: [i32; 5],
-    next_legacy_handle: i32,
-    legacy_meshes: BTreeSet<i32>,
     last_legacy_3d_call: Option<(u8, Vec<i32>)>,
     last_debug_inspection: Option<u8>,
 }
@@ -174,30 +171,8 @@ impl Vm {
             return Ok(returns_value.then_some(Value::Int(result)));
         }
 
-        let result = match id {
-            0x40 => {
-                let handle = self.alloc_legacy_handle();
-                self.extended_opcodes.legacy_meshes.insert(handle);
-                self.write_legacy_output(values.first().copied(), handle)?;
-                0
-            }
-            0x41 => i32::from(
-                !values
-                    .first()
-                    .is_some_and(|handle| self.extended_opcodes.legacy_meshes.remove(handle)),
-            ),
-            0x65 | 0x67 => {
-                if let Some(pointer) = values.get(2).copied().filter(|pointer| *pointer != 0) {
-                    let pointer = Self::translate_system_descriptor(pointer as u32);
-                    for offset in [0, 4, 8] {
-                        self.write_int(pointer.wrapping_add(offset), 2, 0)?;
-                    }
-                }
-                0
-            }
-            _ => 0,
-        };
-
+        // Every registered selector is ported; keep the stack balanced anyway.
+        let result = 0;
         Ok(returns_value.then_some(Value::Int(result)))
     }
 
@@ -225,26 +200,6 @@ impl Vm {
         self.clear_shadow_values(pointer, 8);
         Ok(())
     }
-
-    fn alloc_legacy_handle(&mut self) -> i32 {
-        self.extended_opcodes.next_legacy_handle = self
-            .extended_opcodes
-            .next_legacy_handle
-            .wrapping_add(1)
-            .max(1);
-        self.extended_opcodes.next_legacy_handle
-    }
-
-    fn write_legacy_output(&mut self, pointer: Option<i32>, value: i32) -> VmResult<()> {
-        let Some(pointer) = pointer.filter(|pointer| *pointer != 0) else {
-            return Ok(());
-        };
-        self.write_int(
-            Self::translate_system_descriptor(pointer as u32),
-            2,
-            value as u32,
-        )
-    }
 }
 
 fn fixed_mul(left: i32, right: i32) -> i32 {
@@ -259,7 +214,7 @@ fn fixed_to_float(value: i32) -> f32 {
 /// ties-to-even mode; the handlers' `and 0F3FFh` touches exception masks, not
 /// the rounding bits) and snap a fraction within 0x40 of an integer to it.
 /// Out-of-range and NaN lanes become the cvtps2dq indefinite value.
-fn float_to_fixed(value: f32) -> i32 {
+pub(crate) fn float_to_fixed(value: f32) -> i32 {
     let scaled = (value * 65_536.0).round_ties_even();
     let raw = if scaled >= -2_147_483_648.0 && scaled < 2_147_483_648.0 {
         scaled as i32
@@ -628,5 +583,94 @@ mod tests {
         );
         assert_eq!(d0(&mut vm, 0x81, &[int(ai)]), Some(int(0)));
         assert_eq!(d0(&mut vm, 0x81, &[int(ai)]), Some(int(1)));
+    }
+
+    #[test]
+    fn space_manager_runs_through_the_script_stack() {
+        let mut vm = Vm::new();
+        let int = Value::Int;
+        let fixed = |v: i32| int(v << 16);
+        let (out, list, count) = (0x1200_0100, 0x1200_0200, 0x1200_0300);
+        assert_eq!(d0(&mut vm, 0x40, &[Value::Ptr(out)]), Some(int(0)));
+        let space = vm.read_int(out, 2).unwrap() as i32;
+        assert_eq!(space, 1);
+        // (h, i, x,y,z, dx,dy,dz, radius, speed, probe, mask, priority)
+        for (i, x) in [(0, 0), (1, 5)] {
+            let args = [
+                int(space),
+                int(i),
+                fixed(x),
+                fixed(0),
+                fixed(0),
+                fixed(1),
+                fixed(0),
+                fixed(0),
+                fixed(1),
+                fixed(3),
+                fixed(1),
+                int(1),
+                int(0),
+            ];
+            assert_eq!(d0(&mut vm, 0x60, &args), Some(int(0)));
+        }
+        assert_eq!(
+            d0(&mut vm, 0x65, &[Value::Ptr(out), int(space), int(1)]),
+            Some(int(0))
+        );
+        assert_eq!(vm.read_int(out, 2).unwrap(), 5 << 16);
+        // Body 0's next step (x = 3) with probe 1 reaches body 1 (radius 1)? 3+1+1 = 5: no.
+        assert_eq!(
+            d0(
+                &mut vm,
+                0x74,
+                &[
+                    Value::Ptr(list),
+                    Value::Ptr(count),
+                    int(space),
+                    int(0),
+                    int(0)
+                ]
+            ),
+            Some(int(0))
+        );
+        assert_eq!(vm.read_int(count, 2).unwrap(), 0);
+        // Sweep to x = 10 through body 1.
+        let sweep = [
+            int(space),
+            int(0),
+            fixed(10),
+            fixed(0),
+            fixed(0),
+            int(0),
+            int(1),
+        ];
+        assert_eq!(d0(&mut vm, 0x70, &sweep), Some(int(8)));
+        // Link and query.
+        assert_eq!(
+            d0(&mut vm, 0x68, &[int(space), int(1), int(0), int(0)]),
+            Some(int(0))
+        );
+        assert_eq!(
+            d0(
+                &mut vm,
+                0x69,
+                &[Value::Ptr(out), int(space), int(1), int(0)]
+            ),
+            Some(int(0))
+        );
+        assert_eq!(vm.read_int(out, 2).unwrap(), 0);
+        assert_eq!(
+            d0(
+                &mut vm,
+                0x79,
+                &[Value::Ptr(out), int(space), int(0), int(1)]
+            ),
+            Some(int(0))
+        );
+        assert_eq!(vm.read_int(out, 2).unwrap(), 1);
+        assert_eq!(vm.read_int(out + 28, 2).unwrap(), 5 << 16);
+        assert_eq!(d0(&mut vm, 0x61, &[int(space), int(9)]), Some(int(18)));
+        assert_eq!(d0(&mut vm, 0x41, &[int(space)]), Some(int(0)));
+        assert_eq!(d0(&mut vm, 0x61, &[int(space), int(0)]), Some(int(1)));
     }
 }

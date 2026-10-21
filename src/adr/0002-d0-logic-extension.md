@@ -1,6 +1,6 @@
 # 0002. 0xD0 is the logic extension (grid field, space, search worker)
 
-**Status:** In progress (started 2026-10-21)
+**Status:** Done (2026-10-21) — all 46 selectors ported
 
 ## Context
 
@@ -82,8 +82,22 @@ Float arguments arrive as 16.16 fixed and are multiplied by
       strikes from where it stands; enemy skills of effect 4 overwrite the
       acting unit's buffs during the simulation; the acting unit can be
       queued twice when an enemy walks and acts again.
-* [ ] Space manager (D0:40–7A): `DCTELgclSpcMngr`, 0x455840..0x457A10,
-      SSE float math; ctor `sub_4559B0` allocates 0x1800 bytes (64 bodies?).
+* [x] Space manager (D0:40–7A): `src/engine/logic_space.c`,
+      `crates/ethornell-vm/src/logic/space.rs`. Round bodies (96 bytes) with
+      two link kinds, overlap/neighbour queries, the sweep test and the
+      planar FIFO path search on half-step cells with 16 moves. The thread
+      pool there only pre-computes sweep tests, so it is not reproduced.
+      `execute_legacy_3d` no longer has placeholder branches.
+
+Space deviations: `rsqrtss`/`rcpss`/`rcpps` are hardware estimates whose
+bits differ between CPU vendors; the port starts the same Newton step from
+the exact value (results can differ in the last bit before the 16.16
+snap). The sweep test's kept edge distances start at +inf (stack garbage in
+the target). A path target cell with negative coordinates fails with
+0xA0000006 (the target indexes outside its grid). The backtrack stops after
+one pass over the grid (the target loops forever when a walk returns to the
+start cell, whose cost 0.0 doubles as "unset"). A resolution that makes the
+direction stride 0 ends the expansion (the target spins).
 
 ### Evaluator notes (read 2026-10-21, not yet in C)
 

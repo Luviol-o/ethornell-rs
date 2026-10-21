@@ -5,11 +5,13 @@
 mod grid;
 mod msvc_qsort;
 mod slg;
+mod space;
 mod spline;
 
 use super::{Value, Vm, VmResult};
 use grid::{Cell, GridFieldManager, Tile};
 use slg::{Evaluator, SCRIPT_WORDS};
+use space::SpaceManager;
 
 /// The target's internal statuses; `status_to_script` (sub_497120) turns them
 /// into what the script sees.
@@ -70,6 +72,9 @@ pub(crate) struct LogicState {
     /// dword_566A00, ids from ++dword_5669FC (1..).
     jobs: Vec<EvaluatorJob>,
     next_job: i32,
+    /// dword_5669F8, ids from ++dword_5669F0 (1..).
+    spaces: Vec<(i32, SpaceManager)>,
+    next_space: i32,
 }
 
 /// The 0x78-byte job record of D0:80: the evaluator plus the last result a
@@ -89,6 +94,15 @@ impl LogicState {
             .find(|(id, _)| *id == handle)
             .map(|(_, grid)| grid)
             .ok_or(status::NO_HANDLE)
+    }
+
+    fn space(&mut self, handle: i32) -> Result<&mut SpaceManager, u32> {
+        self.spaces
+            .iter_mut()
+            .rev()
+            .find(|(id, _)| *id == handle)
+            .map(|(_, space)| space)
+            .ok_or(0xA000_0000)
     }
 
     fn job(&mut self, handle: i32) -> Option<&mut EvaluatorJob> {
@@ -310,6 +324,7 @@ impl Vm {
                 }
                 Err(status) => status,
             },
+            0x40..=0x7A => return self.execute_space(id, args),
             0x80..=0x8E => return self.execute_evaluator(id, args),
             _ => return Ok(None),
         };
@@ -447,6 +462,200 @@ impl Vm {
             }
             _ => return Ok(None),
         }))
+    }
+
+    /// D0:40..7A: the space manager. 16.16 arguments become floats as the
+    /// handlers do (int * 1/65536 in x87, stored as float).
+    fn execute_space(&mut self, id: u8, args: &[Value]) -> VmResult<Option<i32>> {
+        let int = |index: usize| args.get(index).map(Value::as_i32).unwrap_or_default();
+        let ptr = |index: usize| int(index) as u32;
+        let float = |index: usize| (f64::from(int(index)) * (1.0 / 65_536.0)) as f32;
+        let xyz = |first: usize| [float(first), float(first + 1), float(first + 2)];
+        let status = match id {
+            // (out*): raw 0.
+            0x40 => {
+                self.logic.next_space = self.logic.next_space.wrapping_add(1);
+                let handle = self.logic.next_space;
+                self.logic.spaces.push((handle, SpaceManager::new()));
+                self.logic_write_i32(ptr(0), handle)?;
+                return Ok(Some(0));
+            }
+            // (h): raw 0 / 1.
+            0x41 => {
+                let found = self.logic.spaces.iter().rposition(|(h, _)| *h == int(0));
+                if let Some(index) = found {
+                    let (_, mut space) = self.logic.spaces.remove(index);
+                    space.clear();
+                }
+                return Ok(Some(i32::from(found.is_none())));
+            }
+            0x60 => done(self.logic.space(int(0)).map(|space| {
+                space.add(
+                    int(1) as u32,
+                    xyz(2),
+                    xyz(5),
+                    float(8),
+                    float(9),
+                    float(10),
+                    int(11),
+                    int(12),
+                )
+            })),
+            0x61 => done(
+                self.logic
+                    .space(int(0))
+                    .map(|space| space.remove(int(1) as u32)),
+            ),
+            0x64 => done(
+                self.logic
+                    .space(int(0))
+                    .map(|space| space.set_pos(int(1) as u32, xyz(2))),
+            ),
+            0x66 => done(
+                self.logic
+                    .space(int(0))
+                    .map(|space| space.set_dir(int(1) as u32, xyz(2))),
+            ),
+            // (out*, h, i)
+            0x65 | 0x67 => match self.logic.space(int(1)).and_then(|space| {
+                if id == 0x65 {
+                    space.pos(int(2) as u32)
+                } else {
+                    space.dir(int(2) as u32)
+                }
+            }) {
+                Ok(v) => {
+                    self.logic_write_i32s(ptr(0), &v[..3])?;
+                    0
+                }
+                Err(status) => status,
+            },
+            0x68 => done(
+                self.logic
+                    .space(int(0))
+                    .map(|space| space.link(int(1) as u32, int(2) as u32, int(3))),
+            ),
+            // (out*, h, i, kind)
+            0x69 => match self
+                .logic
+                .space(int(1))
+                .and_then(|space| space.parent(int(2) as u32, int(3) as u32))
+            {
+                Ok(parent) => {
+                    self.logic_write_i32(ptr(0), parent)?;
+                    0
+                }
+                Err(status) => status,
+            },
+            // (list*, count*, h, i, kind)
+            0x6A => match self
+                .logic
+                .space(int(2))
+                .and_then(|space| space.children(int(3) as u32, int(4) as u32))
+            {
+                Ok(list) => self.write_space_list(ptr(0), ptr(1), &list)?,
+                Err(status) => status,
+            },
+            // (h, i, x, y, z, mask, sweep)
+            0x70 => done(
+                self.logic
+                    .space(int(0))
+                    .map(|space| space.sweep_body(int(1) as u32, xyz(2), int(5), int(6))),
+            ),
+            // (out*, count*, h, from, to, range, step, mask, sweep, resolution, threaded)
+            0x72 => match self.logic.space(int(2)).and_then(|space| {
+                space.path(
+                    int(3) as u32,
+                    int(4) as u32,
+                    float(5),
+                    float(6),
+                    int(7),
+                    int(8),
+                    int(9),
+                )
+            }) {
+                Ok(path) => {
+                    let flat: Vec<i32> = path.iter().flatten().copied().collect();
+                    self.logic_write_i32s(ptr(0), &flat)?;
+                    self.logic_write_i32(ptr(1), path.len() as i32)?;
+                    0
+                }
+                Err(status) => status,
+            },
+            // (list*, count*, h, i, mask)
+            0x74 => match self
+                .logic
+                .space(int(2))
+                .and_then(|space| space.ahead(int(3) as u32, int(4)))
+            {
+                Ok(list) => self.write_space_list(ptr(0), ptr(1), &list)?,
+                Err(status) => status,
+            },
+            // (list*, count*, h, x, y, z, radius, exclude, mask)
+            0x75 => match self.logic.space(int(2)) {
+                Ok(space) => {
+                    let list = space.around(xyz(3), float(6), int(7), int(8));
+                    self.write_space_list(ptr(0), ptr(1), &list)?
+                }
+                Err(status) => status,
+            },
+            // (out*, count*, h, i, mask): 32-byte records.
+            0x78 => match self
+                .logic
+                .space(int(2))
+                .and_then(|space| space.neighbours(int(3) as u32, int(4)))
+            {
+                Ok(list) => {
+                    for (n, relation) in list.iter().enumerate() {
+                        self.write_space_relation(ptr(0).wrapping_add(32 * n as u32), relation)?;
+                    }
+                    self.logic_write_i32(ptr(1), list.len() as i32)?;
+                    0
+                }
+                Err(status) => status,
+            },
+            // (out*, h, a, b)
+            0x79 => match self
+                .logic
+                .space(int(1))
+                .and_then(|space| space.relation(int(2) as u32, int(3) as u32))
+            {
+                Ok(relation) => {
+                    self.write_space_relation(ptr(0), &relation)?;
+                    0
+                }
+                Err(status) => status,
+            },
+            // (out*, h, i, x, y, z)
+            0x7A => match self
+                .logic
+                .space(int(1))
+                .and_then(|space| space.relation_to_point(int(2) as u32, xyz(3)))
+            {
+                Ok(relation) => {
+                    self.write_space_relation(ptr(0), &relation)?;
+                    0
+                }
+                Err(status) => status,
+            },
+            _ => return Ok(None),
+        };
+        Ok(Some(status_to_script(status)))
+    }
+
+    fn write_space_list(&mut self, list: u32, count: u32, values: &[i32]) -> VmResult<u32> {
+        self.logic_write_i32s(list, values)?;
+        self.logic_write_i32(count, values.len() as i32)?;
+        Ok(0)
+    }
+
+    /// {index, (bytes 4..16 untouched), x, y, z, length}.
+    fn write_space_relation(&mut self, out: u32, (index, v): &(i32, [i32; 4])) -> VmResult<()> {
+        if out == 0 {
+            return Ok(());
+        }
+        self.logic_write_i32(out, *index)?;
+        self.logic_write_i32s(out.wrapping_add(16), v)
     }
 
     /// An async job posts its status for D0:87 and returns 0; a synchronous
