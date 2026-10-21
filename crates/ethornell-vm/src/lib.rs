@@ -8258,6 +8258,74 @@ impl Vm {
         None
     }
 
+    /// Sys80:25 (sub_488F90 -> sub_467110): pop max count, recursive flag,
+    /// pattern, buffer size and destination.
+    fn sys80_25_enumerate_files<A>(&mut self, api: &mut A) -> VmResult<Value>
+    where
+        A: SysApi,
+    {
+        let max_count = self.pop_int()? as u32 as usize;
+        let recursive = self.pop_int()? != 0;
+        let pattern = self.pop_string_lossy()?;
+        let capacity = self.pop_int()? as u32 as usize;
+        let destination = self.pop_ptr()?;
+        let found = api.enumerate_user_files(&pattern, recursive, 0);
+        let names = target_file_enumeration_order(&found, recursive, max_count);
+        self.write_enumerated_names(destination, capacity, &names)
+    }
+
+    /// Sys80:26 (sub_489010 -> sub_467460): pop max count, pattern, buffer
+    /// size and destination. Only directories other than `.`/`..`, no recursion.
+    fn sys80_26_enumerate_directories<A>(&mut self, api: &mut A) -> VmResult<Value>
+    where
+        A: SysApi,
+    {
+        let max_count = self.pop_int()? as u32 as usize;
+        let pattern = self.pop_string_lossy()?;
+        let capacity = self.pop_int()? as u32 as usize;
+        let destination = self.pop_ptr()?;
+        let mut names = api
+            .enumerate_user_directories(&pattern, 0)
+            .into_iter()
+            .filter(|name| name != "." && name != "..")
+            .collect::<Vec<_>>();
+        names.sort_by_key(|name| name.to_ascii_lowercase());
+        // FindNextFileA stops once the count reaches the limit; the check
+        // follows each accepted entry.
+        if max_count != 0 {
+            names.truncate(max_count);
+        }
+        self.write_enumerated_names(destination, capacity, &names)
+    }
+
+    /// Pack names as consecutive C strings. A null destination only measures
+    /// and returns the byte total; a name that does not fit fails with -1
+    /// after the earlier names were copied, as in sub_467110/sub_467460.
+    fn write_enumerated_names(
+        &mut self,
+        destination: u32,
+        capacity: usize,
+        names: &[String],
+    ) -> VmResult<Value> {
+        let mut written = 0usize;
+        for name in names {
+            let mut bytes = self.encode_native_string(name).into_owned();
+            bytes.push(0);
+            if destination != 0 {
+                if bytes.len() > capacity - written {
+                    return Ok(Value::Int(-1));
+                }
+                let start = destination.wrapping_add(written as u32);
+                let range = self.resolve_write_range(start, bytes.len())?;
+                self.memory[range].copy_from_slice(&bytes);
+                self.clear_shadow_values(start, bytes.len());
+            }
+            written += bytes.len();
+        }
+        let result = if destination == 0 { written } else { names.len() };
+        Ok(Value::Int(result.min(i32::MAX as usize) as i32))
+    }
+
     fn sys80_31_read_file_range<A>(&mut self, api: &mut A) -> VmResult<Value>
     where
         A: SysApi,
@@ -10490,6 +10558,20 @@ impl Vm {
                     .unwrap_or_default();
                 Value::Int(i32::from(api.delete_file(&root, &file)))
             }
+            (0x80, 0x25) => self.sys80_25_enumerate_files(api)?,
+            (0x80, 0x26) => self.sys80_26_enumerate_directories(api)?,
+            (0x80, 0x6d) => {
+                // sub_464040 copies szFile while file drop is enabled and a
+                // path is pending; reading leaves the buffer in place.
+                let destination = self.pop_ptr()?;
+                match api.take_dropped_file().filter(|path| !path.is_empty()) {
+                    Some(path) => {
+                        self.write_c_string(destination, &path)?;
+                        Value::Int(1)
+                    }
+                    None => Value::Int(0),
+                }
+            }
             (0x80, 0x36) => {
                 // sub_4657A0 stores the raw value in dword_506BE0.
                 let enabled = self.pop_int()? != 0;
@@ -12193,6 +12275,56 @@ fn is_plausible_text_payload(text: &str) -> bool {
 /// dropped: the decoder would turn them into replacement characters, which
 /// make the whole string implausible text (a message line was drawn as its
 /// address).
+/// Order and limit enumerated files like sub_467110: a directory's own files
+/// first, then each subdirectory in turn with its relative prefix. The limit
+/// is checked after each file; a subdirectory gets the remainder, and a
+/// remainder of zero means unlimited there, as in the target.
+fn target_file_enumeration_order(found: &[String], recursive: bool, max_count: usize) -> Vec<String> {
+    fn walk(paths: &[Vec<String>], depth: usize, recursive: bool, max: usize, out: &mut Vec<String>) {
+        let mut files = paths
+            .iter()
+            .filter(|path| path.len() == depth + 1)
+            .collect::<Vec<_>>();
+        files.sort_by_key(|path| path[depth].to_ascii_lowercase());
+        let mut count = 0usize;
+        for path in files {
+            out.push(path.join("\\"));
+            count += 1;
+            if max != 0 && count >= max {
+                break;
+            }
+        }
+        if !recursive {
+            return;
+        }
+        let mut directories = paths
+            .iter()
+            .filter(|path| path.len() > depth + 1)
+            .map(|path| path[depth].clone())
+            .collect::<Vec<_>>();
+        directories.sort_by_key(|name| name.to_ascii_lowercase());
+        directories.dedup_by_key(|name| name.to_ascii_lowercase());
+        for directory in directories {
+            let nested = paths
+                .iter()
+                .filter(|path| path.len() > depth + 1 && path[depth].eq_ignore_ascii_case(&directory))
+                .cloned()
+                .collect::<Vec<_>>();
+            let before = out.len();
+            // a7 - v23 is unsigned: it wraps once the quirk has passed the limit.
+            walk(&nested, depth + 1, true, if max != 0 { max.wrapping_sub(count) } else { 0 }, out);
+            count += out.len() - before;
+        }
+    }
+    let paths = found
+        .iter()
+        .map(|path| path.split(['\\', '/']).map(str::to_owned).collect::<Vec<_>>())
+        .collect::<Vec<_>>();
+    let mut out = Vec::new();
+    walk(&paths, 0, recursive, max_count, &mut out);
+    out
+}
+
 fn engine_shift_jis_bytes(bytes: &[u8]) -> Cow<'_, [u8]> {
     let mut output: Option<Vec<u8>> = None;
     let mut index = 0;
@@ -13730,6 +13862,10 @@ mod tests {
         fn register_composite_archive(&mut self, name: &str, members: &[String]) {
             self.composites.push((name.into(), members.to_vec()));
         }
+
+        fn take_dropped_file(&mut self) -> Option<String> {
+            Some("C:\\drop\\a.png".into())
+        }
     }
 
     impl GraphApi for ResourceSearchApi {
@@ -13742,6 +13878,38 @@ mod tests {
         fn call_sound(&mut self, _call: &mut NativeCallFrame) -> super::VmResult<Value> {
             Ok(Value::None)
         }
+    }
+
+    #[test]
+    fn file_enumeration_follows_the_find_first_file_walk() {
+        let found = ["b.txt", "Sub\\z.txt", "a.txt", "Sub\\Deep\\y.txt", "Sub\\c.txt"]
+            .map(String::from);
+        assert_eq!(
+            super::target_file_enumeration_order(&found, true, 0),
+            ["a.txt", "b.txt", "Sub\\c.txt", "Sub\\z.txt", "Sub\\Deep\\y.txt"]
+        );
+        assert_eq!(super::target_file_enumeration_order(&found, false, 1), ["a.txt"]);
+        // a7 - v23 reaches zero for the subdirectory, which then has no limit.
+        assert_eq!(
+            super::target_file_enumeration_order(&found, true, 2),
+            ["a.txt", "b.txt", "Sub\\c.txt", "Sub\\z.txt", "Sub\\Deep\\y.txt"]
+        );
+        // Inside Sub the limit is 1; Deep then gets 1 - 1 = 0, unlimited again.
+        assert_eq!(
+            super::target_file_enumeration_order(&found, true, 3),
+            ["a.txt", "b.txt", "Sub\\c.txt", "Sub\\Deep\\y.txt"]
+        );
+    }
+
+    #[test]
+    fn enumerated_names_measure_pack_and_fail_on_overflow() {
+        let names = ["ab".to_string(), "c".to_string()];
+        let mut vm = Vm::new();
+        assert_eq!(vm.write_enumerated_names(0, 0, &names).unwrap(), Value::Int(5));
+        assert_eq!(vm.write_enumerated_names(0x100, 5, &names).unwrap(), Value::Int(2));
+        assert_eq!(&vm.memory[0x100..0x105], b"ab\0c\0");
+        assert_eq!(vm.write_enumerated_names(0x200, 4, &names).unwrap(), Value::Int(-1));
+        assert_eq!(&vm.memory[0x200..0x203], b"ab\0");
     }
 
     #[test]
@@ -13792,6 +13960,11 @@ mod tests {
         let members = vec!["data05001.arc".to_string(), "data03001.arc".to_string()];
         assert_eq!(api.composites, [("data05xxx.arc".to_string(), members.clone())]);
         assert_eq!(vm.composite_archives.get("data05xxx.arc"), Some(&members));
+
+        vm.stack.push(Value::Ptr(0x300));
+        vm.dispatch(&sys(0x6d), &mut api).unwrap();
+        assert_eq!(vm.stack.pop(), Some(Value::Int(1)));
+        assert_eq!(vm.read_c_string(0x300).unwrap(), "C:\\drop\\a.png");
 
         vm.stack.push(Value::Str("C:\\missing".into()));
         vm.dispatch(&sys(0x39), &mut api).unwrap();

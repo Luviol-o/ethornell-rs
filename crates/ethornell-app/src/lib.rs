@@ -19659,11 +19659,14 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
             .and_then(|name| name.to_str())
             .unwrap_or("*");
         let parent = pattern_path.parent().unwrap_or_else(|| Path::new(""));
-        let Some(root) = runtime_file_path_from_root(
-            &self.manager,
-            &self.native_root,
-            &parent.to_string_lossy(),
-        ) else {
+        // FindFirstFileA resolves a bare pattern such as "data0????.arc"
+        // against the working directory, the game root.
+        let root = if parent.as_os_str().is_empty() {
+            Some(self.native_root.clone())
+        } else {
+            runtime_file_path_from_root(&self.manager, &self.native_root, &parent.to_string_lossy())
+        };
+        let Some(root) = root else {
             return Vec::new();
         };
         let mut files = Vec::new();
@@ -21282,11 +21285,6 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
                 let arg1 = stack.pop();
                 tracing::info!(?arg1, ?arg2, ?arg3, "SysDATriple");
                 return Ok(ethornell_vm::Value::None);
-            }
-            (0x80, 0x25) => {
-                let args = pop_args(stack, 5);
-                tracing::info!(args = ?summarize_values(&args), "EnumerateFiles");
-                return Ok(ethornell_vm::Value::Int(0));
             }
             (0x80, 0x3f) => {
                 let args = pop_args(stack, 4);

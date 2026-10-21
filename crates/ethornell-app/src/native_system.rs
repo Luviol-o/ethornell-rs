@@ -84,11 +84,6 @@ impl RuntimeTraceApi {
                     .min(i32::MAX as usize) as i32;
                 ethornell_vm::Value::Int(count)
             }
-            // VM owns the destination buffer for 0x26.
-            0x26 => {
-                let _ = pop_args(stack, 4);
-                ethornell_vm::Value::Int(0)
-            }
             0x27 => {
                 let from = pop_string_value(stack).unwrap_or_default();
                 let to = pop_string_value(stack).unwrap_or_default();
@@ -182,11 +177,6 @@ impl RuntimeTraceApi {
                 self.dropped_files.clear();
                 ethornell_vm::Value::None
             }
-            // VM owns the output string.
-            0x6D => {
-                let _destination = stack.pop();
-                ethornell_vm::Value::Int(0)
-            }
             0x6E => {
                 self.native_system.raster_wait_enabled = pop_int_value(stack).unwrap_or_default();
                 ethornell_vm::Value::None
@@ -216,11 +206,14 @@ impl RuntimeTraceApi {
             .and_then(|name| name.to_str())
             .unwrap_or("*");
         let parent = pattern_path.parent().unwrap_or_else(|| Path::new(""));
-        let Some(root) = runtime_file_path_from_root(
-            &self.manager,
-            &self.native_root,
-            &parent.to_string_lossy(),
-        ) else {
+        // FindFirstFileA resolves a bare pattern such as "data0????.arc"
+        // against the working directory, the game root.
+        let root = if parent.as_os_str().is_empty() {
+            Some(self.native_root.clone())
+        } else {
+            runtime_file_path_from_root(&self.manager, &self.native_root, &parent.to_string_lossy())
+        };
+        let Some(root) = root else {
             return Vec::new();
         };
         let mut output = Vec::new();
