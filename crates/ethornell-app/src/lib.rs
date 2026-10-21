@@ -19843,6 +19843,25 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
         true
     }
 
+    fn set_loose_search_fallback(&mut self, enabled: bool) {
+        self.manager.set_loose_search_fallback(enabled);
+        self.file_exists_cache.clear();
+        self.file_size_cache.clear();
+    }
+
+    fn prepend_loose_search_path(&mut self, directory: &str) {
+        self.manager.prepend_loose_search_path(directory);
+        self.file_exists_cache.clear();
+        self.file_size_cache.clear();
+    }
+
+    fn register_composite_archive(&mut self, name: &str, members: &[String]) {
+        let registered = self.manager.register_composite_archive(name, members.to_vec());
+        tracing::info!(name, members = members.len(), registered, "RegisterCompositeArchive");
+        self.file_exists_cache.clear();
+        self.file_size_cache.clear();
+    }
+
     fn delete_file(&mut self, root: &str, file: &str) -> bool {
         if let Some(policy)=file_policy::active() {
             if !user_files::authorized_archive_arg(root) || root.replace('\\', "/") == "bgi-resource/" {self.host.unsupported("delete root");return false;}
@@ -21015,17 +21034,6 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
                 tracing::info!(args = ?summarize_values(&args), "ReadProfileString");
                 return Ok(ethornell_vm::Value::None);
             }
-            (0x80, 0x33) => {
-                let mode = stack.pop();
-                let key = stack.pop();
-                tracing::info!(?key, ?mode, "FreeProfileString");
-                return Ok(ethornell_vm::Value::None);
-            }
-            (0x80, 0x36) => {
-                let value = stack.pop();
-                tracing::info!(?value, "CommitResourceSearchPaths");
-                return Ok(ethornell_vm::Value::None);
-            }
             (0x80, 0x80) => {
                 let value = stack.pop();
                 tracing::info!(?value, "Sys80Triple");
@@ -21079,11 +21087,6 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
                 let arg2 = stack.pop();
                 let arg1 = stack.pop();
                 tracing::info!(?arg1, ?arg2, "SysD0Pair");
-                return Ok(ethornell_vm::Value::None);
-            }
-            (0x80, 0x37) => {
-                let path = pop_string_value(stack).unwrap_or_else(|| "<unknown>".into());
-                tracing::info!(path, "AddResourceSearchPath");
                 return Ok(ethornell_vm::Value::None);
             }
             (0x80, 0x52) => {

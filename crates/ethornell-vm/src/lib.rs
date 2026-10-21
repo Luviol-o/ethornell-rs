@@ -736,6 +736,15 @@ pub trait SysApi {
         false
     }
 
+    /// Sys80:36: whether loose-file reads fall back to the Sys80:37 paths.
+    fn set_loose_search_fallback(&mut self, _enabled: bool) {}
+
+    /// Sys80:37: prepend a loose-file fallback directory.
+    fn prepend_loose_search_path(&mut self, _directory: &str) {}
+
+    /// Sys80:38: register a DCArchiveComplex name over member archives.
+    fn register_composite_archive(&mut self, _name: &str, _members: &[String]) {}
+
     fn user_data_root(&mut self, _kind: i32) -> Option<String> {
         None
     }
@@ -10469,26 +10478,60 @@ impl Vm {
                 Value::Int(i32::from(self.free_heap(ptr)))
             }
             (0x80, 0x33) => {
-                let _mode = self.pop_value()?;
-                let _key = self.pop_value()?;
-                Value::None
+                // sub_489340 pops the file, then a nullable directory. Without
+                // one the file is taken below the primary root.
+                let file = self.pop_string_lossy()?;
+                let directory = match self.pop_value()? {
+                    Value::Int(0) | Value::Ptr(0) | Value::None => None,
+                    value => Some(self.value_as_native_string_lossy(value)?),
+                };
+                let root = directory
+                    .or_else(|| self.primary_resource_root.clone())
+                    .unwrap_or_default();
+                Value::Int(i32::from(api.delete_file(&root, &file)))
             }
             (0x80, 0x36) => {
-                let _enabled = self.pop_value()?;
+                // sub_4657A0 stores the raw value in dword_506BE0.
+                let enabled = self.pop_int()? != 0;
+                self.additional_resource_search_enabled = enabled;
+                api.set_loose_search_fallback(enabled);
                 Value::None
             }
             (0x80, 0x37) => {
-                let _path = self.pop_string_lossy()?;
+                // sub_4657F0 links the copy in front of dword_566648.
+                let path = self.pop_string_lossy()?;
+                self.additional_resource_paths.insert(0, path.clone());
+                api.prepend_loose_search_path(&path);
                 Value::None
             }
             (0x80, 0x38) => {
-                let _records = self.pop_value()?;
-                let _name = self.pop_value()?;
-                Value::Int(0)
+                // sub_489480 pops the NUL-terminated archive-name pointer list,
+                // then the composite name; sub_406BC0 refuses a name already
+                // in the archive chain and sub_445C50 an empty list.
+                let list = self.pop_ptr()?;
+                let name = self.pop_string_lossy()?;
+                let members = self.read_zero_terminated_string_pointer_list(list, 0x10000)?;
+                let key = name.to_ascii_lowercase();
+                let registered = !members.is_empty()
+                    && !self
+                        .composite_archives
+                        .keys()
+                        .any(|existing| existing.eq_ignore_ascii_case(&key));
+                if registered {
+                    api.register_composite_archive(&name, &members);
+                    self.composite_archives.insert(name, members);
+                }
+                Value::Int(i32::from(registered))
             }
             (0x80, 0x39) => {
-                let _path = self.pop_string_lossy()?;
-                Value::None
+                // sub_46B8F0 keeps an existing directory with a trailing
+                // backslash in byte_518988.
+                let path = self.pop_string_lossy()?;
+                let valid = api.directory_exists(&path);
+                if valid {
+                    self.validated_file_root = Some(ensure_trailing_separator(&path));
+                }
+                Value::Int(i32::from(valid))
             }
             (0x80, 0x3a) => {
                 let mode = self.pop_int()?;
@@ -13652,6 +13695,113 @@ mod tests {
         fn call_sound(&mut self, _call: &mut NativeCallFrame) -> super::VmResult<Value> {
             Ok(Value::None)
         }
+    }
+
+    #[derive(Default)]
+    struct ResourceSearchApi {
+        deleted: Vec<(String, String)>,
+        fallback: Option<bool>,
+        loose: Vec<String>,
+        composites: Vec<(String, Vec<String>)>,
+    }
+
+    impl SysApi for ResourceSearchApi {
+        fn call_sys(&mut self, _call: &mut NativeCallFrame) -> super::VmResult<Value> {
+            Ok(Value::None)
+        }
+
+        fn delete_file(&mut self, root: &str, file: &str) -> bool {
+            self.deleted.push((root.into(), file.into()));
+            true
+        }
+
+        fn directory_exists(&mut self, path: &str) -> bool {
+            path == "C:\\save"
+        }
+
+        fn set_loose_search_fallback(&mut self, enabled: bool) {
+            self.fallback = Some(enabled);
+        }
+
+        fn prepend_loose_search_path(&mut self, directory: &str) {
+            self.loose.push(directory.into());
+        }
+
+        fn register_composite_archive(&mut self, name: &str, members: &[String]) {
+            self.composites.push((name.into(), members.to_vec()));
+        }
+    }
+
+    impl GraphApi for ResourceSearchApi {
+        fn call_graph(&mut self, _call: &mut NativeCallFrame) -> super::VmResult<Value> {
+            Ok(Value::None)
+        }
+    }
+
+    impl SoundApi for ResourceSearchApi {
+        fn call_sound(&mut self, _call: &mut NativeCallFrame) -> super::VmResult<Value> {
+            Ok(Value::None)
+        }
+    }
+
+    #[test]
+    fn sys80_resource_search_selectors_follow_the_target_contracts() {
+        let sys = |id: u8| test_instruction(0, 0x80, "sys1", vec![0x80, id], Vec::new());
+        let mut vm = Vm::new();
+        let mut api = ResourceSearchApi::default();
+
+        vm.stack.extend([Value::Int(0), Value::Str("a.sav".into())]);
+        vm.dispatch(&sys(0x33), &mut api).unwrap();
+        vm.stack
+            .extend([Value::Str("C:\\save".into()), Value::Str("b.sav".into())]);
+        vm.dispatch(&sys(0x33), &mut api).unwrap();
+        assert_eq!(vm.stack, [Value::Int(1), Value::Int(1)]);
+        assert_eq!(
+            api.deleted,
+            [
+                (String::new(), "a.sav".into()),
+                ("C:\\save".into(), "b.sav".into())
+            ]
+        );
+        vm.stack.clear();
+
+        vm.stack.push(Value::Str("Graphic\\CVTD".into()));
+        vm.dispatch(&sys(0x37), &mut api).unwrap();
+        vm.stack.push(Value::Str("Script\\CVTD".into()));
+        vm.dispatch(&sys(0x37), &mut api).unwrap();
+        vm.stack.push(Value::Int(1));
+        vm.dispatch(&sys(0x36), &mut api).unwrap();
+        assert!(vm.stack.is_empty());
+        assert!(vm.additional_resource_search_enabled);
+        assert_eq!(vm.additional_resource_paths, ["Script\\CVTD", "Graphic\\CVTD"]);
+        assert_eq!(api.fallback, Some(true));
+
+        let names = [0x200u32, 0x210];
+        vm.write_c_string(0x200, "data05001.arc").unwrap();
+        vm.write_c_string(0x210, "data03001.arc").unwrap();
+        for (index, name) in names.into_iter().enumerate() {
+            vm.write_int(0x100 + index as u32 * 4, 2, name).unwrap();
+        }
+        vm.write_int(0x108, 2, 0).unwrap();
+        for expected in [1, 0] {
+            vm.stack
+                .extend([Value::Str("data05xxx.arc".into()), Value::Ptr(0x100)]);
+            vm.dispatch(&sys(0x38), &mut api).unwrap();
+            assert_eq!(vm.stack.pop(), Some(Value::Int(expected)));
+        }
+        let members = vec!["data05001.arc".to_string(), "data03001.arc".to_string()];
+        assert_eq!(api.composites, [("data05xxx.arc".to_string(), members.clone())]);
+        assert_eq!(vm.composite_archives.get("data05xxx.arc"), Some(&members));
+
+        vm.stack.push(Value::Str("C:\\missing".into()));
+        vm.dispatch(&sys(0x39), &mut api).unwrap();
+        vm.stack.push(Value::Str("C:\\save".into()));
+        vm.dispatch(&sys(0x39), &mut api).unwrap();
+        assert_eq!(vm.stack, [Value::Int(0), Value::Int(1)]);
+        assert_eq!(
+            vm.validated_file_root,
+            Some(super::ensure_trailing_separator("C:\\save"))
+        );
     }
 
     struct RootFileBytesApi {

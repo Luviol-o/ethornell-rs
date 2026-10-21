@@ -123,6 +123,16 @@ pub(crate) fn find_runtime_file_from_root(
     if let Some(loose) = resolve_existing_path_case_insensitive(&game_root, path) {
         return Some(loose);
     }
+    // sub_465E30: a loose file missing below the root is retried as
+    // `root + dir + "\\" + file` for each Sys80:37 directory, newest first.
+    for directory in manager.loose_search_paths() {
+        let directory = directory.replace('\\', std::path::MAIN_SEPARATOR_STR);
+        if let Some(loose) =
+            resolve_existing_path_case_insensitive(&game_root, &Path::new(&directory).join(path))
+        {
+            return Some(loose);
+        }
+    }
 
     manager.archives().archives.iter().find_map(|archive| {
         let relative = archive
