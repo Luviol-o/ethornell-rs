@@ -6753,11 +6753,11 @@ impl Vm {
     }
 
     fn resolve_target_code_offset(&self, target_offset: u32) -> Option<(usize, u32)> {
-        // Prefer the newest module when a freed region has been reused.
+        // The newest module covering the offset owns those code bytes. Freeing
+        // a module only rewinds the chain (sub_444D80), so its code stays
+        // callable until a later module is loaded over it; senmomo's ipl._bp
+        // calls environ._bp's entry again after FreeLastProgramModule.
         for index in (1..self.programs.len()).rev() {
-            if !self.program_active.get(index).copied().unwrap_or(false) {
-                continue;
-            }
             let base = self.program_code_bases.get(index).copied()?;
             let program = self.programs.get(index)?;
             let size = Self::program_target_code_size(program);
@@ -17667,6 +17667,26 @@ mod tests {
         assert_eq!(
             vm.resolve_indirect_call_target(0, expected_base),
             (1, Vm::program_parser_code_start(&vm.programs[1]))
+        );
+    }
+
+    #[test]
+    fn freed_module_code_stays_callable_until_a_later_module_reuses_it() {
+        let mut vm = Vm::new();
+        vm.start(&empty_loaded_program("root._bp".into()));
+        let environ = vm.append_target_loaded_program(empty_loaded_program("environ._bp".into()));
+        let entry = (1, Vm::program_parser_code_start(&vm.programs[1]));
+        vm.free_last_target_program(false);
+
+        assert_eq!(vm.resolve_indirect_call_target(0, environ), entry);
+
+        assert_eq!(
+            vm.append_target_loaded_program(empty_loaded_program("bitmap._bp".into())),
+            environ
+        );
+        assert_eq!(
+            vm.resolve_indirect_call_target(0, environ),
+            (2, Vm::program_parser_code_start(&vm.programs[2]))
         );
     }
 
