@@ -28,6 +28,13 @@ impl NativeSystemState {
 }
 
 impl RuntimeTraceApi {
+    /// Whether the file Sys80:3C waits for can be found (loose or archived).
+    pub(super) fn required_file_present(&self, file: &str) -> bool {
+        find_runtime_file_from_root(&self.manager, &self.native_root, "", file)
+            .is_some_and(|path| path.is_file())
+            || find_runtime_resource(&self.manager, "", file).is_some()
+    }
+
     pub(super) fn dispatch_native_system(
         &mut self,
         call: &mut ethornell_vm::NativeCallFrame,
@@ -117,10 +124,7 @@ impl RuntimeTraceApi {
                     .clone()
                     .unwrap_or_else(|| "Ethornell".to_string());
                 let found = loop {
-                    if find_runtime_file_from_root(&self.manager, &self.native_root, "", &file)
-                        .is_some_and(|path| path.is_file())
-                        || find_runtime_resource(&self.manager, "", &file).is_some()
-                    {
+                    if self.required_file_present(&file) {
                         tracing::info!(file, "Sys80_3C_RequiredResourceFound");
                         break true;
                     }

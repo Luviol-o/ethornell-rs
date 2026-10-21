@@ -19110,13 +19110,23 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
             }
             HostRequest::Native {opcode,args} => {
                 let (g,id)=(opcode.group,opcode.id);
-                if (g == 0x80 && matches!(id, 0x3B | 0x3C | 0x3F | 0xE0..=0xE3 | 0xF0..=0xFC)) || (g == 0x81 && matches!(id, 0x20 | 0x22..=0x26 | 0x38 | 0x3A | 0x3B)) || (g == 0xB0 && id == 0xF0) {
+                if g == 0x80 && id == 0x3C {
+                    // Args in push order: file, unused context, message. A
+                    // present file answers 1 without a prompt (app handler);
+                    // otherwise Retry rechecks in complete_request.
+                    let text = |index: usize| match args.get(index) {Some(Value::Str(s)) => s.clone(), _ => String::new()};
+                    let file = text(0);
+                    if self.required_file_present(&file) {return Ok(None);}
+                    if self.host.pending.len()>=16 {return Err(VmError::Runtime("host request queue limit".into()));}
+                    return Ok(Some(self.host.request_retry(text(2), file)));
+                }
+                if (g == 0x80 && matches!(id, 0x3B | 0x3F | 0xE0..=0xE3 | 0xF0..=0xFC)) || (g == 0x81 && matches!(id, 0x20 | 0x22..=0x26 | 0x38 | 0x3A | 0x3B)) || (g == 0xB0 && id == 0xF0) {
                     self.last_native_call=Some(*opcode);
                     return Err(VmError::Runtime("unsupported filesystem/platform/installer host capability".into()));
                 }
                 if g==0xB0 && matches!(id,0x80..=0x82) {
                     (args.iter().find_map(|v|if let Value::Str(s)=v {Some(s.clone())} else {None}).unwrap_or_default(),if id==0x80 {0} else {1})
-                } else if (g==0x80 && matches!(id,0x3C)) || (g==0xB0 && matches!(id,0x84..=0x8F|0xA0|0xA3)) {
+                } else if g==0xB0 && matches!(id,0x84..=0x8F) {
                     self.last_native_call=Some(*opcode);
                     return Err(VmError::Runtime("unsupported host dialog/input/media retry capability".into()));
                 } else {return Ok(None);}

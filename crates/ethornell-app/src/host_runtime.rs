@@ -71,6 +71,8 @@ pub(super) struct HostServices {
     pub(super) pending: BTreeMap<u64, usize>,
     /// Pending UserB0 input dialogs, answered with a JSON response.
     pub(super) dialogs: BTreeMap<u64, ethornell_vm::UserDialogRequest>,
+    /// Pending Sys80:3C prompts: the message and the file they wait for.
+    retries: BTreeMap<u64, (String, String)>,
     fatal: Option<String>,
     pub(super) input_trace: bool,
     input_trace_count: u32,
@@ -109,6 +111,14 @@ impl HostServices {
             text: super::dialog_protocol::dialog_kind(&request).to_string(),
         });
         self.dialogs.insert(id, request);
+        id
+    }
+    /// Sys80:3C's Retry/Quit prompt for a missing required file: a kind-2
+    /// confirmation (1 = Retry). Retry rechecks the file and, if it is still
+    /// missing, asks again under the same id.
+    pub(super) fn request_retry(&mut self, message: String, file: String) -> u64 {
+        let id = self.request(message.clone(), 1);
+        self.retries.insert(id, (message, file));
         id
     }
     fn next_request_id() -> u64 {
@@ -398,6 +408,16 @@ impl HostRuntime {
             6 => Some(RuntimeInputEvent::MouseWheel { delta_y: value }),
             _ => return Err(EthornellError::Other("unknown input kind".into())),
         };
+        // The engine-drawn UserB0:A0 dialog takes its own clicks, as on desktop.
+        let event = event.filter(|event| match *event {
+            RuntimeInputEvent::MousePress { x, y } => {
+                !self.runtime.api.handle_user_modeless_pointer(x, y, true)
+            }
+            RuntimeInputEvent::MouseRelease { x, y } => {
+                !self.runtime.api.handle_user_modeless_pointer(x, y, false)
+            }
+            _ => true,
+        });
         // Deliver edges in FIFO call order, including down/up in one frame.
         if let Some(event) = event {
             if self.input_queue.len() >= 4096 {
@@ -537,6 +557,8 @@ impl HostRuntime {
         self.closed = true;
         self.runtime.vm.cancel_host_requests();
         self.runtime.api.host.pending.clear();
+        self.runtime.api.host.dialogs.clear();
+        self.runtime.api.host.retries.clear();
         self.runtime.api.host.events.push_back(HostEvent {
             kind: 3,
             request_id: 0,
@@ -606,6 +628,20 @@ impl HostRuntime {
             .pending
             .get(&id)
             .ok_or_else(|| EthornellError::Other("unknown/stale request".into()))?;
+        let mut result = result;
+        if let Some((message, file)) = self.runtime.api.host.retries.get(&id).cloned() {
+            if result != 0 && !self.runtime.api.required_file_present(&file) {
+                self.runtime.api.host.events.push_back(HostEvent {
+                    kind: 2,
+                    request_id: id,
+                    code: 1,
+                    text: message,
+                });
+                return Ok(());
+            }
+            result = i32::from(result != 0);
+            self.runtime.api.host.retries.remove(&id);
+        }
         self.runtime
             .vm
             .complete_host_request(
@@ -831,7 +867,6 @@ mod tests {
         }
         for (group, id) in [
             (0x80, 0x3B),
-            (0x80, 0x3C),
             (0x80, 0xE3),
             (0x80, 0xF2),
             (0x81, 0x38),
@@ -858,6 +893,45 @@ mod tests {
                 "normalized SJIS string"
             );
         }
+    }
+    #[test]
+    #[cfg(unix)]
+    fn required_file_prompt_rechecks_on_retry_and_skips_when_present() {
+        let (root, mut host) = minimal_host("retry");
+        let program = ethornell_script::parse_bp_program(Some("retry".into()), &[0x80, 0x3C]);
+        let run = |host: &mut HostRuntime, file: &str| {
+            host.runtime.vm.start(&program);
+            host.runtime.vm.stack = vec![
+                Value::Str(file.into()),
+                Value::Str("unused".into()),
+                Value::Str("insert disc".into()),
+            ];
+            host.runtime.vm.run_loaded(&mut host.runtime.api, &VmRunOptions::default())
+        };
+        while host.poll_event().is_some() {}
+        assert_ne!(run(&mut host, "system.arc").stop_reason, VmStopReason::WaitingForHost);
+        let event = host.poll_event();
+        assert!(event.is_none(), "{event:?}");
+        assert_eq!(host.runtime.vm.stack, vec![Value::Int(1)]);
+
+        assert_eq!(run(&mut host, "late.dat").stop_reason, VmStopReason::WaitingForHost);
+        let event = host.poll_event().unwrap();
+        assert_eq!((event.kind, event.code, event.text.as_str()), (2, 1, "insert disc"));
+        host.complete_request(event.request_id, 1).unwrap();
+        let again = host.poll_event().unwrap();
+        assert_eq!((again.kind, again.request_id), (2, event.request_id));
+        std::fs::write(root.join("resource/late.dat"), b"x").unwrap();
+        host.complete_request(event.request_id, 1).unwrap();
+        host.runtime.vm.run_loaded(&mut host.runtime.api, &VmRunOptions::default());
+        assert_eq!(host.runtime.vm.stack, vec![Value::Int(1)]);
+
+        assert_eq!(run(&mut host, "never.dat").stop_reason, VmStopReason::WaitingForHost);
+        let event = host.poll_event().unwrap();
+        host.complete_request(event.request_id, 0).unwrap();
+        host.runtime.vm.run_loaded(&mut host.runtime.api, &VmRunOptions::default());
+        assert_eq!(host.runtime.vm.stack, vec![Value::Int(0)]);
+        drop(host);
+        std::fs::remove_dir_all(root).unwrap();
     }
     #[cfg(unix)]
     fn minimal_host(label: &str) -> (PathBuf, HostRuntime) {
