@@ -642,7 +642,6 @@ fn transfer_async_shared_state(source: &mut Vm, destination: &mut Vm) {
         &mut source.string_hash_tables,
         &mut destination.string_hash_tables,
     );
-    std::mem::swap(&mut source.resource_names, &mut destination.resource_names);
     std::mem::swap(
         &mut source.mediation_programs,
         &mut destination.mediation_programs,
@@ -860,20 +859,20 @@ mod tests {
     #[test]
     fn async_state_transfer_moves_system80_global_names_and_record_handle_counter() {
         let mut root = Vm::new();
-        root.resource_names.push("BG0001".into());
+        root.set_resource_names(vec!["BG0001".into()]);
         root.next_indexed_record_handle = 17;
 
         let mut task = Vm::new();
         transfer_async_shared_state(&mut root, &mut task);
-        assert_eq!(task.resource_names, vec!["BG0001".to_string()]);
+        assert_eq!(task.resource_names(), ["BG0001".to_string()]);
         assert_eq!(task.next_indexed_record_handle, 17);
 
-        task.resource_names.push("face".into());
+        task.set_resource_names(vec!["BG0001".into(), "face".into()]);
         task.next_indexed_record_handle = 18;
         transfer_async_shared_state(&mut task, &mut root);
         assert_eq!(
-            root.resource_names,
-            vec!["BG0001".to_string(), "face".to_string()]
+            root.resource_names(),
+            ["BG0001".to_string(), "face".to_string()]
         );
         assert_eq!(root.next_indexed_record_handle, 18);
     }

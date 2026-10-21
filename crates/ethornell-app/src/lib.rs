@@ -20221,6 +20221,10 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
         self.disk_file_exists(path) || self.directory_exists(path)
     }
 
+    fn message_box(&mut self, caption: &str, text: &str) {
+        host_dialog::show_message(host_dialog::MessageDialogKind::Information, caption, text, true);
+    }
+
     fn retry_or_quit_prompt(&mut self, caption: &str, text: &str) -> bool {
         retry_or_quit_prompt(caption, text)
     }
@@ -20632,87 +20636,22 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
         &mut self,
         working_directory: &str,
         command_line: &str,
-        error_message: &str,
         restore_parent_window: bool,
         wait_for_uninstaller: bool,
     ) -> bool {
-        // A host app cannot run the game's Windows helpers (senmomo starts
-        // ISESUforSHTK.exe at boot): report the launch as failed, as desktop
-        // does when the program cannot start, instead of ending the session.
-        if file_policy::restricted() { tracing::info!(command_line, "LaunchProcess unavailable in host mode"); return false; }
-        let mut arguments = native_system::split_native_command_line(command_line);
-        if arguments.is_empty() {
-            tracing::warn!(
-                command_line,
-                error_message,
-                "LaunchProcess empty command line"
-            );
-            return false;
-        }
-        let executable = arguments.remove(0);
-        let working_path = if working_directory.trim().is_empty() {
-            self.native_root.clone()
-        } else {
-            runtime_file_path_from_root(&self.manager, &self.native_root, working_directory)
-                .unwrap_or_else(|| PathBuf::from(working_directory))
-        };
-        let executable_path = {
-            let path = PathBuf::from(&executable);
-            if path.is_absolute() {
-                path
-            } else {
-                let candidate = working_path.join(&path);
-                if candidate.exists() { candidate } else { path }
-            }
-        };
-        if host_dialog::host_dialogs_suppressed() {
-            return false;
-        }
-        let mut command = std::process::Command::new(&executable_path);
-        command.args(&arguments).current_dir(&working_path);
-        let result = command.spawn().and_then(|mut child| child.wait());
-        let ok = result.is_ok();
-        match result {
-            Ok(status) => tracing::info!(
-                executable = %executable_path.display(),
-                ?arguments,
-                working_directory = %working_path.display(),
-                ?status,
-                restore_parent_window,
-                wait_for_uninstaller,
-                uninstaller_mutex = %self.native_system.uninstaller_mutex_name,
-                "LaunchProcess"
-            ),
-            Err(err) => tracing::warn!(
-                executable = %executable_path.display(),
-                ?arguments,
-                working_directory = %working_path.display(),
-                %err,
-                error_message,
-                "LaunchProcess failed"
-            ),
-        }
-        ok
+        self.spawn_native_command(working_directory, command_line, restore_parent_window, wait_for_uninstaller, true)
     }
 
-    fn schedule_restart(
-        &mut self,
-        working_directory: &str,
-        command_line: &str,
-        error_message: &str,
-    ) {
+    fn schedule_restart(&mut self, working_directory: &str, command_line: &str, error_message: Option<&str>) {
         if file_policy::restricted() { self.host.unsupported("process restart"); return; }
-        self.native_system.restart_working_directory = working_directory.to_owned();
-        self.native_system.restart_command_line = command_line.to_owned();
-        self.native_system.restart_error_message = error_message.to_owned();
-        self.quit_requested = true;
-        tracing::info!(
-            working_directory,
-            command_line,
-            error_message,
-            "ScheduleRestart"
-        );
+        self.native_system.restart = Some((
+            working_directory.to_owned(),
+            command_line.to_owned(),
+            error_message.map(str::to_owned),
+        ));
+        tracing::info!(working_directory, command_line, error_message, "ScheduleRestart");
     }
+
 
     fn shell_open(&mut self, target: &str) -> bool {
         if file_policy::restricted() { tracing::info!(target, "ShellOpen unavailable in host mode"); return false; }
@@ -27109,6 +27048,9 @@ fn run_headless(
                 tracing::info!(frame, "headless quit event received");
                 break;
             }
+            if runtime.vm.halted && runtime.api.native_system.restart.is_some() {
+                runtime.api.run_scheduled_restart();
+            }
             if runtime.vm.halted {
                 tracing::info!(
                     frame,
@@ -27313,4 +27255,95 @@ fn removable_drive_roots() -> Vec<String> {
             if root.ends_with(['/', '\\']) { root } else { format!("{root}{}", std::path::MAIN_SEPARATOR) }
         })
         .collect()
+}
+
+impl RuntimeTraceApi {
+    /// CreateProcessA for sub_472A10: the first token of the command line
+    /// is the program (relative to the current directory), the rest are its
+    /// arguments; `wait` waits for the child.
+    fn spawn_native_command(
+        &mut self,
+        working_directory: &str,
+        command_line: &str,
+        restore_parent_window: bool,
+        wait_for_uninstaller: bool,
+        wait: bool,
+    ) -> bool {
+        let error_message = "";
+        // A host app cannot run the game's Windows helpers (senmomo starts
+        // ISESUforSHTK.exe at boot): report the launch as failed, as desktop
+        // does when the program cannot start, instead of ending the session.
+        if file_policy::restricted() { tracing::info!(command_line, "LaunchProcess unavailable in host mode"); return false; }
+        let mut arguments = native_system::split_native_command_line(command_line);
+        if arguments.is_empty() {
+            tracing::warn!(
+                command_line,
+                error_message,
+                "LaunchProcess empty command line"
+            );
+            return false;
+        }
+        let executable = arguments.remove(0);
+        let working_path = if working_directory.trim().is_empty() {
+            self.native_root.clone()
+        } else {
+            runtime_file_path_from_root(&self.manager, &self.native_root, working_directory)
+                .unwrap_or_else(|| PathBuf::from(working_directory))
+        };
+        let executable_path = {
+            let path = PathBuf::from(&executable);
+            if path.is_absolute() {
+                path
+            } else {
+                let candidate = working_path.join(&path);
+                if candidate.exists() { candidate } else { path }
+            }
+        };
+        if host_dialog::host_dialogs_suppressed() {
+            return false;
+        }
+        let mut command = std::process::Command::new(&executable_path);
+        command.args(&arguments).current_dir(&working_path);
+        if !wait {
+            return command.spawn().is_ok();
+        }
+        let result = command.spawn().and_then(|mut child| child.wait());
+        let ok = result.is_ok();
+        match result {
+            Ok(status) => tracing::info!(
+                executable = %executable_path.display(),
+                ?arguments,
+                working_directory = %working_path.display(),
+                ?status,
+                restore_parent_window,
+                wait_for_uninstaller,
+                uninstaller_mutex = %self.native_system.uninstaller_mutex_name,
+                "LaunchProcess"
+            ),
+            Err(err) => tracing::warn!(
+                executable = %executable_path.display(),
+                ?arguments,
+                working_directory = %working_path.display(),
+                %err,
+                error_message,
+                "LaunchProcess failed"
+            ),
+        }
+        ok
+    }
+}
+
+impl RuntimeTraceApi {
+    /// WinMain after the main loop: the Sys80:E1 command runs once without
+    /// waiting (sub_472A10 with no retry); a failure shows its message.
+    pub(crate) fn run_scheduled_restart(&mut self) {
+        let Some((directory, command_line, error_message)) = self.native_system.restart.take() else {
+            return;
+        };
+        if !self.spawn_native_command(&directory, &command_line, false, false, false)
+            && let Some(message) = error_message
+        {
+            host_dialog::show_message(host_dialog::MessageDialogKind::Information, "", &message, true);
+        }
+    }
 }

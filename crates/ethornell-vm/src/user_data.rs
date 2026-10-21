@@ -259,7 +259,7 @@ impl Vm {
     }
 
     fn serialize_global_data(&self) -> Vec<u8> {
-        let names = self.resource_names.clone();
+        let names = self.resource_names().to_vec();
         let names_size = 4usize + names.iter().map(|name| sjis_len(name) + 1).sum::<usize>();
         let read_flags_size = 4usize
             + self
@@ -331,7 +331,7 @@ impl Vm {
         }
         self.install_global_config(config);
         self.install_global_user_data(data);
-        self.resource_names = names;
+        self.set_resource_names(names);
         self.read_flags = flags;
         Some((x, y, 0))
     }
@@ -368,7 +368,7 @@ impl Vm {
                 names.push(name);
             }
         }
-        self.resource_names = names;
+        self.set_resource_names(names);
         self.read_flags.clear();
         let mut total = 0usize;
         for index in 0..2048 {
@@ -844,7 +844,7 @@ use std::collections::BTreeMap;
         let mut vm = Vm::new();
         vm.global_config[134] = 42;
         vm.global_user_data[123..127].copy_from_slice(&[1, 2, 3, 4]);
-        vm.resource_names = vec!["BG0001".into(), "face".into()];
+        vm.set_resource_names(vec!["BG0001".into(), "face".into()]);
         vm.read_flags
             .insert("main".into(), crate::ReadFlagBits::new(17));
         vm.read_flags.get_mut("main").unwrap().set(16, true);
@@ -856,7 +856,7 @@ use std::collections::BTreeMap;
         assert_eq!(restored.memory[134], 42);
         assert_eq!(&restored.global_user_data[123..127], &[1, 2, 3, 4]);
         assert_eq!(
-            restored.resource_names,
+            restored.resource_names().to_vec(),
             vec!["BG0001".to_string(), "face".to_string()]
         );
         assert_eq!(
@@ -904,7 +904,7 @@ use std::collections::BTreeMap;
         assert_eq!(vm.memory[5], 7);
         assert_eq!(vm.global_user_data[9], 8);
         assert_eq!(vm.global_user_data[0x50000], 0);
-        assert_eq!(vm.resource_names, vec!["BG0001".to_string()]);
+        assert_eq!(vm.resource_names(), ["BG0001".to_string()]);
         assert_eq!(vm.read_flags.get("main").unwrap().contains(2), Some(true));
 
         raw.push(0);

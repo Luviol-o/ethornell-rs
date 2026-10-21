@@ -208,4 +208,22 @@ failure.
   zero-size/count C4 produce a 32-byte empty stream. C5 decodes into a host
   buffer (no VM heap allocation). CF's SDC test includes the NUL.
 
-Next: 80:D0 onward in table order (`python3 src/tools/audit_mark.py --todo`).
+80:D0..FE done (2026-10-22); group 0x80 has no todo left. Fixes:
+
+* 80:D2 records live in host memory with their shadow values (no VM heap
+  allocations, which shifted script heap addresses).
+* Namespace 0x80000000 of the string tables is the resource-name list of
+  80:84/85 and BGI.gdb (`resource_names()`), so D9..DE see it and D8 keeps it.
+* 80:E0/E2 port sub_472A10's control flow into the VM
+  (`launch_native_process`): "dir\\cmd" or primary root + cmd; no message ->
+  0, E2 one OK box, E0 OK|CANCEL + quit question. senmomo's boot call
+  (ISESUforSHTK.exe, null message) just returns 0 on macOS.
+* 80:E1's command runs at shutdown (WinMain), once, without waiting.
+* 80:E9 hashes primary root + name unless absolute.
+* 80:F0 argument roles fixed (subfolder string, initial vs output folder).
+* 80:FA copies the file even when it does not end in "\\" NUL.
+
+Deferred in 0x80: 20/21, 40/41/44, 70/71 (VM value/memory model), 3A and
+F0..FC (ADR 0004 emulation), 60 (graph reset on a size change, with 90/91).
+
+Next: group 0x81 in table order (`python3 src/tools/audit_mark.py --todo`).

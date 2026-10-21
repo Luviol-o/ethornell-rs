@@ -322,11 +322,14 @@ pub struct VmRunReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Sys80:F0 (sub_472510, dialog 108/122): install-folder dialog with the
+/// folder field, Browse (which appends `default_subfolder` to the chosen
+/// folder) and two check boxes.
 pub struct SystemInputDialogRequest {
     pub initial_text: String,
     pub option_value1: i32,
     pub option_value2: i32,
-    pub mode: i32,
+    pub default_subfolder: String,
     pub caption: String,
 }
 
@@ -949,25 +952,31 @@ pub trait SysApi {
 
     fn set_input_latched_state(&mut self, _value: i32) {}
 
-    /// Launches one target command line. Sys80:E0/E2 always wait for the child;
-    /// `wait_for_uninstaller` additionally waits for the target uninstaller mutex.
+    /// One CreateProcessA attempt of sub_472A10 (no application name, so the
+    /// command line names the program) with `working_directory` as current
+    /// directory; on success it waits for the child, hiding the window
+    /// meanwhile when `hide_window` and, with `wait_for_uninstaller`, for the
+    /// uninstaller mutex. False when the program could not be started.
     fn launch_process(
         &mut self,
         _working_directory: &str,
         _command_line: &str,
-        _error_message: &str,
-        _restore_parent_window: bool,
+        _hide_window: bool,
         _wait_for_uninstaller: bool,
     ) -> bool {
         false
     }
 
-    /// Stores the command executed by WinMain after the current engine window exits.
+    /// MessageBox(text, caption, MB_OK | MB_ICONINFORMATION).
+    fn message_box(&mut self, _caption: &str, _text: &str) {}
+
+    /// Sys80:E1: the command WinMain runs (once, without waiting) after the
+    /// main loop ends; `command_line` is already resolved like sub_472A10.
     fn schedule_restart(
         &mut self,
         _working_directory: &str,
         _command_line: &str,
-        _error_message: &str,
+        _error_message: Option<&str>,
     ) {
     }
 
@@ -2291,7 +2300,6 @@ pub struct Vm {
     /// The native table assigns each distinct name a stable zero-based index.
     /// Keep it separate from the indexed string namespaces used by 0xDA..0xDD;
     /// the target executable stores these in different native tables.
-    resource_names: Vec<String>,
     /// Target dword_506BE0 and dword_566630 resource-search globals.
     additional_resource_search_enabled: bool,
     additional_resource_paths: Vec<String>,
@@ -8554,10 +8562,74 @@ impl Vm {
     /// internal and is not exposed to BP code.
     ///
     /// BP push order: `[name]`; native pop order: `name`.
+    /// A string operand that may be a null pointer.
+    fn pop_nullable_string(&mut self) -> VmResult<Option<String>> {
+        match self.pop_value()? {
+            Value::Int(0) | Value::Ptr(0) | Value::None => Ok(None),
+            value => self.value_as_native_string_lossy(value).map(Some),
+        }
+    }
+
+    /// sub_472A10: the program is "dir\\cmd", or primary root + cmd without
+    /// a directory (which is then also the current directory). On failure:
+    /// no message -> 0; without retry MessageBox(OK) -> 0; with retry
+    /// OK|CANCEL and the quit question, where only a confirmed quit -> 0.
+    #[allow(clippy::too_many_arguments)]
+    fn launch_native_process<A: SysApi>(
+        &mut self,
+        api: &mut A,
+        directory: Option<String>,
+        command: &str,
+        error_message: Option<String>,
+        hide_window: bool,
+        retry: bool,
+        wait_for_uninstaller: bool,
+    ) -> i32 {
+        let (command_line, current_directory) = match directory {
+            Some(directory) => (format!("{directory}\\{command}"), directory),
+            None => {
+                let root = self.resource_primary_root(api);
+                (format!("{root}{command}"), root)
+            }
+        };
+        loop {
+            if api.launch_process(&current_directory, &command_line, hide_window, wait_for_uninstaller) {
+                return 1;
+            }
+            let Some(message) = error_message.as_deref() else {
+                return 0;
+            };
+            if !retry {
+                api.message_box("", message);
+                return 0;
+            }
+            if !api.retry_or_quit_prompt("", message) {
+                return 0;
+            }
+        }
+    }
+
+    /// Namespace 0x80000000 of the string tables (dword_503E00): the
+    /// resource names of Sys80:84/85, saved in BGI.gdb, and spared by 80:D8.
+    pub(crate) fn resource_names(&self) -> &[String] {
+        self.string_hash_tables.get(&RESOURCE_NAMESPACE).map_or(&[], Vec::as_slice)
+    }
+
+    /// sub_496070(0x80000000, ..): a zero count removes the namespace.
+    pub(crate) fn set_resource_names(&mut self, names: Vec<String>) {
+        if names.is_empty() {
+            self.string_hash_tables.remove(&RESOURCE_NAMESPACE);
+        } else {
+            self.string_hash_tables.insert(RESOURCE_NAMESPACE, names);
+        }
+    }
+
     fn sys80_84_intern_resource_name(&mut self) -> VmResult<Value> {
         let name = self.pop_string_lossy()?;
-        if !self.resource_names.iter().any(|entry| entry == &name) {
-            self.resource_names.push(name);
+        // sub_496200 on namespace 0x80000000 (created on first use).
+        let names = self.string_hash_tables.entry(RESOURCE_NAMESPACE).or_default();
+        if !names.iter().any(|entry| entry == &name) {
+            names.push(name);
         }
         // sub_46B430 always returns one after interning; the stable index is
         // internal to the native table and is not exposed to BP code.
@@ -8574,7 +8646,7 @@ impl Vm {
     fn sys80_85_resource_name_exists(&mut self) -> VmResult<Value> {
         let name = self.pop_string_lossy()?;
         Ok(Value::Int(i32::from(
-            self.resource_names.iter().any(|entry| entry == &name),
+            self.resource_names().iter().any(|entry| entry == &name),
         )))
     }
 
@@ -10729,17 +10801,21 @@ impl Vm {
                 Value::Int(self.validate_config_slot(api, slot))
             }
             (0x80, 0xe0) => {
-                let restore_parent_window = self.pop_int()? != 0;
-                let error_message = self.pop_string_lossy()?;
+                // sub_48B470: pops hide-window flag, error message, command
+                // line, directory; retries through OK|CANCEL.
+                let hide_window = self.pop_int()? != 0;
+                let error_message = self.pop_nullable_string()?;
                 let command_line = self.pop_string_lossy()?;
-                let working_directory = self.pop_string_lossy()?;
-                Value::Int(i32::from(api.launch_process(
-                    &working_directory,
+                let working_directory = self.pop_nullable_string()?;
+                Value::Int(self.launch_native_process(
+                    api,
+                    working_directory,
                     &command_line,
-                    &error_message,
-                    restore_parent_window,
+                    error_message,
+                    hide_window,
+                    true,
                     false,
-                )))
+                ))
             }
             (0x80, 0xe1) => {
                 // The target distinguishes a null command-line pointer from a
@@ -10751,35 +10827,45 @@ impl Vm {
                 let working_directory_ptr = self.pop_ptr()?;
                 if command_line_ptr == 0 {
                     return Err(VmError::Runtime(
-                        "Sys80:E1 restart command-line pointer is null".into(),
+                        "外部プログラムのファイル名にNULLポインタが指定されました".into(),
                     ));
                 }
                 let error_message = if error_message_ptr == 0 {
-                    String::new()
+                    None
                 } else {
-                    self.read_c_string(error_message_ptr)?
+                    Some(self.read_c_string(error_message_ptr)?)
                 };
-                let command_line = self.read_c_string(command_line_ptr)?;
-                let working_directory = if working_directory_ptr == 0 {
-                    String::new()
+                let command = self.read_c_string(command_line_ptr)?;
+                // sub_48B4D0 keeps the strings; WinMain resolves them with
+                // sub_472A10 like Sys80:E0 (the roots do not change after
+                // status 6).
+                let (command_line, working_directory) = if working_directory_ptr == 0 {
+                    let root = self.resource_primary_root(api);
+                    (format!("{root}{command}"), root)
                 } else {
-                    self.read_c_string(working_directory_ptr)?
+                    let directory = self.read_c_string(working_directory_ptr)?;
+                    (format!("{directory}\\{command}"), directory)
                 };
-                api.schedule_restart(&working_directory, &command_line, &error_message);
+                api.schedule_restart(&working_directory, &command_line, error_message.as_deref());
                 self.scheduler_signal = Some(SchedulerSignal::TerminateInterpreter);
                 Value::None
             }
             (0x80, 0xe2) => {
-                let error_message = self.pop_string_lossy()?;
+                // sub_48B5D0: pops error message, command line, directory;
+                // hides the window, no retry, then waits for the
+                // uninstaller mutex.
+                let error_message = self.pop_nullable_string()?;
                 let command_line = self.pop_string_lossy()?;
-                let working_directory = self.pop_string_lossy()?;
-                Value::Int(i32::from(api.launch_process(
-                    &working_directory,
+                let working_directory = self.pop_nullable_string()?;
+                Value::Int(self.launch_native_process(
+                    api,
+                    working_directory,
                     &command_line,
-                    &error_message,
+                    error_message,
                     true,
+                    false,
                     true,
-                )))
+                ))
             }
             (0x80, 0xe3) => {
                 let target = self.pop_string_lossy()?;
@@ -10791,8 +10877,15 @@ impl Vm {
                 Value::None
             }
             (0x80, 0xe9) => {
-                let path = self.pop_string_lossy()?;
+                // sub_48B680: an absolute name as is, else primary root +
+                // name; the raw file (CFileDX) is hashed by sub_401900.
+                let file = self.pop_string_lossy()?;
                 let output = self.pop_ptr()?;
+                let path = if resource_io::is_absolute_resource_path(&file) {
+                    file
+                } else {
+                    format!("{}{file}", self.resource_primary_root(api))
+                };
                 let Some(bytes) = api.read_user_file_bytes(&path) else {
                     return Ok(Some(Value::Int(0)));
                 };
@@ -10818,19 +10911,23 @@ impl Vm {
                 Value::None
             }
             (0x80, 0xf0) => {
-                let caption = self.pop_string_lossy()?;
-                let mode = self.pop_int()?;
+                // sub_48B740 pops: description (nullable, control 1004),
+                // default subfolder, check box 1003 and 1002 states, the
+                // initial folder, the 1003 and 1002 outputs, and the output
+                // folder buffer; outputs are written only on OK.
+                let caption = self.pop_nullable_string()?.unwrap_or_default();
+                let default_subfolder = self.pop_string_lossy()?;
                 let option_value2 = self.pop_int()?;
                 let option_value1 = self.pop_int()?;
-                let output_text = self.pop_ptr()?;
+                let initial_text = self.pop_string_lossy()?;
                 let output_value2 = self.pop_ptr()?;
                 let output_value1 = self.pop_ptr()?;
-                let initial_text = self.pop_string_lossy()?;
+                let output_text = self.pop_ptr()?;
                 let request = SystemInputDialogRequest {
                     initial_text,
                     option_value1,
                     option_value2,
-                    mode,
+                    default_subfolder,
                     caption,
                 };
                 if let Some(response) = api.show_system_input_dialog(&request) {
@@ -10991,22 +11088,24 @@ impl Vm {
                 let Some(windows_directory) = api.special_folder_path(0) else {
                     return Ok(Some(Value::Int(0)));
                 };
-                let root = windows_directory.trim_end_matches(|ch| ch == '\\' || ch == '/');
-                let path = format!("{root}\\{file_name}");
+                // sub_472000: "%s\\%s" of the Windows directory and the name;
+                // the whole file is read into the output, and only a file
+                // ending in "\\" NUL has that backslash cleared and gives 1.
+                let path = format!("{windows_directory}\\{file_name}");
                 let Some(mut bytes) = api.read_user_file_bytes(&path) else {
                     return Ok(Some(Value::Int(0)));
                 };
-                if bytes.len() < 2 || bytes[bytes.len() - 2] != b'\\' || bytes[bytes.len() - 1] != 0
-                {
-                    Value::Int(0)
-                } else {
+                let terminated = bytes.len() >= 2
+                    && bytes[bytes.len() - 2] == b'\\'
+                    && bytes[bytes.len() - 1] == 0;
+                if terminated {
                     let trailing_slash = bytes.len() - 2;
                     bytes[trailing_slash] = 0;
-                    let range = self.resolve_write_range(output, bytes.len())?;
-                    self.memory[range].copy_from_slice(&bytes);
-                    self.clear_shadow_values(output, bytes.len());
-                    Value::Int(1)
                 }
+                let range = self.resolve_write_range(output, bytes.len())?;
+                self.memory[range].copy_from_slice(&bytes);
+                self.clear_shadow_values(output, bytes.len());
+                Value::Int(i32::from(terminated))
             }
             (0x80, 0xfb) => {
                 let output = self.pop_ptr()?;
@@ -18859,3 +18958,6 @@ mod tests {
         );
     }
 }
+
+/// The protected string namespace (Sys80:D8 keeps it).
+pub(crate) const RESOURCE_NAMESPACE: i32 = i32::MIN;

@@ -639,8 +639,9 @@ impl ApplicationHandler for WindowApp {
                         target.exit();
                         return;
                     }
-                    if runtime.api.quit_requested {
+                    if runtime.api.quit_requested || runtime.api.native_system.restart.is_some() && runtime.vm.halted {
                         tracing::info!("runtime quit event received");
+                        runtime.api.run_scheduled_restart();
                         target.exit();
                         return;
                     }

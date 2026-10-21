@@ -106,6 +106,16 @@ Next:
    2F), drives (81:36/37), shortcuts, dialogs returning Windows paths.
 5. Fold `file_policy` aliases into the mount table.
 
+Installer block (Sys80:F0..FC, deferred in 0003 until this lands; their pop
+orders are checked): F0 is dialog 108/122 (folder field, Browse appending the
+default subfolder, two check boxes, folder validation sub_46FFB0/sub_4731A0)
+and F1 the installer message dialog — both need a faithful host dialog, not
+the current generic prompts; F2/F3 install files, the uninstall list,
+shortcuts and the registry entry; F4/F5 maintain the uninstall list; F6/F7
+shortcuts (.lnk in the emulated Start Menu/Desktop); F8/F9 the registry key
+of the installed folder (a small emulated registry in the prefix); FA/FB the
+Windows directory (C:\Windows mount); FC the file association.
+
 Related Win32 emulation found by the 0003 audit (same principle, not
 filesystem): Sys80:54 waits for a Windows message number and receives
 (wParam, lParam) from the WndProc (sub_499930 -> sub_49AAE0 signals every

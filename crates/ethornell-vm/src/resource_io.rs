@@ -15,7 +15,7 @@ const ARCHIVE_TOO_BIG: u32 = 0x8000_0060;
 const RESOURCE_SIZE_LIMIT: usize = 0x0400_0000;
 
 /// sub_464EE0.
-fn is_absolute_resource_path(path: &str) -> bool {
+pub(crate) fn is_absolute_resource_path(path: &str) -> bool {
     let bytes = path.as_bytes();
     bytes.first() == Some(&b'\\') || bytes.get(1) == Some(&b':')
 }
@@ -568,5 +568,51 @@ mod tests {
         let mut api = MediaApi { prompts: vec![false, true, true], ..Default::default() };
         assert_eq!(find_media(&mut vm, &mut api, 1), Value::Int(0));
         assert_eq!((api.prompted, api.slept), (3, 3000));
+    }
+
+    #[derive(Default)]
+    struct LaunchApi {
+        attempts: Vec<(String, String)>,
+        boxes: usize,
+        retries: Vec<bool>,
+    }
+
+    impl SysApi for LaunchApi {
+        fn call_sys(&mut self, _call: &mut NativeCallFrame) -> VmResult<Value> {
+            Ok(Value::None)
+        }
+        fn primary_resource_root(&mut self) -> Option<String> {
+            Some("C:\\Game\\".into())
+        }
+        fn launch_process(&mut self, cwd: &str, command: &str, _: bool, _: bool) -> bool {
+            self.attempts.push((cwd.into(), command.into()));
+            false
+        }
+        fn message_box(&mut self, _: &str, _: &str) {
+            self.boxes += 1;
+        }
+        fn retry_or_quit_prompt(&mut self, _: &str, _: &str) -> bool {
+            self.retries.pop().unwrap_or(false)
+        }
+    }
+
+    #[test]
+    fn launch_follows_sub_472a10() {
+        let mut vm = Vm::new();
+        let mut api = LaunchApi::default();
+        // No message: one attempt below the primary root, then 0.
+        assert_eq!(vm.launch_native_process(&mut api, None, "a.exe x", None, false, true, false), 0);
+        assert_eq!(api.attempts, [("C:\\Game\\".into(), "C:\\Game\\a.exe x".into())]);
+        // Sys80:E2: one OK box.
+        api.attempts.clear();
+        let dir = Some("D:\\Tools".to_string());
+        assert_eq!(vm.launch_native_process(&mut api, dir.clone(), "u.exe", Some("e".into()), true, false, true), 0);
+        assert_eq!((api.attempts.len(), api.boxes), (1, 1));
+        assert_eq!(api.attempts[0].1, "D:\\Tools\\u.exe");
+        // Sys80:E0: retried until the player confirms quitting.
+        api.attempts.clear();
+        api.retries = vec![false, true, true];
+        assert_eq!(vm.launch_native_process(&mut api, dir, "u.exe", Some("e".into()), false, true, false), 0);
+        assert_eq!(api.attempts.len(), 3);
     }
 }

@@ -15,9 +15,9 @@ pub(super) struct NativeSystemState {
     pub(super) bootstrap_request: Option<(Option<String>, String, String)>,
     cursor_button_mode: i32,
     pub(super) uninstaller_mutex_name: String,
-    pub(super) restart_working_directory: String,
-    pub(super) restart_command_line: String,
-    pub(super) restart_error_message: String,
+    /// Sys80:E1: (current directory, command line, error message) run by
+    /// WinMain after the loop.
+    pub(super) restart: Option<(String, String, Option<String>)>,
 }
 
 impl NativeSystemState {

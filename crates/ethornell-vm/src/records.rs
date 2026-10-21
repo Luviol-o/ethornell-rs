@@ -6,7 +6,8 @@ pub(crate) struct RecordTableState {
     pub(crate) record_size: u32,
     pub(crate) cursor: u32,
     pub(crate) keys: std::collections::BTreeMap<u32, String>,
-    pub(crate) records: std::collections::BTreeMap<u32, u32>,
+    /// Record bytes live in host memory (operator new in sub_452CD0).
+    pub(crate) records: std::collections::BTreeMap<u32, IndexedRecordEntry>,
 }
 
 #[derive(Debug, Clone)]
@@ -359,6 +360,36 @@ impl Vm {
         Ok(record_count as i32)
     }
 
+    /// memcpy out of VM memory, keeping the typed shadow values.
+    fn capture_record(&self, src: u32, size: u32) -> VmResult<IndexedRecordEntry> {
+        let range = self.resolve_range(src, size as usize)?;
+        let start = Self::value_key(src);
+        let end = start.saturating_add(size);
+        Ok(IndexedRecordEntry {
+            bytes: self.memory[range].to_vec(),
+            shadow_values: self
+                .mem_values
+                .range(start..end)
+                .map(|(addr, value)| (*addr - start, value.clone()))
+                .collect(),
+        })
+    }
+
+    /// memcpy back into VM memory with the record's shadow values.
+    fn restore_record(&mut self, dst: u32, entry: &IndexedRecordEntry) -> VmResult<()> {
+        let range = self.resolve_write_range(dst, entry.bytes.len())?;
+        self.memory[range].copy_from_slice(&entry.bytes);
+        self.clear_shadow_values(dst, entry.bytes.len());
+        let start = Self::value_key(dst);
+        self.mem_values.extend(
+            entry
+                .shadow_values
+                .iter()
+                .map(|(offset, value)| (start.saturating_add(*offset), value.clone())),
+        );
+        Ok(())
+    }
+
     pub(crate) fn sys_record_table_open(&mut self, slot: u32, record_size: u32) -> VmResult<i32> {
         const INVALID_RECORD_SIZE: i32 = 0x8000_0001u32 as i32;
         if record_size <= 1 {
@@ -400,52 +431,29 @@ impl Vm {
             value => value.as_i32().to_string(),
         };
         let handle_key = Self::value_key(handle);
-        let Some((index, record_size, record_ptr)) =
-            self.record_tables.get(&handle_key).map(|table| {
-                let existing = table
-                    .keys
-                    .iter()
-                    .find_map(|(index, saved)| (saved == &key).then_some(*index));
-                let index = existing.unwrap_or(table.cursor);
-                (index, table.record_size, table.records.get(&index).copied())
-            })
-        else {
-            return Ok(TABLE_NOT_FOUND);
+        let entry = match self.record_tables.get(&handle_key) {
+            Some(table) => self.capture_record(src, table.record_size)?,
+            None => return Ok(TABLE_NOT_FOUND),
         };
-
-        let record_ptr = if let Some(record_ptr) = record_ptr {
-            record_ptr
-        } else {
-            let record_ptr = self.alloc_heap(record_size);
-            let table = self
-                .record_tables
-                .get_mut(&handle_key)
-                .expect("record table disappeared while inserting");
-            table.cursor = table.cursor.saturating_add(1);
-            table.keys.insert(index, key.clone());
-            table.records.insert(index, record_ptr);
-            record_ptr
+        // sub_452CD0: overwrite the record with this key, else append.
+        let table = self.record_tables.get_mut(&handle_key).expect("checked above");
+        let index = match table.keys.iter().find_map(|(index, saved)| (saved == &key).then_some(*index)) {
+            Some(index) => index,
+            None => {
+                let index = table.cursor;
+                table.cursor = table.cursor.saturating_add(1);
+                table.keys.insert(index, key);
+                index
+            }
         };
-        self.copy_record_into_table(record_ptr, src, record_size as usize)?;
-        tracing::debug!(
-            handle,
-            index,
-            key,
-            record_size,
-            src = format_args!("0x{src:08X}"),
-            record_ptr = format_args!("0x{record_ptr:08X}"),
-            "RecordTableInsert"
-        );
+        table.records.insert(index, entry);
         Ok(0)
     }
 
     pub(crate) fn sys_record_table_close(&mut self, handle: u32) -> i32 {
         const TABLE_NOT_FOUND: i32 = 0x8000_0002u32 as i32;
-        let Some(table) = self.record_tables.remove(&Self::value_key(handle)) else {
+        if self.record_tables.remove(&Self::value_key(handle)).is_none() {
             return TABLE_NOT_FOUND;
-        };
-        for record_ptr in table.records.into_values() {
-            let _ = self.free_heap(record_ptr);
         }
         0
     }
@@ -471,10 +479,7 @@ impl Vm {
             return KEY_NOT_FOUND;
         };
         table.keys.remove(&index);
-        let record_ptr = table.records.remove(&index);
-        if let Some(record_ptr) = record_ptr {
-            let _ = self.free_heap(record_ptr);
-        }
+        table.records.remove(&index);
         0
     }
 
@@ -510,19 +515,10 @@ impl Vm {
         let Some(selected) = selected else {
             return Ok(Value::Int(RECORD_NOT_FOUND));
         };
-        let Some(src) = table.records.get(&selected).copied() else {
+        let Some(entry) = table.records.get(&selected).cloned() else {
             return Ok(Value::Int(RECORD_NOT_FOUND));
         };
-        let record_size = table.record_size;
-        self.copy_buffer(dst, src, record_size as usize)?;
-        tracing::debug!(
-            handle,
-            selected,
-            record_size,
-            src = format_args!("0x{src:08X}"),
-            dst = format_args!("0x{dst:08X}"),
-            "RecordTableFetch"
-        );
+        self.restore_record(dst, &entry)?;
         Ok(Value::Int(0))
     }
 
@@ -728,34 +724,6 @@ impl Vm {
             .min(state.records.len());
         state.records.drain(start..end);
         0
-    }
-
-    fn ensure_writable(&mut self, ptr: u32, size: usize) {
-        let start = Self::memory_addr(ptr) as usize;
-        let end = start.saturating_add(size);
-        if end > self.memory.len() {
-            self.memory.resize(end, 0);
-        }
-    }
-
-    fn clear_record_buffer(&mut self, ptr: u32, size: usize) {
-        if size == 0 {
-            return;
-        }
-        self.ensure_writable(ptr, size);
-        let start = Self::memory_addr(ptr) as usize;
-        let end = start.saturating_add(size);
-        self.memory[start..end].fill(0);
-        self.clear_shadow_values(ptr, size);
-        self.trace_watch_write(ptr, size, 0, "clear_record_buffer");
-    }
-
-    fn copy_record_into_table(&mut self, dst: u32, src: u32, size: usize) -> VmResult<()> {
-        let end = Self::memory_addr(dst) as usize + size;
-        if end > self.memory.len() {
-            self.memory.resize(end, 0);
-        }
-        self.copy_buffer(dst, src, size)
     }
 
     fn normalize_record_key(&self, key: Value) -> Value {
