@@ -15838,7 +15838,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_SET_CURRENT_OBJECT_BITMAP_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target sub_47B5D0 validates the bitmap and sub_462130 stores it in the current display object, not in the global primary-bitmap slot.",
+        notes: "BGI 1.622 sub_47C0D0 -> sub_43DA40: current background as BackN with one bitmap; invalid bitmap fatal (背景には使用できません).",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_CONFIGURE_CURRENT_OBJECT_DUAL_BITMAP,
@@ -15846,7 +15846,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_CONFIGURE_CURRENT_OBJECT_DUAL_BITMAP_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target sub_47B630 forwards two bitmap handles and the transparency parameter to sub_462140 for the current display object.",
+        notes: "sub_47C130 -> sub_43DA70: BackB pair; transparency check first, alpha applied, then the pair (both named in the error).",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_CONFIGURE_CURRENT_OBJECT_QUAD_BITMAP,
@@ -15854,7 +15854,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_CONFIGURE_CURRENT_OBJECT_QUAD_BITMAP_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target sub_47B6C0 configures four bitmap resources plus a coordinate pair on the current display object.",
+        notes: "sub_47C1C0 -> sub_43DAB0: BackS seam position (1) then four bitmaps (2), 1.622 texts.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_CONFIGURE_CURRENT_OBJECT_SPRITE_MASK,
@@ -15862,7 +15862,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_CONFIGURE_CURRENT_OBJECT_SPRITE_MASK_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_47B7C0: alpha > 256 is fatal (sub_497DB0); sub_43D750 makes the current object a BackF and stores primary/secondary (sub_41D350: missing primary or non-sentinel secondary fatal) and mask (sub_41D440: missing or non-8-bit mask fatal), then the alpha. Drawing follows sub_41D590: secondary copy then the primary with mode 1, or the rule-image mask blend (sub_411990 weights, backf_mask_weight); sentinels 0x7000/0x7001 fade towards black/white.",
+        notes: "sub_47C2C0 -> sub_43DB10: BackF; transparency first, primary/secondary/mask codes 1..4, alpha only after success.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_CONFIGURE_CURRENT_OBJECT_FRAME_TABLE,
@@ -15870,7 +15870,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_CONFIGURE_CURRENT_OBJECT_FRAME_TABLE_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "BGI 1.622 BackD: VM copies 2..32 frame bitmap handles; alpha is a frame index. Generation-bound resources are rasterized directly.",
+        notes: "sub_47C430 -> sub_462700: BackD frame table 2..=32 (無効なビットマップ数) and the listed-bitmap error.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_CONFIGURE_CURRENT_OBJECT_RESOURCE_TRIPLET,
@@ -15878,7 +15878,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_CONFIGURE_CURRENT_OBJECT_RESOURCE_TRIPLET_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "BGI 1.622 BackDST: screen image and one/two format-4 displacement maps; nearest or three-bit interpolated sampling driven by alpha.",
+        notes: "sub_47C580 -> sub_462710: BackDst; transparency, then bitmap and vector maps in order with the 1.622 texts.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_CONFIGURE_CURRENT_OBJECT_BITMAP_MODE,
@@ -15886,7 +15886,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_CONFIGURE_CURRENT_OBJECT_BITMAP_MODE_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "BGI 1.622 BackGRD: horizontal box blur with the native integer reciprocal; mode 0 black-pads and mode 1 extends edge pixels.",
+        notes: "sub_47C6E0 -> sub_462730: BackGrd; transparency, bitmap, size, gradation type.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_CONFIGURE_CURRENT_OBJECT_VM_EFFECT,
@@ -15894,7 +15894,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_CONFIGURE_CURRENT_OBJECT_VM_EFFECT_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "BGI 1.622 BackRPL: bitmap plus format-6 vector map, wave-record count and wave slot 0..7; clipped vector sampling with optional four-bit interpolation. Alpha scales wave samples.",
+        notes: "sub_47C7C0 -> sub_462740: BackRpl; transparency, bitmap, vector & distance map, ripple slot errors.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_CONFIGURE_CURRENT_OBJECT_BITMAP_SIZE_POSITION,
@@ -15902,7 +15902,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_CONFIGURE_CURRENT_OBJECT_BITMAP_SIZE_POSITION_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "BGI 1.622 BackSTR: interpolate a 16.16 source origin and integer extent, then seven-bit bilinear stretch. Property 102 packs target XY in value and target WH in extra.",
+        notes: "sub_47C920 -> sub_462760: BackStr; bitmap, then reference range >= 2.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_CONFIGURE_CURRENT_OBJECT_BITMAP_SIZE,
@@ -15910,7 +15910,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_CONFIGURE_CURRENT_OBJECT_BITMAP_SIZE_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "BGI 1.622 BackRTT: unsigned nonzero 16.16 scale and signed 16.16 angle; property 80 modulates them and 101 resets their base values. Alpha drives the modulation.",
+        notes: "sub_47C9F0 -> sub_462780: BackRtt; bitmap, then a zero scale is fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_CONFIGURE_CURRENT_OBJECT_BLIT_SOURCES,
@@ -15918,7 +15918,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_CONFIGURE_CURRENT_OBJECT_BLIT_SOURCES_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "BGI 1.622 BackMSC: mosaic primary and optional secondary/black/white; alpha controls block size and composition, not ordinary layer transparency.",
+        notes: "sub_47CA90 -> sub_462790: BackMsc; front/back bitmaps, style 0, linkage 0/1.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_SET_CURRENT_OBJECT_RENDER_CONTROLS,
@@ -15926,7 +15926,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_SET_CURRENT_OBJECT_RENDER_CONTROLS_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_47C090 -> sub_43E490: the manager stores (draw, active) (initially (1, 0), sub_442850) and applies them to the current background - vtable+4 draw gate with member propagation and vtable+120 CDspObjBack+0x138 - and again whenever sub_43E190 recreates the class. An inactive background clears the target to black (sub_41C340) instead of drawing its content.",
+        notes: "sub_47CB90 -> sub_462890: draw/active pair kept by the manager and applied to the current background.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_GET_CURRENT_OBJECT_MODE,
@@ -15934,7 +15934,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_GET_CURRENT_OBJECT_MODE_PARAMETERS,
         returns: "i32 current-object mode",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target sub_47C0C0/sub_462340 returns the current display object mode field at +0x134; it is not a render-target handle.",
+        notes: "sub_47CBC0 -> sub_4628A0: the current background class.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_CREATE_SPRITE_OBJECT,
@@ -20062,6 +20062,16 @@ const PORTABLE_EQUIVALENT_OPCODES: &[NativeOpcode] = &[
     opcodes::GRAPH90_SET_OBJECT_PROPERTY,
     opcodes::GRAPH90_SET_OBJECT_HIT_MASK_BITMAP,
     opcodes::GRAPH90_HIT_TEST_OBJECT_AT_POINTER,
+    opcodes::GRAPH90_SET_CURRENT_OBJECT_BITMAP,
+    opcodes::GRAPH90_CONFIGURE_CURRENT_OBJECT_DUAL_BITMAP,
+    opcodes::GRAPH90_CONFIGURE_CURRENT_OBJECT_QUAD_BITMAP,
+    opcodes::GRAPH90_CONFIGURE_CURRENT_OBJECT_FRAME_TABLE,
+    opcodes::GRAPH90_CONFIGURE_CURRENT_OBJECT_RESOURCE_TRIPLET,
+    opcodes::GRAPH90_CONFIGURE_CURRENT_OBJECT_BITMAP_MODE,
+    opcodes::GRAPH90_CONFIGURE_CURRENT_OBJECT_VM_EFFECT,
+    opcodes::GRAPH90_CONFIGURE_CURRENT_OBJECT_BITMAP_SIZE_POSITION,
+    opcodes::GRAPH90_CONFIGURE_CURRENT_OBJECT_BITMAP_SIZE,
+    opcodes::GRAPH90_CONFIGURE_CURRENT_OBJECT_BLIT_SOURCES,
 ];
 
 const PARTIAL_IMPLEMENTATION_OPCODES: &[NativeOpcode] = &[
@@ -20168,16 +20178,6 @@ const PARTIAL_IMPLEMENTATION_OPCODES: &[NativeOpcode] = &[
     opcodes::GRAPH91_SET_MULTILAYER_LAYER_SOURCE_VELOCITY,
     opcodes::GRAPH91_SET_MULTILAYER_LAYER_TRANSFORM_VELOCITY,
     opcodes::GRAPH90_SET_DISPLAY_OPTIONS,
-    opcodes::GRAPH90_SET_CURRENT_OBJECT_BITMAP,
-    opcodes::GRAPH90_CONFIGURE_CURRENT_OBJECT_DUAL_BITMAP,
-    opcodes::GRAPH90_CONFIGURE_CURRENT_OBJECT_QUAD_BITMAP,
-    opcodes::GRAPH90_CONFIGURE_CURRENT_OBJECT_FRAME_TABLE,
-    opcodes::GRAPH90_CONFIGURE_CURRENT_OBJECT_RESOURCE_TRIPLET,
-    opcodes::GRAPH90_CONFIGURE_CURRENT_OBJECT_BITMAP_MODE,
-    opcodes::GRAPH90_CONFIGURE_CURRENT_OBJECT_VM_EFFECT,
-    opcodes::GRAPH90_CONFIGURE_CURRENT_OBJECT_BITMAP_SIZE_POSITION,
-    opcodes::GRAPH90_CONFIGURE_CURRENT_OBJECT_BITMAP_SIZE,
-    opcodes::GRAPH90_CONFIGURE_CURRENT_OBJECT_BLIT_SOURCES,
     opcodes::GRAPH90_SET_SPRITE_AUX_BITMAP,
     opcodes::GRAPH90_CONFIGURE_SPRITE_SCALED_BITMAP,
     opcodes::GRAPH90_CONFIGURE_SPRITE_MASKED_BITMAP,

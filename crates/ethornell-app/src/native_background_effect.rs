@@ -19,47 +19,65 @@ impl RuntimeTraceApi {
     ) -> ethornell_vm::VmResult<()> {
         let class = NativeBackgroundClass::for_graph90_selector(selector).unwrap();
         let object = self.graph90_prepare_current_background(class);
-        let fail = |reason: &str| {
-            ethornell_vm::VmError::Runtime(format!("Graph90:{selector:02X} {reason}"))
-        };
+        // sub_47C580 / sub_47C6E0 / sub_47C7C0 check the transparency
+        // (sub_498920) before anything else.
+        if let Some(index) = match selector {
+            0x45 => Some(3),
+            0x46 => Some(2),
+            0x47 => Some(4),
+            _ => None,
+        } {
+            target_checks::effect_level(args[index])?;
+        }
+        let err = |message: String| ethornell_vm::VmError::Runtime(message);
+        let missing = |bitmap: i32| err(format!("指定されたビットマップ [ {bitmap} ] は存在しません"));
         let mut resources = if selector == 0x44 {
             frames.to_vec()
         } else {
             vec![args[0]]
         };
+        if selector == 0x44 && !(2..=32).contains(&frames.len()) {
+            return Err(err(format!("無効なビットマップ数 [ {} ] が指定されました", frames.len())));
+        }
         match selector {
-            0x44 if !(2..=32).contains(&frames.len()) => {
-                return Err(fail("frame count must be 2..=32"));
-            }
             0x45 => {
                 resources.push(args[1]);
                 if args[2] != -1 {
                     resources.push(args[2]);
                 }
             }
-            0x46 if args[1] as u32 > 1 => return Err(fail("blur edge mode must be 0 or 1")),
-            0x48 if (args[3] as u32) < 2 || (args[4] as u32) < 2 => {
-                return Err(fail("source rectangle is smaller than two pixels"));
-            }
-            0x49 if args[1] == 0 => return Err(fail("rotation scale is zero")),
-            0x4A => {
-                if !matches!(args[1], 0x7000 | 0x7001) {
-                    resources.push(args[1]);
-                }
-                if args[2] != 0 || args[4] as u32 > 1 {
-                    return Err(fail("invalid mosaic mode"));
-                }
-            }
+            0x4A if !matches!(args[1], 0x7000 | 0x7001) => resources.push(args[1]),
             _ => {}
         }
+        // The resources first (sub_4627xx checks them in argument order),
+        // then the selector's own parameters.
         let mut bindings = Vec::new();
         let screen_format = self
             .query_bitmap_info(NATIVE_SCREEN_BITMAP)
             .map_or(1, |i| i.format);
+        let invalid = |index: usize, bitmap: i32, exists: bool| -> ethornell_vm::VmError {
+            match selector {
+                0x44 => {
+                    let list = frames.iter().map(i32::to_string).collect::<Vec<_>>().join(" , ");
+                    err(format!(
+                        "指定されたビットマップ [ {list} ] の中に無効もしくは背景として表示できないものが含まれています"
+                    ))
+                }
+                0x4A if index == 0 => err(format!(
+                    "指定された表側ビットマップ [ {bitmap} ] は存在しないか、背景には使用できません"
+                )),
+                0x4A => err(format!(
+                    "指定された裏側ビットマップ [ {bitmap} ] は存在しないか、背景には使用できません"
+                )),
+                _ if !exists => missing(bitmap),
+                0x45 if index != 0 => err(format!(
+                    "指定されたビットマップ [ {bitmap} ] はベクトルマップではない、\n\n或いはスクリーンサイズと一致していません"
+                )),
+                _ => err(format!("指定されたビットマップ [ {bitmap} ] はスクリーンサイズと一致していません")),
+            }
+        };
         for (index, bitmap) in resources.into_iter().enumerate() {
-            let info = self
-                .query_bitmap_info(bitmap)
-                .ok_or_else(|| fail("bitmap does not exist"))?;
+            let info = self.query_bitmap_info(bitmap).ok_or_else(|| invalid(index, bitmap, false))?;
             if !matches!(selector, 0x48 | 0x49) {
                 let format = if selector == 0x45 && index != 0 {
                     4
@@ -71,15 +89,33 @@ impl RuntimeTraceApi {
                     || !(info.format == format
                         || (matches!(info.format, 1 | 2) && matches!(format, 1 | 2)))
                 {
-                    return Err(fail("bitmap dimensions or format do not match the screen"));
+                    return Err(invalid(index, bitmap, true));
                 }
             }
             let generation = self
                 .graph_resources
                 .get(&bitmap)
-                .ok_or_else(|| fail("bitmap binding does not exist"))?
+                .ok_or_else(|| invalid(index, bitmap, false))?
                 .generation;
             bindings.push((bitmap, generation));
+        }
+        match selector {
+            0x46 if args[1] as u32 > 1 => {
+                return Err(err(format!("無効なグラデーションタイプ [ {} ] が指定されました", args[1])));
+            }
+            0x48 if (args[3] as u32) < 2 || (args[4] as u32) < 2 => {
+                return Err(err(format!("無効な参照範囲 [ {} , {} ] が指定されました", args[3], args[4])));
+            }
+            0x49 if args[1] == 0 => {
+                return Err(err(format!("無効な伸縮倍率 [ {} ] が指定されました", args[1])));
+            }
+            0x4A if args[2] != 0 => {
+                return Err(err(format!("無効なスタイル [ {} ] が指定されました", args[2])));
+            }
+            0x4A if args[4] as u32 > 1 => {
+                return Err(err(format!("無効な連動状態 [ {} ] が指定されました", args[4])));
+            }
+            _ => {}
         }
         if selector != 0x44 {
             self.graph_object_properties

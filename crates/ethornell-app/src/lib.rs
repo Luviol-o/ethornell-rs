@@ -11760,7 +11760,7 @@ mod input_tests {
         assert!(
             error
                 .to_string()
-                .contains("secondary bitmap #999999 is not registered")
+                .contains("指定されたビットマップ [ 999999 ] は存在しません")
         );
 
         api.bitmap_formats.insert(403, 2);
@@ -11776,7 +11776,7 @@ mod input_tests {
             Value::Int(0),
         ];
         let error = call_graph(&mut api, 0x90, 0x43, &mut bad_mask).unwrap_err();
-        assert!(error.to_string().contains("expected format 3"));
+        assert!(error.to_string().contains("グレイスケールではありません"));
         // sub_43D750 commits sub_41D350 before sub_41D440. A mask-stage
         // failure therefore keeps the new primary/secondary state, preserves
         // the previous mask fields, and does not apply the new alpha.
@@ -12402,7 +12402,7 @@ mod input_tests {
 
         let mut invalid = vec![Value::Int(123_456)];
         let error = call_graph(&mut api, 0x90, 0x40, &mut invalid).unwrap_err();
-        assert!(error.to_string().contains("not a valid registered bitmap"));
+        assert!(error.to_string().contains("背景には使用できません"));
         assert_eq!(
             api.graph_object_properties[&0].background.unwrap().class,
             super::native_background::NativeBackgroundClass::BackN
@@ -12476,7 +12476,7 @@ mod input_tests {
 
         let mut invalid = vec![Value::Int(primary), Value::Int(999_999), Value::Int(32)];
         let error = call_graph(&mut api, 0x90, 0x41, &mut invalid).unwrap_err();
-        assert!(error.to_string().contains("not a valid BackB pair"));
+        assert!(error.to_string().contains("のいずれかは存在しないか"));
         assert_eq!(api.graph_object_properties[&0].alpha_parameter(), 32);
         assert_eq!(api.graph_output_draw_items()[0].blend_mode, 0xc1);
     }

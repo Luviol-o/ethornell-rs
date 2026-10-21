@@ -2607,7 +2607,7 @@ impl RuntimeTraceApi {
                     .insert("target-primary-bitmap".to_string(), bitmap);
                 if !self.graph90_sync_backn_layer(object, bitmap) {
                     return Some(Err(ethornell_vm::VmError::Runtime(format!(
-                        "Graph90:40 bitmap #{bitmap} is not a valid registered bitmap"
+                        "指定されたビットマップ [ {bitmap} ] は存在しないか、背景には使用できません"
                     ))));
                 }
                 self.graph90_record_call(object, id, &[bitmap]);
@@ -2615,12 +2615,18 @@ impl RuntimeTraceApi {
             }
             (0x90, 0x41) => {
                 let args = Self::graph90_source_args(stack, 3);
+                // sub_47C130: transparency check first.
+                if let Some(&alpha) = args.get(2)
+                    && let Err(error) = target_checks::effect_level(alpha)
+                {
+                    return Some(Err(error));
+                }
                 let object = self.graph90_prepare_current_background(NativeBackgroundClass::BackB);
                 if let [primary, secondary, alpha] = args.as_slice() {
                     self.graph90_set_common_state(object, None, None, Some(*alpha), None);
                     if !self.graph90_sync_backb_layers(object, *primary, *secondary) {
                         return Some(Err(ethornell_vm::VmError::Runtime(format!(
-                            "Graph90:41 resources primary=#{primary} secondary=#{secondary} are not a valid BackB pair"
+                            "指定されたビットマップ [ {primary} , {secondary} ] のいずれかは存在しないか、背景には使用できません"
                         ))));
                     }
                 }
@@ -2640,7 +2646,7 @@ impl RuntimeTraceApi {
                         });
                     if !position_valid {
                         return Some(Err(ethornell_vm::VmError::Runtime(format!(
-                            "Graph90:42 position ({x}, {y}) is outside the target screen"
+                            "背景（Sモード）に対して無効な表示座標 [ {x} , {y} ] が指定されました"
                         ))));
                     }
                     if !self.graph90_sync_backs_layers(
@@ -2655,7 +2661,7 @@ impl RuntimeTraceApi {
                         // draws them with the newly accepted seam.
                         self.graph90_layout_backs_layers(object, *x, *y);
                         return Some(Err(ethornell_vm::VmError::Runtime(format!(
-                            "Graph90:42 resources [{bitmap_0}, {bitmap_1}, {bitmap_2}, {bitmap_3}] do not match the target screen bitmap"
+                            "指定されたビットマップ [ {bitmap_0} , {bitmap_1} , {bitmap_2} , {bitmap_3} ] のいずれかは存在しないか、背景には使用できません"
                         ))));
                     }
                 }
@@ -2669,7 +2675,7 @@ impl RuntimeTraceApi {
                     && alpha as u32 > 0x100
                 {
                     return Some(Err(ethornell_vm::VmError::Runtime(format!(
-                        "Graph90:43 alpha {alpha} exceeds 256"
+                        "無効なエフェクトレベル／トランスペアレンシィ／オパシティ／アディションレベル [ {alpha} ] が指定されました"
                     ))));
                 }
                 let object = self.graph90_prepare_current_background(NativeBackgroundClass::BackF);
@@ -2696,9 +2702,18 @@ impl RuntimeTraceApi {
                         *mask,
                         *mask_parameter,
                     ) {
-                        return Some(Err(ethornell_vm::VmError::Runtime(format!(
-                            "Graph90:43 CDspObjBackF configuration rejected: {reason}"
-                        ))));
+                        // sub_43DB10's codes: primary (1), secondary (2),
+                        // mask missing (3) or not grey-scale (4).
+                        let message = if reason.starts_with("primary") {
+                            format!("指定されたビットマップ [ {primary} ] は存在しません")
+                        } else if reason.starts_with("secondary") {
+                            format!("指定されたビットマップ [ {secondary} ] は存在しません")
+                        } else if reason.contains("expected format 3") {
+                            format!("指定されたビットマップ [ {mask} ] はグレイスケールではありません")
+                        } else {
+                            format!("指定されたビットマップ [ {mask} ] は存在しません")
+                        };
+                        return Some(Err(ethornell_vm::VmError::Runtime(message)));
                     }
                     // sub_43D750 applies vtable+0x48 only after both resource
                     // configuration stages have succeeded (the range was
@@ -2770,6 +2785,12 @@ impl RuntimeTraceApi {
             }
             (0x90, 0x47) => {
                 let args = Self::graph90_source_args(stack, 5);
+                // sub_47C7C0: transparency check first.
+                if let Some(&alpha) = args.get(4)
+                    && let Err(error) = target_checks::effect_level(alpha)
+                {
+                    return Some(Err(error));
+                }
                 let object =
                     self.graph90_prepare_current_background(NativeBackgroundClass::BackRpl);
                 if args.len() == 5 {
@@ -2788,7 +2809,20 @@ impl RuntimeTraceApi {
                 }
                 self.graph90_bind_vm_effect(object,args[0],args[1]);
                 if let Err(reason) = self.graph90_refresh_vm_effect(object) {
-                    return Some(Err(ethornell_vm::VmError::Runtime(format!("Graph90:47 {reason}"))));
+                    // sub_462740's codes in the target's texts.
+                    let message = if reason.contains("primary") {
+                        format!("指定されたビットマップ [ {} ] は存在しません", args[0])
+                    } else if reason == "missing VM vector bitmap" {
+                        format!("指定されたベクトル＆ディスタンスマップ [ {} ] は存在しません", args[1])
+                    } else if reason.contains("vector") || reason.contains("auxiliary") {
+                        format!(
+                            "指定されたビットマップ [ {} ] はベクトル＆ディスタンスマップではない、或いはスクリーンサイズとピクセル数が一致していません",
+                            args[1]
+                        )
+                    } else {
+                        format!("指定された波紋 [ {} ] は登録されていません", args[3])
+                    };
+                    return Some(Err(ethornell_vm::VmError::Runtime(message)));
                 }
                 self.graph90_record_call(object, id, &args);
                 ethornell_vm::Value::None
