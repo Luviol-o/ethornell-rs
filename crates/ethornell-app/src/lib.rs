@@ -63,7 +63,6 @@ mod native_backml;
 mod native_landscape;
 mod native_sprite_filters;
 mod native_system;
-mod native_system_ext;
 mod native_user;
 mod perspective_blit;
 mod platform;
@@ -583,6 +582,8 @@ struct RuntimeTraceApi {
     display_size_index: i32,
     /// GetAdapterDisplayMode width/height (dword_5177C0/C4); 0 when unknown.
     desktop_display_size: (u32, u32),
+    /// The renderer adapter's description (Sys81:0B); empty headless.
+    pub(crate) display_adapter_description: String,
     /// Monitor rectangles [left, top, right, bottom] (dword_566854), the
     /// window's current monitor, and the window frame width/height.
     monitor_rects: Vec<[i32; 4]>,
@@ -863,6 +864,9 @@ struct RuntimeTraceApi {
     cursor_motion: Option<RuntimeCursorMotion>,
     pending_cursor_position: Option<(f32, f32)>,
     mouse_pressed: bool,
+    /// dword_503E40: logical point of the last press per button slot
+    /// (WndProc sub_48F060; read by Sys81:07).
+    button_press_points: [(i32, i32); 5],
     pending_click: Option<(f32, f32)>,
     pending_click_age_frames: u8,
     pending_object_state: Option<(f32, f32)>,
@@ -881,15 +885,17 @@ struct RuntimeTraceApi {
     input_descriptor_deadlines: BTreeMap<i32, u64>,
     /// WM_*BUTTONDBLCLK detection: last press (button, time ms, x, y).
     last_button_press: Option<(i32, u64, f32, f32)>,
-    /// dword_503E40: last press point per mouse button (left, right,
-    /// middle, X1, X2) in game coordinates (sub_48E560 from the WndProc).
-    button_press_points: [(i32, i32); 5],
     /// Sprites drawn through their aux bitmap (Graph90:55): sprite ->
     /// (masked image key, inputs it was built from).
     aux_masked_sprites: BTreeMap<i32, (String, (i32, i32, u64, u64))>,
     /// Physically held descriptors (GetAsyncKeyState), independent of the
     /// native records that Sys80:10 may clear.
     input_physically_held: BTreeSet<i32>,
+    /// GetKeyboardState low bits: flipped by every press of a key.
+    key_toggle_bits: [bool; 256],
+    /// Sys81:EC host mutexes: token -> the locked file.
+    named_mutexes: BTreeMap<u64, std::fs::File>,
+    last_named_mutex: u64,
     /// sub_402080 dword_565AE4: end of the current synchronous-load window.
     sync_load_deadline: u64,
     /// Resources a Graph92:14 preload decoded (DCProcPreloadBmp cache); a
@@ -984,7 +990,10 @@ struct RuntimeTraceApi {
     input_requires_focus: bool,
     system_mode_flag: i32,
     system_extension_state: i32,
-    window_monitor_adapter_mode: i32,
+    /// dword_50721C (Sys81:62, initially 1).
+    pub(crate) window_monitor_adapter_mode: i32,
+    /// dword_565EAC (Sys81:63): full-screen scaling 0 fit, 1 stretch,
+    /// 2 unscaled when the desktop holds the mode.
     system_config_input_mode: i32,
     shader_effect_enabled: bool,
     native_system: native_system::NativeSystemState,
@@ -1046,6 +1055,7 @@ impl RuntimeTraceApi {
             ],
             display_size_index: 2,
             desktop_display_size: (0, 0),
+            display_adapter_description: String::new(),
             monitor_rects: Vec::new(),
             current_monitor_rect: None,
             window_decoration_size: (0, 0),
@@ -1248,6 +1258,7 @@ impl RuntimeTraceApi {
             cursor_motion: None,
             pending_cursor_position: None,
             mouse_pressed: false,
+            button_press_points: [(-1, -1); 5],
             pending_click: None,
             pending_click_age_frames: 0,
             pending_object_state: None,
@@ -1259,9 +1270,11 @@ impl RuntimeTraceApi {
             background_key_polling: 0,
             input_descriptor_deadlines: BTreeMap::new(),
             last_button_press: None,
-            button_press_points: [(0, 0); 5],
             aux_masked_sprites: BTreeMap::new(),
             input_physically_held: BTreeSet::new(),
+            key_toggle_bits: [false; 256],
+            named_mutexes: BTreeMap::new(),
+            last_named_mutex: 0,
             pointer_object_nodes: Vec::new(),
             sync_load_deadline: 0,
             preloaded_bitmap_keys: BTreeSet::new(),
@@ -1270,7 +1283,8 @@ impl RuntimeTraceApi {
             input_master_gate: 1,
             input_latched_state: 0,
             input_poll_active: false,
-            message_auxiliary_input_mask: 0,
+            // dword_507690
+            message_auxiliary_input_mask: 0x2000,
             registered_keyboard_input_scopes: input_state::NativeInputScopeRegistry::default(),
             registered_pointer_input_scopes: input_state::NativeInputScopeRegistry::default(),
             configured_input_classes: input_state::target_default_input_classes(),
@@ -1353,7 +1367,7 @@ impl RuntimeTraceApi {
             input_requires_focus: false,
             system_mode_flag: 0,
             system_extension_state: 0,
-            window_monitor_adapter_mode: 0,
+            window_monitor_adapter_mode: 1,
             system_config_input_mode: 0,
             shader_effect_enabled: false,
             native_system: native_system::NativeSystemState::default(),
@@ -3213,6 +3227,38 @@ impl RuntimeTraceApi {
     }
 
     /// dword_506B8C/506BAC[dword_506B88].
+    /// sub_45EDE0: mode 2 falls back to 0 when the adjusted desktop
+    /// (sub_45EAE0(.., 1)) is narrower or lower than the display mode.
+    pub(crate) fn effective_fullscreen_scale_mode(&self) -> i32 {
+        let mode = self.system_config_input_mode;
+        if mode != 2 {
+            return mode;
+        }
+        let (mut width, mut height) = self.desktop_display_size;
+        if height != 0 && 4u32.wrapping_mul(width) / height >= 10 {
+            width >>= 1;
+        }
+        if width != 0 && height / width != 0 && 100u32.wrapping_mul(height) / width < 125 {
+            height >>= 1;
+        }
+        let (mode_width, mode_height) = self.display_mode_size();
+        if width < mode_width as u32 || height < mode_height as u32 { 0 } else { 2 }
+    }
+
+    /// The renderer viewport: windowed the client is the mode's size;
+    /// full screen follows the effective Sys81:61 mode (sub_45F110).
+    pub(crate) fn presentation_scale(&self) -> ethornell_render::PresentationScale {
+        use ethornell_render::PresentationScale;
+        if self.window_mode == 0 {
+            return PresentationScale::Fit;
+        }
+        match self.effective_fullscreen_scale_mode() {
+            1 => PresentationScale::Stretch,
+            2 => PresentationScale::Center,
+            _ => PresentationScale::Fit,
+        }
+    }
+
     fn display_mode_size(&self) -> (i32, i32) {
         self.display_mode_sizes
             .get(self.display_size_index as usize)
@@ -8935,6 +8981,8 @@ impl RuntimeEngine {
         // iteration. Time-based native procedures sample the pause-adjusted
         // millisecond clock; a delayed GUI frame must therefore advance time
         // once, not replay several synthetic 16 ms VM frames.
+        // sub_499290 treats a jump above the Sys81:04 threshold as a pause.
+        let elapsed_ms = normalize_engine_elapsed_ms(elapsed_ms, self.vm.clock_jump_threshold_ms());
         self.vm.advance_time_ms(elapsed_ms);
         self.api.engine_time_ms = self.api.engine_time_ms.saturating_add(elapsed_ms);
         self.api.advance_cursor_idle(elapsed_ms);
@@ -15628,13 +15676,8 @@ mod input_tests {
             ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
         let mut api = super::RuntimeTraceApi::new(manager);
         for (width, height) in [(960, 540), (1920, 1080), (1280, 720)] {
-            call_sys(
-                &mut api,
-                0x81,
-                0x64,
-                &mut vec![Value::Int(width), Value::Int(height)],
-            )
-            .unwrap();
+            // Sys81:64 reaches the host through SysApi (the VM pops it).
+            ethornell_vm::SysApi::configure_screen_size(&mut api, width, height);
             assert_eq!(
                 api.pending_window_size.take(),
                 Some((width as u32, height as u32))
@@ -18449,22 +18492,21 @@ fn drain_native_input_descriptor(api: &mut RuntimeTraceApi, descriptor: i32) -> 
     count | held
 }
 
+/// A key or button went down: GetKeyboardState shows it held and flips its
+/// toggle bit.
+fn mark_physically_held(api: &mut RuntimeTraceApi, descriptor: i32) {
+    if api.input_physically_held.insert(descriptor)
+        && let Some(toggle) = usize::try_from(descriptor).ok().and_then(|index| api.key_toggle_bits.get_mut(index))
+    {
+        *toggle = !*toggle;
+    }
+}
+
 /// sub_46DA80: a press on one input record. Mouse descriptors (1, 2, 4, 5,
 /// 6) clear the first-held latch and count every press; other descriptors
 /// count only an up-to-down edge. Returns whether the record was up.
 fn note_native_input_press(api: &mut RuntimeTraceApi, descriptor: i32) -> bool {
-    if let Some(slot) = match descriptor {
-        1 => Some(0),
-        2 => Some(1),
-        4 => Some(2),
-        5 => Some(3),
-        6 => Some(4),
-        _ => None,
-    } && let Some((x, y)) = api.mouse_pos
-    {
-        api.button_press_points[slot] = (x as i32, y as i32);
-    }
-    api.input_physically_held.insert(descriptor);
+    mark_physically_held(api, descriptor);
     let was_up = api.input_down_descriptors.insert(descriptor);
     let mouse = matches!(descriptor, 1 | 2 | 4 | 5 | 6);
     if mouse {
@@ -18656,10 +18698,12 @@ fn apply_runtime_input_event(api: &mut RuntimeTraceApi, event: RuntimeInputEvent
                 note_native_double_click(api, 1, x, y);
             }
             note_native_input_message(api, INPUT_DESCRIPTOR_MOUSE_LEFT);
+            // sub_45EE30 maps the client point back with (int) truncation.
+            api.button_press_points[0] = (x as i32, y as i32);
             let point = Some((x, y));
             api.mouse_pos = point;
             api.mouse_pressed = true;
-            api.input_physically_held.insert(INPUT_DESCRIPTOR_MOUSE_LEFT);
+            mark_physically_held(api, INPUT_DESCRIPTOR_MOUSE_LEFT);
             api.pending_object_state = point;
             api.pending_input_state = Some(0x1000_0002);
             api.pending_input_descriptor = Some(INPUT_DESCRIPTOR_MOUSE_LEFT);
@@ -18768,11 +18812,20 @@ fn apply_runtime_input_event(api: &mut RuntimeTraceApi, event: RuntimeInputEvent
         RuntimeInputEvent::ButtonPress { button, x, y } => {
             // WM_RBUTTONDOWN / WM_MBUTTONDOWN / WM_XBUTTONDOWN.
             api.mouse_pos = Some((x, y));
+            if let Some(slot) = match button {
+                2 => Some(1),
+                4 => Some(2),
+                5 => Some(3),
+                6 => Some(4),
+                _ => None,
+            } {
+                api.button_press_points[slot] = (x as i32, y as i32);
+            }
             if button == 2 {
                 note_native_double_click(api, 2, x, y);
             }
             note_native_input_message(api, button);
-            api.input_physically_held.insert(button);
+            mark_physically_held(api, button);
             // A right press over a Knob (sub_463CE0) sets its +0x0C flag and
             // moves only the accumulator; the release then clears the
             // capture flag (dword_56677C) instead of the record.
@@ -20471,10 +20524,66 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
             .unwrap_or_default()
     }
 
+    /// The NetBIOS name GetComputerNameA reports: on Windows COMPUTERNAME,
+    /// elsewhere the host name's first label, upper-cased and cut to 15
+    /// characters as Windows derives it.
     fn host_computer_name(&mut self) -> String {
-        std::env::var("COMPUTERNAME")
-            .or_else(|_| std::env::var("HOSTNAME"))
-            .unwrap_or_else(|_| "localhost".into())
+        if let Ok(name) = std::env::var("COMPUTERNAME") {
+            return name;
+        }
+        let mut buffer = [0u8; 256];
+        // SAFETY: the buffer is writable for its full length.
+        let ok = unsafe { libc::gethostname(buffer.as_mut_ptr().cast(), buffer.len()) } == 0;
+        let end = buffer.iter().position(|byte| *byte == 0).unwrap_or(buffer.len());
+        let host = if ok { String::from_utf8_lossy(&buffer[..end]).into_owned() } else { String::new() };
+        host.split('.').next().unwrap_or_default().to_ascii_uppercase().chars().take(15).collect()
+    }
+
+    fn desktop_display_size(&mut self) -> (u32, u32) {
+        self.desktop_display_size
+    }
+
+    fn fullscreen_scale_mode(&mut self) -> i32 {
+        self.effective_fullscreen_scale_mode()
+    }
+
+    fn set_message_auxiliary_input_mask(&mut self, mask: i32) {
+        self.message_auxiliary_input_mask = mask;
+    }
+
+    /// Sys81:1E (sub_46EB30): SendMessageA of the button's down and up
+    /// messages, handled at once by the WndProc. lParam is the GetCursorPos
+    /// screen point, which the WndProc reads as a client point, so a
+    /// window away from the screen origin clicks off by its client origin.
+    fn inject_mouse_click(&mut self, button: i32) -> bool {
+        if !matches!(button, 1 | 2 | 4 | 5 | 6) {
+            return false;
+        }
+        let saved = self.mouse_pos;
+        let (mut x, mut y) = saved.unwrap_or_default();
+        if self.window_mode == 0 && self.window_surface_width > 0 && self.window_surface_height > 0 {
+            let (left, top) = self.window_outer_position;
+            let (frame_width, frame_height) = self.window_decoration_size;
+            let (client_left, client_top) = (left + frame_width / 2, top + frame_height - frame_width / 2);
+            x += client_left as f32 * self.screen_width as f32 / self.window_surface_width as f32;
+            y += client_top as f32 * self.screen_height as f32 / self.window_surface_height as f32;
+        }
+        let (press, release) = if button == 1 {
+            (RuntimeInputEvent::MousePress { x, y }, RuntimeInputEvent::MouseRelease { x, y })
+        } else {
+            (
+                RuntimeInputEvent::ButtonPress { button, x, y },
+                RuntimeInputEvent::ButtonRelease { button, x, y },
+            )
+        };
+        apply_runtime_input_event(self, press);
+        apply_runtime_input_event(self, release);
+        self.mouse_pos = saved;
+        true
+    }
+
+    fn display_adapter_identifier(&mut self) -> (String, [u16; 4]) {
+        (self.display_adapter_description.clone(), [0; 4])
     }
 
     fn window_active(&mut self) -> bool {
@@ -20497,25 +20606,22 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
         self.host_realtime_clock.then(platform::host_uptime_ns)
     }
 
+    /// GetKeyboardState: 0x80 for a held key or button, bit 0 its toggle.
     fn keyboard_state(&mut self) -> [u8; 256] {
         let mut state = [0u8; 256];
-        if !self.pending_input_consumed
-            && self.pending_input_state.unwrap_or_default() != 0
-            && let Some(descriptor) = self.pending_input_descriptor
-            && let Ok(index) = usize::try_from(descriptor)
-            && let Some(value) = state.get_mut(index)
-        {
-            *value = 0x80;
+        for (index, value) in state.iter_mut().enumerate() {
+            *value = u8::from(self.key_toggle_bits[index]);
+        }
+        for &descriptor in &self.input_physically_held {
+            if let Some(value) = usize::try_from(descriptor).ok().and_then(|index| state.get_mut(index)) {
+                *value |= 0x80;
+            }
         }
         state
     }
 
     fn pointer_position(&mut self, index: i32) -> Option<(i32, i32)> {
-        (index == 0).then(|| {
-            self.mouse_pos
-                .map(|(x, y)| (x.round() as i32, y.round() as i32))
-                .unwrap_or_default()
-        })
+        usize::try_from(index).ok().and_then(|index| self.button_press_points.get(index).copied())
     }
 
     fn runtime_command_line(&mut self) -> String {
@@ -20564,6 +20670,46 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
         }
         self.system_config_input_mode = mode;
         true
+    }
+
+    /// Named Win32 mutexes are visible to every process: an exclusive lock
+    /// on a per-name file in the temp directory. An empty name is an
+    /// unnamed mutex and always new.
+    fn create_named_mutex(&mut self, name: &str) -> Option<u64> {
+        self.last_named_mutex += 1;
+        let token = self.last_named_mutex;
+        if name.is_empty() {
+            return Some(token);
+        }
+        let file_name: String = name.bytes().map(|byte| format!("{byte:02x}")).collect();
+        let directory = std::env::temp_dir().join("ethornell-mutex");
+        std::fs::create_dir_all(&directory).ok()?;
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(directory.join(file_name))
+            .ok()?;
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            // SAFETY: the descriptor is owned by `file` for the call.
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+                return None;
+            }
+        }
+        self.named_mutexes.insert(token, file);
+        Some(token)
+    }
+
+    fn release_named_mutex(&mut self, token: u64) {
+        self.named_mutexes.remove(&token);
+    }
+
+    /// The renderer's shaders cover ps_3_0; the bicubic D3DX effect is not
+    /// available (no d3dx9_43.dll), so Sys81:6F(1) fails as on such a PC.
+    fn pixel_shader_version(&mut self) -> u16 {
+        0x0300
     }
 
     fn set_shader_effect_enabled(&mut self, enabled: bool) -> bool {
@@ -20640,6 +20786,42 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
         wait_for_uninstaller: bool,
     ) -> bool {
         self.spawn_native_command(working_directory, command_line, restore_parent_window, wait_for_uninstaller, true)
+    }
+
+    fn launch_process_and_wait(
+        &mut self,
+        current_directory: &str,
+        command_line: &str,
+        _show_window: bool,
+        hide_main_window: bool,
+    ) -> Option<u32> {
+        if file_policy::restricted() || host_dialog::host_dialogs_suppressed() {
+            return None;
+        }
+        let mut arguments = native_system::split_native_command_line(command_line);
+        if arguments.is_empty() {
+            return None;
+        }
+        let executable = arguments.remove(0);
+        let working_path = runtime_file_path_from_root(&self.manager, &self.native_root, current_directory)
+            .unwrap_or_else(|| PathBuf::from(current_directory));
+        let executable_path = runtime_file_path_from_root(&self.manager, &self.native_root, &executable)
+            .unwrap_or_else(|| PathBuf::from(&executable));
+        let mut child = std::process::Command::new(&executable_path)
+            .args(&arguments)
+            .current_dir(&working_path)
+            .spawn()
+            .ok()?;
+        // sub_49ACE0(0/1) around the wait when the window was shown.
+        if hide_main_window {
+            self.pending_window_visible = Some(false);
+        }
+        let status = child.wait().ok();
+        if hide_main_window {
+            self.pending_window_visible = Some(true);
+        }
+        tracing::info!(command_line, ?status, "LaunchProcessAndWait");
+        Some(status.and_then(|status| status.code()).unwrap_or(0) as u32)
     }
 
     fn schedule_restart(&mut self, working_directory: &str, command_line: &str, error_message: Option<&str>) {
@@ -21522,9 +21704,6 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
         if let Some(result) = self.dispatch_native_system(call) {
             return result;
         }
-        if let Some(result) = self.dispatch_native_system_ext(call) {
-            return result;
-        }
         let (group, id) = (call.group(), call.id());
         let stack = call.args_mut();
         match (group, id) {
@@ -22077,118 +22256,6 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
                 let mode = ethornell_vm::SysApi::launcher_mode(self);
                 tracing::info!(mode, "QueryLauncherMode");
                 return Ok(ethornell_vm::Value::Int(mode));
-            }
-            (0x81, 0x0e) => {
-                let value = stack.pop();
-                tracing::info!(?value, "GetAdjustedDesktopDimensions");
-                return Ok(ethornell_vm::Value::None);
-            }
-            // The VM answers Sys81:0F (IsIconic) before host dispatch.
-            (0x81, 0x0f) => {
-                return Ok(ethornell_vm::Value::Int(i32::from(self.window_iconic)));
-            }
-            (0x81, 0x18) => {
-                let value = pop_int_value(stack).unwrap_or_default();
-                tracing::info!(value, "Sys2_18");
-                return Ok(ethornell_vm::Value::None);
-            }
-            (0x81, 0x19) => {
-                let destination = stack.pop();
-                tracing::debug!(?destination, "CopyTouchRecords");
-                return Ok(ethornell_vm::Value::Int(0));
-            }
-            (0x81, 0x2f) => {
-                let path = pop_string_value(stack).unwrap_or_default();
-                if let Some(policy) = file_policy::active() { return Ok(ethornell_vm::Value::Int(i32::from(policy.probe_writable(&path).is_ok()))); }
-                let writable = runtime_file_path_from_root(&self.manager, &self.native_root, &path)
-                    .as_deref()
-                    .map(platform::test_path_writable)
-                    .unwrap_or(false);
-                tracing::info!(path, writable, "TestPathWritable");
-                return Ok(ethornell_vm::Value::Int(i32::from(writable)));
-            }
-            (0x81, 0x31) => {
-                let args = pop_args(stack, 4);
-                tracing::info!(args = ?summarize_values(&args), "InternetRead unavailable in portable runtime");
-                return Ok(ethornell_vm::Value::Int(0));
-            }
-            (0x81, 0x36) => {
-                let destination = stack.pop();
-                tracing::info!(
-                    ?destination,
-                    "EnumerateDriveTypes unavailable outside Windows"
-                );
-                return Ok(ethornell_vm::Value::Int(0));
-            }
-            (0x81, 0x37) => {
-                let path = pop_string_value(stack).unwrap_or_default();
-                let destination = stack.pop();
-                tracing::info!(
-                    path,
-                    ?destination,
-                    "GetDiskFreeMegabytes unavailable outside native Windows ABI"
-                );
-                return Ok(ethornell_vm::Value::Int(0));
-            }
-            (0x81, 0xf7) => {
-                let args = pop_args(stack, 4);
-                tracing::info!(args = ?summarize_values(&args), "ValidateOrCreateUserPathEx");
-                return Ok(ethornell_vm::Value::Int(0));
-            }
-            (0x81, 0x35) => {
-                let file = pop_string_value(stack).unwrap_or_default();
-                let archive = pop_string_value(stack).unwrap_or_default();
-                tracing::info!(archive, file, "OpenResourceHandle");
-                return Ok(ethornell_vm::Value::Int(1));
-            }
-            (0x81, 0x30) => {
-                let args = pop_args(stack, 5);
-                tracing::info!(args = ?summarize_values(&args), "ReadResourceToBuffer");
-                return Ok(ethornell_vm::Value::Int(0));
-            }
-            (0x81, 0x60) => {
-                let height = pop_int_value(stack).unwrap_or_default();
-                let width = pop_int_value(stack).unwrap_or_default();
-                let index = pop_int_value(stack).unwrap_or_default();
-                let status = if !(0..8).contains(&index) {
-                    1
-                } else if width == 0 || height == 0 {
-                    2
-                } else {
-                    self.register_display_mode(index as usize, width, height);
-                    0
-                };
-                return Ok(ethornell_vm::Value::Int(status));
-            }
-            (0x81, 0x62) => {
-                let value = pop_int_value(stack).unwrap_or_default();
-                let accepted = (0..=1).contains(&value);
-                if accepted {
-                    self.window_monitor_adapter_mode = value;
-                }
-                tracing::info!(value, accepted, "SetWindowMonitorAdapterMode");
-                return Ok(ethornell_vm::Value::Int(i32::from(accepted)));
-            }
-            (0x81, 0x63) => {
-                let value = pop_int_value(stack).unwrap_or_default();
-                self.system_config_input_mode = i32::from(value != 0);
-                tracing::info!(value = self.system_config_input_mode, "SetConfigInputMode");
-                return Ok(ethornell_vm::Value::Int(self.system_config_input_mode));
-            }
-            (0x81, 0x64) => {
-                let height = pop_int_value(stack).unwrap_or_default();
-                let width = pop_int_value(stack).unwrap_or_default();
-                self.configure_screen_size(width, height);
-                return Ok(ethornell_vm::Value::None);
-            }
-            (0x81, 0x6f) => {
-                let value = pop_int_value(stack).unwrap_or_default();
-                let accepted = (0..=1).contains(&value);
-                if accepted {
-                    self.shader_effect_enabled = value != 0;
-                }
-                tracing::info!(value, accepted, "SetShaderEffectEnabled");
-                return Ok(ethornell_vm::Value::Int(i32::from(accepted)));
             }
             _ => {}
         }

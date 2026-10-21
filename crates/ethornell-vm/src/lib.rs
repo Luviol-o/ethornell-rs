@@ -707,6 +707,26 @@ pub trait SysApi {
         None
     }
 
+    /// D3DADAPTER_IDENTIFIER9 Description and DriverVersion words (product,
+    /// version, subversion, build); empty when the host has none.
+    fn display_adapter_identifier(&mut self) -> (String, [u16; 4]) {
+        (String::new(), [0; 4])
+    }
+
+    /// GetVersionExA: major, minor, build, platform id and szCSDVersion.
+    /// Hosts without Windows report the zeroed structure.
+    fn host_os_version(&mut self) -> ([u32; 4], String) {
+        ([0; 4], String::new())
+    }
+
+    /// The desktop display mode (GetAdapterDisplayMode, dword_5177C0/C4).
+    fn desktop_display_size(&mut self) -> (u32, u32) {
+        (0, 0)
+    }
+
+    /// dword_503E40[index]: the logical point of the last press of button
+    /// slot `index` (0 left, 1 right, 2 middle, 3 X1, 4 X2), (-1, -1) before
+    /// the first one.
     fn pointer_position(&mut self, _index: i32) -> Option<(i32, i32)> {
         None
     }
@@ -725,6 +745,11 @@ pub trait SysApi {
 
     fn set_window_monitor_adapter_mode(&mut self, mode: i32) -> bool {
         (0..=1).contains(&mode)
+    }
+
+    /// sub_45EDE0 (Sys81:61).
+    fn fullscreen_scale_mode(&mut self) -> i32 {
+        0
     }
 
     fn set_config_input_mode(&mut self, mode: i32) -> bool {
@@ -759,6 +784,10 @@ pub trait SysApi {
         false
     }
 
+    /// dword_507690 (Sys81:1F): the extra input bits CProcDspMsg and
+    /// CProcedure accept besides 0x80000181.
+    fn set_message_auxiliary_input_mask(&mut self, _mask: i32) {}
+
     /// Host touch-window registration used by Sys81:0x18.
     fn register_touch_input(&mut self, _enabled: bool) -> bool {
         false
@@ -771,16 +800,18 @@ pub trait SysApi {
 
     /// Process launch contract used by Sys81:0xE0. The portable default is an
     /// explicit unavailable result rather than a fabricated success.
-    fn launch_process_wait(
+    /// Sys81:E0 (sub_472A10 with a8 = 1): CreateProcessA, then wait for
+    /// the process while pumping window messages, the main window hidden
+    /// meanwhile when `hide_main_window`. `None` when it cannot start,
+    /// else the exit code.
+    fn launch_process_and_wait(
         &mut self,
-        _working_directory: &str,
-        _executable: &str,
-        _arguments: &str,
-        _error_message: &str,
+        _current_directory: &str,
+        _command_line: &str,
         _show_window: bool,
-        _exit_code: Option<&mut i32>,
-    ) -> bool {
-        false
+        _hide_main_window: bool,
+    ) -> Option<u32> {
+        None
     }
 
     /// Host validation/creation hook for the Win32 special-folder operation
@@ -797,6 +828,19 @@ pub trait SysApi {
 
     fn pixel_shader_version(&mut self) -> u16 {
         0
+    }
+
+    /// CreateMutexA(NULL, TRUE, name): a token for the new mutex, `None`
+    /// when it already exists anywhere on the host (ERROR_ALREADY_EXISTS).
+    fn create_named_mutex(&mut self, _name: &str) -> Option<u64> {
+        Some(0)
+    }
+
+    fn release_named_mutex(&mut self, _token: u64) {}
+
+    /// Whether d3dx9_43.dll's D3DXCreateEffect is available (Sys81:6E).
+    fn d3dx_effects_available(&mut self) -> bool {
+        false
     }
 
     fn delete_file(&mut self, _root: &str, _file: &str) -> bool {
@@ -2129,30 +2173,10 @@ fn target_cpu_brand_string() -> Option<String> {
             .iter()
             .position(|byte| *byte == 0)
             .unwrap_or(bytes.len());
-        let text = String::from_utf8_lossy(&bytes[..end]);
-        return Some(text.split_whitespace().collect::<Vec<_>>().join(" "));
+        return Some(String::from_utf8_lossy(&bytes[..end]).into_owned());
     }
     #[allow(unreachable_code)]
     None
-}
-
-fn target_cpu_signature_words() -> [u32; 4] {
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    {
-        #[cfg(target_arch = "x86")]
-        use std::arch::x86::__cpuid;
-        #[cfg(target_arch = "x86_64")]
-        use std::arch::x86_64::__cpuid;
-        let result = __cpuid(1);
-        return [
-            result.eax & 0xffff,
-            (result.eax >> 16) & 0xffff,
-            result.edx & 0xffff,
-            (result.edx >> 16) & 0xffff,
-        ];
-    }
-    #[allow(unreachable_code)]
-    [0; 4]
 }
 
 fn native_file_hash(bytes: &[u8]) -> [u32; 2] {
@@ -2173,48 +2197,65 @@ fn native_file_hash_update(initial: [u32; 2], bytes: &[u8]) -> [u32; 2] {
     [hash, u32::from_le_bytes(tail)]
 }
 
-fn wide_string_similarity(left: &[u16], right: &[u16]) -> i32 {
-    // sub_495C50 has an asymmetric empty-string fast path: an empty second
-    // operand returns zero, while an empty first operand returns the second
-    // length through the normal len(left)+len(right)-LCS result.
-    if right.is_empty() {
+/// sub_496770: the grid walk where every step costs one and a diagonal is
+/// allowed only on equal units; the result is len(a1) + len(a2) minus the
+/// shortest walk, i.e. the longest common subsequence. An empty `a2`
+/// returns 0 before the walk.
+fn wide_string_similarity(a1: &[u16], a2: &[u16]) -> i32 {
+    if a2.is_empty() {
         return 0;
     }
-    let mut previous = vec![0usize; right.len() + 1];
-    let mut current = vec![0usize; right.len() + 1];
-    for &left_value in left {
-        for (index, &right_value) in right.iter().enumerate() {
-            current[index + 1] = if left_value == right_value {
-                previous[index] + 1
-            } else {
-                current[index].max(previous[index + 1])
-            };
+    let mut previous: Vec<i32> = (0..=a2.len() as i32).collect();
+    let mut current = vec![0i32; a2.len() + 1];
+    for (row, &unit) in a1.iter().enumerate() {
+        current[0] = row as i32 + 1;
+        for column in 1..=a2.len() {
+            let mut best = current[column - 1].min(previous[column]);
+            if a2[column - 1] == unit {
+                best = best.min(previous[column - 1]);
+            }
+            current[column] = best + 1;
         }
         std::mem::swap(&mut previous, &mut current);
-        current.fill(0);
     }
-    left.len()
-        .saturating_add(right.len())
-        .saturating_sub(previous[right.len()])
-        .min(i32::MAX as usize) as i32
+    (a1.len() + a2.len()) as i32 - previous[a2.len()]
 }
 
-fn adjusted_desktop_dimensions((width, height): (i32, i32)) -> (i32, i32) {
-    let width = width.max(1);
-    let height = height.max(1);
-    let adjusted_width = if 4_i64.saturating_mul(i64::from(width)) / i64::from(height) >= 10 {
-        width / 2
+/// sub_45EAE0(.., 1): a desktop of 2.5:1 or wider is two monitors side by
+/// side (half the width); one at most 1.25:1 tall is two stacked (half the
+/// height). Unsigned arithmetic; the target divides by zero on an empty
+/// mode, here an empty mode stays empty.
+fn adjusted_desktop_dimensions((width, height): (u32, u32)) -> (u32, u32) {
+    let adjusted_width = if height != 0 && 4u32.wrapping_mul(width) / height >= 10 {
+        width >> 1
     } else {
         width
     };
-    let adjusted_height = if height / width != 0
-        && 100_i64.saturating_mul(i64::from(height)) / i64::from(width) < 125
+    let adjusted_height = if width != 0
+        && height / width != 0
+        && 100u32.wrapping_mul(height) / width < 125
     {
-        height / 2
+        height >> 1
     } else {
         height
     };
-    (adjusted_width.max(1), adjusted_height.max(1))
+    (adjusted_width, adjusted_height)
+}
+
+/// sub_496650: drops leading spaces, folds each run of spaces into one and
+/// removes one trailing space.
+fn bgi_normalize_spaces(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.trim_start_matches(' ').chars() {
+        if ch == ' ' && out.ends_with(' ') {
+            continue;
+        }
+        out.push(ch);
+    }
+    if out.ends_with(' ') {
+        out.pop();
+    }
+    out
 }
 
 fn placeholder_loaded_program(
@@ -2318,10 +2359,6 @@ pub struct Vm {
     system_wait_state: i32,
     string_hash_tables: BTreeMap<i32, Vec<String>>,
     read_flags: BTreeMap<String, ReadFlagBits>,
-    display_mode_slots: [Option<(i32, i32)>; 8],
-    window_monitor_adapter_mode: i32,
-    config_input_mode: i32,
-    shader_effect_enabled: bool,
     save_data_integrity_enabled: i32,
     /// Target dword_5668A0: one-shot selection of the next binary/BMV
     /// procedure path. The consuming selector always resets it.
@@ -2534,6 +2571,11 @@ impl Vm {
     /// interactive runs).
     pub fn set_clock_base_ms(&mut self, base_ms: u32) {
         self.timing.set_base(base_ms);
+    }
+
+    /// dword_503DE8 (Sys81:04): the largest clock step sub_499290 counts.
+    pub fn clock_jump_threshold_ms(&self) -> u32 {
+        self.system81_shared.lock().expect("system81 state poisoned").clock_jump_threshold_ms as u32
     }
 
     pub fn advance_time_ms(&mut self, milliseconds: u64) {
@@ -8792,19 +8834,11 @@ impl Vm {
                 Value::Int(i32::from(accepted))
             }
             (0x81, 0x07) => {
+                // sub_48F090: index < 5 (unsigned) copies the press slot.
                 let index = self.pop_int()?;
                 let destination = self.pop_ptr()?;
-                let value = if (0..5).contains(&index) {
-                    let cached = self
-                        .system81_shared
-                        .lock()
-                        .expect("system81 state poisoned")
-                        .coordinate_slots[index as usize];
-                    cached.or_else(|| api.pointer_position(index))
-                } else {
-                    None
-                };
-                if let Some((x, y)) = value {
+                if (index as u32) < 5 {
+                    let (x, y) = api.pointer_position(index).unwrap_or((-1, -1));
                     self.write_int(destination, 2, x as u32)?;
                     self.write_int(destination.wrapping_add(4), 2, y as u32)?;
                     Value::Int(1)
@@ -8813,63 +8847,71 @@ impl Vm {
                 }
             }
             (0x81, 0x08) => {
+                // GetUserNameA with a 257-byte buffer: a longer name fails
+                // and leaves the buffer as it was.
                 let destination = self.pop_ptr()?;
-                self.write_c_string(destination, &api.host_user_name())?;
+                let name = api.host_user_name();
+                if self.encode_native_string(&name).len() < 257 {
+                    self.write_c_string(destination, &name)?;
+                }
                 Value::None
             }
             (0x81, 0x09) => {
+                // GetComputerNameA with nSize 16 (the NetBIOS name, at most
+                // 15 characters; a longer one fails, nothing written).
                 let destination = self.pop_ptr()?;
-                self.write_c_string(destination, &api.host_computer_name())?;
+                let name = api.host_computer_name();
+                if self.encode_native_string(&name).len() < 16 {
+                    self.write_c_string(destination, &name)?;
+                }
                 Value::None
             }
             (0x81, 0x0a) => {
+                // sub_46FC80: CPUID 0x80000002..4 through sub_496650; 0 and
+                // nothing written when leaf 0x80000004 is not supported.
                 let destination = self.pop_ptr()?;
-                if let Some(brand) = target_cpu_brand_string() {
-                    self.write_c_string(destination, &brand)?;
-                    Value::Int(1)
-                } else {
-                    if destination != 0 {
-                        self.write_c_string(destination, "")?;
+                match target_cpu_brand_string() {
+                    Some(brand) => {
+                        self.write_c_string(destination, &bgi_normalize_spaces(&brand))?;
+                        Value::Int(1)
                     }
-                    Value::Int(0)
+                    None => Value::Int(0),
                 }
             }
             (0x81, 0x0b) => {
+                // sub_45E9F0: the D3DADAPTER_IDENTIFIER9 that sub_4605A0
+                // read at start-up (zeroed when GetAdapterIdentifier
+                // failed): Description through sub_496650, then the
+                // DriverVersion words product, version, subversion, build.
                 let _ignored = self.pop_ptr()?;
-                let signature_destination = self.pop_ptr()?;
-                let text = self.pop_ptr()?;
-                if text != 0 {
-                    let normalized = self
-                        .read_c_string(text)?
-                        .split_whitespace()
-                        .collect::<Vec<_>>()
-                        .join(" ");
-                    self.write_c_string(text, &normalized)?;
-                }
-                for (index, value) in target_cpu_signature_words().into_iter().enumerate() {
+                let version_destination = self.pop_ptr()?;
+                let description_destination = self.pop_ptr()?;
+                let (description, version) = api.display_adapter_identifier();
+                self.write_c_string(description_destination, &bgi_normalize_spaces(&description))?;
+                for (index, value) in version.into_iter().enumerate() {
                     self.write_int(
-                        signature_destination.wrapping_add(index as u32 * 4),
+                        version_destination.wrapping_add(index as u32 * 4),
                         2,
-                        value,
+                        u32::from(value),
                     )?;
                 }
                 Value::None
             }
             (0x81, 0x0c) => {
+                // sub_46FD60: GetVersionExA once (OSVERSIONINFOA zeroed
+                // first, so a host without Windows reports 0.0.0 platform 0
+                // and an empty service pack).
                 let service_pack = self.pop_ptr()?;
                 let version = self.pop_ptr()?;
-                let values = if cfg!(target_os = "windows") {
-                    [10u32, 0, 0, 2]
-                } else {
-                    [0u32, 0, 0, 0]
-                };
+                let (values, csd) = api.host_os_version();
                 for (index, value) in values.into_iter().enumerate() {
                     self.write_int(version.wrapping_add(index as u32 * 4), 2, value)?;
                 }
-                self.write_c_string(service_pack, "")?;
+                self.write_c_string(service_pack, &csd)?;
                 Value::None
             }
             (0x81, 0x0d) => {
+                // GlobalMemoryStatusEx: ullTotalPhys / ullAvailPhys >> 20.
                 let available = self.pop_ptr()?;
                 let total = self.pop_ptr()?;
                 let (total_mb, available_mb) = api.host_physical_memory_mb();
@@ -8878,10 +8920,11 @@ impl Vm {
                 Value::None
             }
             (0x81, 0x0e) => {
+                // sub_45EAE0(.., 1) over the start-up GetAdapterDisplayMode.
                 let destination = self.pop_ptr()?;
-                let (width, height) = adjusted_desktop_dimensions(api.runtime_screen_dimensions());
-                self.write_int(destination, 2, width as u32)?;
-                self.write_int(destination.wrapping_add(4), 2, height as u32)?;
+                let (width, height) = adjusted_desktop_dimensions(api.desktop_display_size());
+                self.write_int(destination, 2, width)?;
+                self.write_int(destination.wrapping_add(4), 2, height)?;
                 Value::None
             }
             (0x81, 0x0f) => Value::Int(i32::from(api.window_minimized())),
@@ -8890,9 +8933,9 @@ impl Vm {
                 let index = self.pop_int()?;
                 // sub_497B40 rejects a descriptor >= 0x100 with a fatal error.
                 if !(0..256).contains(&index) {
-                    return Err(VmError::Runtime(format!(
-                        "Sys81:10 input descriptor {index} is out of range"
-                    )));
+                    return Err(VmError::Runtime(
+                        "不正な仮想キーコードが指定されています".into(),
+                    ));
                 } else {
                     api.swap_input_repeat_flag(index, replacement);
                     let mut state = self
@@ -8924,85 +8967,38 @@ impl Vm {
                 Value::None
             }
             (0x81, 0x16) => {
+                // sub_46B720: capacity <= 0x200 (unsigned) empties the touch
+                // history and sets its capacity and minimum step.
                 let distance = self.pop_int()?;
                 let capacity = self.pop_int()?;
                 let accepted = self
                     .system81_shared
                     .lock()
                     .expect("system81 state poisoned")
-                    .configure_pointer_history(capacity, distance);
+                    .configure_touch_history(capacity as u32, distance as u32);
                 Value::Int(i32::from(accepted))
             }
             (0x81, 0x17) => {
-                let count = self.pop_int()?.max(0) as usize;
-                let start = self.pop_int()?.max(0) as usize;
-                let distances = self.pop_ptr()?;
-                let points = self.pop_ptr()?;
-                if let Some((x, y)) = api.pointer_position(0) {
-                    self.system81_shared
-                        .lock()
-                        .expect("system81 state poisoned")
-                        .record_pointer(x, y);
-                }
-                let samples = {
-                    let state = self
-                        .system81_shared
-                        .lock()
-                        .expect("system81 state poisoned");
-                    state
-                        .pointer_history
-                        .iter()
-                        .skip(start)
-                        .take(count)
-                        .copied()
-                        .collect::<Vec<_>>()
-                };
-                for (index, sample) in samples.iter().enumerate() {
-                    self.write_int(points.wrapping_add(index as u32 * 8), 2, sample.x as u32)?;
-                    self.write_int(
-                        points.wrapping_add(index as u32 * 8 + 4),
-                        2,
-                        sample.y as u32,
-                    )?;
-                    let distance = samples.get(index + 1).map_or(-1, |next| {
-                        let dx = sample.x.saturating_sub(next.x);
-                        let dy = sample.y.saturating_sub(next.y);
-                        (((i64::from(dx) * i64::from(dx) + i64::from(dy) * i64::from(dy)) as f64)
-                            .sqrt()) as i32
-                    });
-                    self.write_int(distances.wrapping_add(index as u32 * 4), 2, distance as u32)?;
-                }
-                Value::Int(samples.len().min(i32::MAX as usize) as i32)
+                // sub_46B860 walks the WM_TOUCH history (dword_5666BC). The
+                // host delivers no WM_TOUCH, so the history stays empty and
+                // `start < count` never holds.
+                let _count = self.pop_int()?;
+                let _start = self.pop_int()?;
+                let _angles = self.pop_ptr()?;
+                let _points = self.pop_ptr()?;
+                Value::Int(0)
             }
             (0x81, 0x18) => {
+                // sub_46B660: RegisterTouchWindow / UnregisterTouchWindow
+                // when user32 has them (dword_566690), else 0.
                 let enabled = self.pop_int()? != 0;
-                let accepted = api.register_touch_input(enabled);
-                if accepted {
-                    self.system81_shared
-                        .lock()
-                        .expect("system81 state poisoned")
-                        .touch_registered = enabled;
-                }
-                Value::Int(i32::from(accepted))
+                Value::Int(i32::from(api.register_touch_input(enabled)))
             }
             (0x81, 0x19) => {
-                let destination = self.pop_ptr()?;
-                let records = self
-                    .system81_shared
-                    .lock()
-                    .expect("system81 state poisoned")
-                    .touch_records
-                    .clone();
-                for (record_index, record) in records.iter().enumerate() {
-                    for (field_index, value) in record.values.into_iter().enumerate() {
-                        self.write_int(
-                            destination.wrapping_add((record_index * 24 + field_index * 4) as u32),
-                            2,
-                            value as u32,
-                        )?;
-                    }
-                }
-                Value::Int(records.len().min(i32::MAX as usize) as i32)
+                // sub_46B6A0 counts (and copies, 24 bytes each) the active
+                // contacts of dword_5666B0; none without WM_TOUCH.
+                let _destination = self.pop_ptr()?;
+                Value::Int(0)
             }
             (0x81, 0x1b) => {
                 let value = self.pop_int()?;
@@ -9019,21 +9015,21 @@ impl Vm {
                 Value::Int(i32::from(accepted))
             }
             (0x81, 0x1d) => {
-                let destination = self.pop_ptr()?;
-                let _device = self.pop_ptr()?;
-                let (x, y) = api.pointer_position(0).unwrap_or_default();
-                for (index, value) in [x, y, 0, 0, -1, 0].into_iter().enumerate() {
-                    self.write_int(destination.wrapping_add(index as u32 * 4), 2, value as u32)?;
-                }
-                Value::Int(1)
+                // sub_4613C0 sums the DirectInput joysticks of dword_565F18
+                // (all, or the one whose id matches). The host enumerates no
+                // DirectInput device, so the result is 0x80000001 and the
+                // handler pushes 0 without writing.
+                let _device = self.pop_int()?;
+                let _destination = self.pop_ptr()?;
+                Value::Int(0)
             }
             (0x81, 0x1e) => {
                 let button = self.pop_int()?;
-                let valid = matches!(button, 1 | 2 | 4 | 5 | 6);
-                Value::Int(i32::from(valid && api.inject_mouse_click(button)))
+                Value::Int(i32::from(api.inject_mouse_click(button)))
             }
             (0x81, 0x1f) => {
                 let mask = self.pop_int()?;
+                api.set_message_auxiliary_input_mask(mask);
                 self.system81_shared
                     .lock()
                     .expect("system81 state poisoned")
@@ -9456,53 +9452,32 @@ impl Vm {
                 Value::Int(thread_id)
             }
             (0x81, 0x60) => {
-                let second = self.pop_int()?;
-                let first = self.pop_int()?;
+                // sub_4615A0: index >= 8 (unsigned) -> 1, a zero dimension
+                // -> 2, else dword_506B8C/506BAC[index] = width/height.
+                let height = self.pop_int()?;
+                let width = self.pop_int()?;
                 let index = self.pop_int()?;
-                let status = if !(0..8).contains(&index) {
+                let status = if index as u32 >= 8 {
                     1
-                } else if first == 0 || second == 0 {
+                } else if width == 0 || height == 0 {
                     2
                 } else {
-                    self.display_mode_slots[index as usize] = Some((first, second));
-                    api.register_display_mode(index as usize, first, second);
+                    api.register_display_mode(index as usize, width, height);
                     0
                 };
                 Value::Int(status)
             }
-            (0x81, 0x61) => {
-                let mut mode = self.config_input_mode;
-                if mode == 2 {
-                    let (width, height) =
-                        adjusted_desktop_dimensions(api.runtime_screen_dimensions());
-                    let required = self
-                        .display_mode_slots
-                        .iter()
-                        .flatten()
-                        .next()
-                        .copied()
-                        .unwrap_or((0, 0));
-                    if width < required.0 || height < required.1 {
-                        mode = 0;
-                    }
-                }
-                Value::Int(mode)
-            }
+            // sub_45EDE0: the effective full-screen scaling mode.
+            (0x81, 0x61) => Value::Int(api.fullscreen_scale_mode()),
             (0x81, 0x62) => {
+                // sub_45ED90: dword_50721C = mode for mode <= 1 (unsigned).
                 let mode = self.pop_int()?;
-                let accepted = (0..=1).contains(&mode) && api.set_window_monitor_adapter_mode(mode);
-                if accepted {
-                    self.window_monitor_adapter_mode = mode;
-                }
-                Value::Int(i32::from(accepted))
+                Value::Int(i32::from(mode as u32 <= 1 && api.set_window_monitor_adapter_mode(mode)))
             }
             (0x81, 0x63) => {
+                // sub_45EDC0: dword_565EAC = mode for mode <= 2 (unsigned).
                 let mode = self.pop_int()?;
-                let accepted = (0..=2).contains(&mode) && api.set_config_input_mode(mode);
-                if accepted {
-                    self.config_input_mode = mode;
-                }
-                Value::Int(i32::from(accepted))
+                Value::Int(i32::from(mode as u32 <= 2 && api.set_config_input_mode(mode)))
             }
             (0x81, 0x64) => {
                 let height = self.pop_int()?;
@@ -9570,80 +9545,95 @@ impl Vm {
                     }
                 }
             }
-            (0x81, 0x6d) => {
-                let version = api.pixel_shader_version();
-                self.system81_shared
-                    .lock()
-                    .expect("system81 state poisoned")
-                    .pixel_shader_version = version;
-                Value::Int(i32::from(version))
-            }
-            (0x81, 0x6e) => Value::Int(i32::from(std::thread::panicking())),
+            // LOWORD(D3DCAPS9::PixelShaderVersion) (dword_5172E8).
+            (0x81, 0x6d) => Value::Int(i32::from(api.pixel_shader_version())),
+            // The D3DXCreateEffect import of d3dx9_43.dll (sub_460B00).
+            (0x81, 0x6e) => Value::Int(i32::from(api.d3dx_effects_available())),
             (0x81, 0x6f) => {
+                // sub_460AB0: 0 drops the bicubic effect and returns 1; 1
+                // needs ps_3_0 and D3DXCreateEffect (sub_460980), else 0.
                 let mode = self.pop_int()?;
                 let accepted = match mode {
                     0 => api.set_shader_effect_enabled(false),
-                    1 => api.set_shader_effect_enabled(true),
+                    1 => {
+                        api.pixel_shader_version() >= 0x0300
+                            && api.d3dx_effects_available()
+                            && api.set_shader_effect_enabled(true)
+                    }
                     _ => false,
                 };
-                if accepted {
-                    self.shader_effect_enabled = mode != 0;
-                }
                 Value::Int(i32::from(accepted))
             }
             (0x81, 0xb0) => {
-                // Handler sub_48C2F0 pops helper a2 first and a1 second. The
-                // distance is symmetric for non-empty strings, but target's
-                // empty-a2 fast path is not, so preserve the native order.
-                let right = self.pop_ptr()?;
-                let left = self.pop_ptr()?;
-                if left == 0 || right == 0 {
+                // sub_496770(a1 = first pop, a2 = second pop): -1 for a null
+                // pointer, else the LCS length of the two UTF-16 strings.
+                let a1 = self.pop_ptr()?;
+                let a2 = self.pop_ptr()?;
+                if a1 == 0 || a2 == 0 {
                     Value::Int(-1)
                 } else {
-                    let left = self.read_wide_c_string(left)?;
-                    let right = self.read_wide_c_string(right)?;
-                    Value::Int(wide_string_similarity(&left, &right))
+                    let a1 = self.read_wide_c_string(a1)?;
+                    let a2 = self.read_wide_c_string(a2)?;
+                    Value::Int(wide_string_similarity(&a1, &a2))
                 }
             }
             (0x81, 0xb7) => {
+                // sub_496700: each Shift-JIS character becomes one 16-bit
+                // unit, a double-byte one as lead << 8 | trail (no UTF-16
+                // conversion); a null destination only counts.
                 let source = self.pop_ptr()?;
                 let destination = self.pop_ptr()?;
                 if source == 0 {
                     Value::Int(-1)
                 } else {
-                    let source_bytes = self.read_c_string_bytes(source)?;
-                    let (decoded, _, _) = encoding_rs::SHIFT_JIS.decode(&source_bytes);
-                    let encoded = decoded.encode_utf16().collect::<Vec<_>>();
-                    if destination != 0 {
-                        for (index, value) in encoded.iter().copied().enumerate() {
-                            self.write_int(
-                                destination.wrapping_add(index as u32 * 2),
-                                1,
-                                value as u32,
-                            )?;
+                    let mut at = source;
+                    let mut out = destination;
+                    let mut count = 0i32;
+                    loop {
+                        let lead = self.read_int(at, 0)? as u8;
+                        if lead == 0 {
+                            break;
                         }
-                        self.write_int(destination.wrapping_add(encoded.len() as u32 * 2), 1, 0)?;
+                        let unit = if (0x81..=0x9f).contains(&lead) || lead >= 0xe0 && lead <= 0xfc {
+                            let trail = self.read_int(at.wrapping_add(1), 0)?;
+                            at = at.wrapping_add(2);
+                            u32::from(lead) << 8 | trail
+                        } else {
+                            at = at.wrapping_add(1);
+                            u32::from(lead)
+                        };
+                        if destination != 0 {
+                            self.write_int(out, 1, unit)?;
+                            out = out.wrapping_add(2);
+                        }
+                        count = count.wrapping_add(1);
                     }
-                    Value::Int(encoded.len().min(i32::MAX as usize) as i32)
+                    if destination != 0 {
+                        self.write_int(out, 1, 0)?;
+                    }
+                    Value::Int(count)
                 }
             }
             (0x81, 0xd0) => {
-                let capacity = self.pop_int()?;
+                // sub_46AE10: capacity <= 1 (unsigned) -> 0x80000001; else a
+                // new table, handle ++dword_566684, written to the output.
+                let capacity = self.pop_int()? as u32;
                 let destination = self.pop_ptr()?;
-                let result = self
+                let created = self
                     .system81_shared
                     .lock()
                     .expect("system81 state poisoned")
                     .create_blob_table(capacity);
-                match result {
-                    Ok(handle) => {
+                match created {
+                    Some(handle) => {
                         self.write_int(destination, 2, handle)?;
                         Value::Int(0)
                     }
-                    Err(status) => Value::Int(status),
+                    None => Value::Int(system81_state::NATIVE_INVALID_ARGUMENT),
                 }
             }
             (0x81, 0xd1) => {
+                // sub_46AEC0: 0, or 0x80000002 for an unknown handle.
                 let handle = self.pop_int()? as u32;
                 let removed = self
                     .system81_shared
@@ -9652,137 +9642,100 @@ impl Vm {
                     .blob_tables
                     .remove(&handle)
                     .is_some();
-                Value::Int(if removed {
-                    0
-                } else {
-                    system81_state::NATIVE_NOT_FOUND
-                })
+                Value::Int(if removed { 0 } else { system81_state::NATIVE_NOT_FOUND })
             }
             (0x81, 0xd2) => {
-                let handle = self.pop_int()? as u32;
+                // sub_46AF30(index output, index, source; size in edx).
+                // With an output pointer the first empty slot (or the
+                // capacity) is used and reported. Size 0 -> 0x80000003.
+                let size = self.pop_int()? as u32;
                 let source = self.pop_ptr()?;
-                let size = self.pop_int()?.max(0) as usize;
-                let requested_index = self.pop_int()?.max(0) as usize;
+                let index = self.pop_int()? as u32;
+                let handle = self.pop_int()? as u32;
                 let index_destination = self.pop_ptr()?;
-                if size == 0 {
-                    Value::Int(system81_state::NATIVE_OPERATION_FAILED)
-                } else {
-                    let range = self.resolve_range(source, size)?;
-                    let bytes = self.memory[range].to_vec();
-                    let mut state = self
-                        .system81_shared
-                        .lock()
-                        .expect("system81 state poisoned");
-                    if let Some(table) = state.blob_tables.get_mut(&handle) {
-                        let index = if index_destination != 0 {
-                            table.insert_first_free(bytes)
-                        } else {
-                            table.insert_at(requested_index, bytes);
-                            requested_index
-                        };
-                        drop(state);
-                        if index_destination != 0 {
-                            self.write_int(index_destination, 2, index as u32)?;
-                        }
-                        Value::Int(0)
-                    } else {
-                        Value::Int(system81_state::NATIVE_NOT_FOUND)
-                    }
-                }
-            }
-            (0x81, 0xd3) => {
-                let index = self.pop_int()?.max(0) as usize;
-                let handle = self.pop_int()? as u32;
-                let mut state = self
-                    .system81_shared
-                    .lock()
-                    .expect("system81 state poisoned");
-                let status = if let Some(table) = state.blob_tables.get_mut(&handle) {
-                    if index < table.slots.len() && table.slots[index].take().is_some() {
-                        0
-                    } else {
-                        system81_state::NATIVE_INVALID_INDEX
-                    }
-                } else {
-                    system81_state::NATIVE_NOT_FOUND
-                };
-                Value::Int(status)
-            }
-            (0x81, 0xd4) => {
-                let index = self.pop_int()?.max(0) as usize;
-                let handle = self.pop_int()? as u32;
-                let size_destination = self.pop_ptr()?;
-                let destination = self.pop_ptr()?;
-                let result = {
-                    let state = self
-                        .system81_shared
-                        .lock()
-                        .expect("system81 state poisoned");
-                    match state.blob_tables.get(&handle) {
-                        None => Err(system81_state::NATIVE_NOT_FOUND),
-                        Some(table) => table
-                            .slots
-                            .get(index)
-                            .and_then(|slot| slot.clone())
-                            .ok_or(system81_state::NATIVE_INVALID_INDEX),
-                    }
-                };
-                match result {
-                    Ok(bytes) => {
-                        if destination != 0 {
-                            let range = self.resolve_range(destination, bytes.len())?;
-                            self.memory[range].copy_from_slice(&bytes);
-                            self.clear_shadow_values(destination, bytes.len());
-                        }
-                        if size_destination != 0 {
-                            self.write_int(size_destination, 2, bytes.len() as u32)?;
-                        }
-                        Value::Int(0)
-                    }
-                    Err(status) => Value::Int(status),
-                }
-            }
-            (0x81, 0xd5) => {
-                let handle = self.pop_int()? as u32;
-                let count_destination = self.pop_ptr()?;
-                let pairs_destination = self.pop_ptr()?;
-                let entries = self
+                let exists = self
                     .system81_shared
                     .lock()
                     .expect("system81 state poisoned")
                     .blob_tables
-                    .get(&handle)
-                    .map(|table| {
-                        table
-                            .slots
-                            .iter()
-                            .enumerate()
-                            .filter_map(|(index, slot)| {
-                                slot.as_ref().map(|bytes| (index, bytes.len()))
-                            })
-                            .collect::<Vec<_>>()
-                    });
-                if let Some(entries) = entries {
-                    if pairs_destination != 0 {
-                        for (output_index, (index, size)) in entries.iter().copied().enumerate() {
-                            self.write_int(
-                                pairs_destination.wrapping_add((output_index * 8) as u32),
-                                2,
-                                index as u32,
-                            )?;
-                            self.write_int(
-                                pairs_destination.wrapping_add((output_index * 8 + 4) as u32),
-                                2,
-                                size as u32,
-                            )?;
-                        }
-                    }
-                    if count_destination != 0 {
-                        self.write_int(count_destination, 2, entries.len() as u32)?;
+                    .contains_key(&handle);
+                if !exists {
+                    Value::Int(system81_state::NATIVE_NOT_FOUND)
+                } else if size == 0 {
+                    Value::Int(system81_state::NATIVE_OPERATION_FAILED)
+                } else {
+                    let range = self.resolve_range(source, size as usize)?;
+                    let bytes = self.memory[range].to_vec();
+                    let mut state = self.system81_shared.lock().expect("system81 state poisoned");
+                    let table = state.blob_tables.get_mut(&handle).expect("checked above");
+                    let slot = if index_destination != 0 { table.first_free() } else { index };
+                    table.store(slot, bytes);
+                    drop(state);
+                    if index_destination != 0 {
+                        self.write_int(index_destination, 2, slot)?;
                     }
                     Value::Int(0)
-                } else {
-                    Value::Int(system81_state::NATIVE_NOT_FOUND)
+                }
+            }
+            (0x81, 0xd3) => {
+                // sub_46AF90 -> sub_447A20: free one stored slot.
+                let index = self.pop_int()? as u32;
+                let handle = self.pop_int()? as u32;
+                let mut state = self.system81_shared.lock().expect("system81 state poisoned");
+                Value::Int(match state.blob_tables.get_mut(&handle).map(|table| table.remove(index)) {
+                    None => system81_state::NATIVE_NOT_FOUND,
+                    Some(true) => 0,
+                    Some(false) => system81_state::NATIVE_INVALID_INDEX,
+                })
+            }
+            (0x81, 0xd4) => {
+                // sub_46AFC0 -> sub_447A60: copy a stored slot (when the
+                // buffer is not null) and write its size.
+                let index = self.pop_int()? as u32;
+                let handle = self.pop_int()? as u32;
+                let size_destination = self.pop_ptr()?;
+                let destination = self.pop_ptr()?;
+                let fetched = {
+                    let state = self.system81_shared.lock().expect("system81 state poisoned");
+                    state.blob_tables.get(&handle).map(|table| table.get(index).map(<[u8]>::to_vec))
+                };
+                match fetched {
+                    None => Value::Int(system81_state::NATIVE_NOT_FOUND),
+                    Some(None) => Value::Int(system81_state::NATIVE_INVALID_INDEX),
+                    Some(Some(bytes)) => {
+                        if destination != 0 {
+                            let range = self.resolve_write_range(destination, bytes.len())?;
+                            self.memory[range].copy_from_slice(&bytes);
+                            self.clear_shadow_values(destination, bytes.len());
+                        }
+                        self.write_int(size_destination, 2, bytes.len() as u32)?;
+                        Value::Int(0)
+                    }
+                }
+            }
+            (0x81, 0xd5) => {
+                // sub_46B000 -> sub_447AA0: (index, size) of every stored
+                // slot into the list (when not null), count to the output.
+                let handle = self.pop_int()? as u32;
+                let count_destination = self.pop_ptr()?;
+                let destination = self.pop_ptr()?;
+                let entries = {
+                    let state = self.system81_shared.lock().expect("system81 state poisoned");
+                    state.blob_tables.get(&handle).map(|table| table.entries())
+                };
+                match entries {
+                    None => Value::Int(system81_state::NATIVE_NOT_FOUND),
+                    Some(entries) => {
+                        if destination != 0 {
+                            for (position, (index, size)) in entries.iter().enumerate() {
+                                let at = destination.wrapping_add(position as u32 * 8);
+                                self.write_int(at, 2, *index)?;
+                                self.write_int(at.wrapping_add(4), 2, *size)?;
+                            }
+                        }
+                        self.write_int(count_destination, 2, entries.len() as u32)?;
+                        Value::Int(0)
+                    }
                 }
             }
             (0x81, 0xda) => {
@@ -9825,26 +9778,47 @@ impl Vm {
                 }
             }
             (0x81, 0xe0) => {
-                let flags = self.pop_int()?;
-                let error_message = self.pop_string_lossy()?;
+                // sub_48CFE0 -> sub_472A10(current dir, message, exit code,
+                // dir, command, show, hide main window, wait, retry). The
+                // command line is "dir\\command" or primary root + command;
+                // the current directory defaults to dir, or to the primary
+                // root without its trailing backslash.
+                let hide_main_window = self.pop_int()? != 0;
+                let error_message = self.pop_nullable_string()?;
                 let show_window = self.pop_int()? != 0;
-                let working_directory = self.pop_string_lossy()?;
-                let executable = self.pop_string_lossy()?;
-                let arguments = self.pop_string_lossy()?;
+                let current_directory = self.pop_nullable_string()?;
+                let command = self.pop_string_lossy()?;
+                let directory = self.pop_nullable_string()?;
                 let exit_code_destination = self.pop_ptr()?;
-                let mut exit_code = 0;
-                let success = api.launch_process_wait(
-                    &working_directory,
-                    &executable,
-                    &arguments,
-                    &error_message,
-                    show_window || flags != 0,
-                    (exit_code_destination != 0).then_some(&mut exit_code),
-                );
-                if exit_code_destination != 0 {
-                    self.write_int(exit_code_destination, 2, exit_code as u32)?;
+                let (command_line, default_directory) = match directory {
+                    Some(directory) => (format!("{directory}\\{command}"), directory),
+                    None => {
+                        let root = self.resource_primary_root(api);
+                        let mut trimmed = root.clone();
+                        trimmed.pop();
+                        (format!("{root}{command}"), trimmed)
+                    }
+                };
+                let current_directory = current_directory.unwrap_or(default_directory);
+                loop {
+                    if let Some(code) = api.launch_process_and_wait(
+                        &current_directory,
+                        &command_line,
+                        show_window,
+                        hide_main_window,
+                    ) {
+                        if exit_code_destination != 0 {
+                            self.write_int(exit_code_destination, 2, code)?;
+                        }
+                        break Value::Int(1);
+                    }
+                    let Some(message) = error_message.as_deref() else {
+                        break Value::Int(0);
+                    };
+                    if !api.retry_or_quit_prompt("", message) {
+                        break Value::Int(0);
+                    }
                 }
-                Value::Int(i32::from(success))
             }
             (0x81, 0xe9) => {
                 let length = self.pop_int()?.max(0) as usize;
@@ -9873,22 +9847,33 @@ impl Vm {
                 Value::None
             }
             (0x81, 0xec) => {
+                // sub_490470: CreateMutexA(NULL, TRUE, name); 0 when it fails
+                // or already existed (any process), else ++dword_56697C.
                 let name = self.pop_string_lossy()?;
-                Value::Int(
-                    self.system81_shared
-                        .lock()
-                        .expect("system81 state poisoned")
-                        .create_named_mutex(name),
-                )
+                match api.create_named_mutex(&name) {
+                    Some(token) => {
+                        let mut state = self.system81_shared.lock().expect("system81 state poisoned");
+                        state.last_mutex_handle = state.last_mutex_handle.wrapping_add(1);
+                        let handle = state.last_mutex_handle;
+                        state.named_mutexes.insert(handle, token);
+                        Value::Int(handle as i32)
+                    }
+                    None => Value::Int(0),
+                }
             }
             (0x81, 0xed) => {
-                let handle = self.pop_int()?;
-                Value::Int(i32::from(
-                    self.system81_shared
-                        .lock()
-                        .expect("system81 state poisoned")
-                        .release_named_mutex(handle),
-                ))
+                // sub_490500: release and close; 1 when the handle is known.
+                let handle = self.pop_int()? as u32;
+                let token = self
+                    .system81_shared
+                    .lock()
+                    .expect("system81 state poisoned")
+                    .named_mutexes
+                    .remove(&handle);
+                if let Some(token) = token {
+                    api.release_named_mutex(token);
+                }
+                Value::Int(i32::from(token.is_some()))
             }
             (0x81, 0xf2) => {
                 let text5 = self.pop_string_lossy()?;
@@ -18914,34 +18899,39 @@ mod tests {
     #[test]
     fn system_ext_display_calls_preserve_native_outputs_and_status_codes() {
         let mut vm = Vm::new();
+        // No host desktop mode: sub_45EAE0 reports it unchanged.
         vm.stack.push(Value::Ptr(0x1000));
         assert_eq!(vm.try_builtin_sys(0x81, 0x0e).unwrap(), Some(Value::None));
-        assert_eq!(vm.read_int(0x1000, 2).unwrap(), 1280);
-        assert_eq!(vm.read_int(0x1004, 2).unwrap(), 720);
+        assert_eq!(vm.read_int(0x1000, 2).unwrap(), 0);
 
-        vm.stack
-            .extend([Value::Int(3), Value::Int(1280), Value::Int(720)]);
+        vm.stack.extend([Value::Int(8), Value::Int(1280), Value::Int(720)]);
+        assert_eq!(vm.try_builtin_sys(0x81, 0x60).unwrap(), Some(Value::Int(1)));
+        vm.stack.extend([Value::Int(3), Value::Int(0), Value::Int(720)]);
+        assert_eq!(vm.try_builtin_sys(0x81, 0x60).unwrap(), Some(Value::Int(2)));
+        vm.stack.extend([Value::Int(3), Value::Int(1280), Value::Int(720)]);
         assert_eq!(vm.try_builtin_sys(0x81, 0x60).unwrap(), Some(Value::Int(0)));
-        assert_eq!(vm.display_mode_slots[3], Some((1280, 720)));
 
         vm.stack.push(Value::Int(2));
         assert_eq!(vm.try_builtin_sys(0x81, 0x62).unwrap(), Some(Value::Int(0)));
         vm.stack.push(Value::Int(1));
         assert_eq!(vm.try_builtin_sys(0x81, 0x62).unwrap(), Some(Value::Int(1)));
-
+        vm.stack.push(Value::Int(3));
+        assert_eq!(vm.try_builtin_sys(0x81, 0x63).unwrap(), Some(Value::Int(0)));
         vm.stack.push(Value::Int(2));
         assert_eq!(vm.try_builtin_sys(0x81, 0x63).unwrap(), Some(Value::Int(1)));
-        assert_eq!(vm.config_input_mode, 2);
 
+        // No D3DX effect framework on the host: the bicubic effect fails.
         vm.stack.push(Value::Int(1));
+        assert_eq!(vm.try_builtin_sys(0x81, 0x6f).unwrap(), Some(Value::Int(0)));
+        vm.stack.push(Value::Int(0));
         assert_eq!(vm.try_builtin_sys(0x81, 0x6f).unwrap(), Some(Value::Int(1)));
-        assert!(vm.shader_effect_enabled);
     }
     #[test]
     fn system81_wide_distance_preserves_target_empty_operand_behavior() {
         assert_eq!(super::wide_string_similarity(&[1, 2], &[]), 0);
-        assert_eq!(super::wide_string_similarity(&[], &[1, 2]), 2);
-        assert_eq!(super::wide_string_similarity(&[1, 2], &[1, 3]), 3);
+        assert_eq!(super::wide_string_similarity(&[], &[1, 2]), 0);
+        assert_eq!(super::wide_string_similarity(&[1, 2], &[1, 3]), 1);
+        assert_eq!(super::wide_string_similarity(&[1, 2, 3, 4], &[2, 4, 3]), 2);
     }
 
     #[test]

@@ -37,15 +37,23 @@ impl RuntimeTraceApi {
             for &(name, index) in parameters {
                 let value = args.get(index).copied().unwrap_or_default();
                 if value as u32 > 128 {
-                    return Some(Err(ethornell_vm::VmError::Runtime(format!(
-                        "SoundA0:{id:02X} {name} {value} is out of range"
-                    ))));
+                    // sub_498510 (pan) / sub_498560 (volume).
+                    let message = if name == "pan" {
+                        format!("無効なパンポット（定位） [ {value} ] が指定されました")
+                    } else {
+                        format!("無効なボリューム（音量） [ {value} ] が指定されました")
+                    };
+                    return Some(Err(ethornell_vm::VmError::Runtime(message)));
                 }
             }
             if channel as u32 >= limit {
-                return Some(Err(ethornell_vm::VmError::Runtime(format!(
-                    "SoundA0:{id:02X} channel {channel} is out of range"
-                ))));
+                // sub_4985B0 (BGM, 16) / sub_4984C0 (SE, 64).
+                let message = if limit == 16 {
+                    format!("無効な音楽チャンネル番号 [ {channel} ] が指定されました")
+                } else {
+                    format!("無効な効果音番号 [ {channel} ] が指定されました")
+                };
+                return Some(Err(ethornell_vm::VmError::Runtime(message)));
             }
         }
 
@@ -1379,7 +1387,7 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(
-            error.contains("pan"),
+            error.contains("パンポット"),
             "parameter validation must precede channel validation: {error}"
         );
     }

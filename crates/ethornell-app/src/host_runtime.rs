@@ -544,7 +544,7 @@ impl HostRuntime {
         }
         self.last_tick = Some(now);
         let raw_elapsed = elapsed_ms_with_carry(now - last, &mut self.tick_remainder_ns);
-        let elapsed = normalize_engine_elapsed_ms(raw_elapsed);
+        let elapsed = raw_elapsed;
         self.runtime
             .vm
             .check_resource_budget(self.vm_budget)
@@ -918,7 +918,7 @@ mod tests {
             assert!(passes <= 600);
             assert!(carry < 1_000_000);
         }
-        assert_eq!(normalize_engine_elapsed_ms(501), 0);
+        assert_eq!(normalize_engine_elapsed_ms(501, 500), 0);
     }
     #[test]
     fn native_host_routing_is_group_specific_and_nonhost_queries_fall_through() {

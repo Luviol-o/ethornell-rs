@@ -449,7 +449,9 @@ impl ApplicationHandler for WindowApp {
                     .min(u128::from(u64::MAX)) as u64;
                 let raw_elapsed_ms = host_clock_ms.saturating_sub(*last_engine_clock_ms);
                 *last_engine_clock_ms = host_clock_ms;
-                let elapsed_ms = normalize_engine_elapsed_ms(raw_elapsed_ms);
+                // sub_499290 drops gaps above the Sys81:04 threshold in
+                // `begin_native_pass`.
+                let elapsed_ms = raw_elapsed_ms;
                 let audio_elapsed_ms = host_clock_ms.saturating_sub(*last_audio_clock_ms);
                 *last_audio_clock_ms = host_clock_ms;
                 if let Some(runtime) = runtime.as_mut() {
@@ -511,6 +513,7 @@ impl ApplicationHandler for WindowApp {
                         target.exit();
                         return;
                     }
+                    renderer.set_presentation_scale(runtime.api.presentation_scale());
                     if runtime.api.screen_width > 0 && runtime.api.screen_height > 0 {
                         renderer.set_virtual_size(
                             runtime.api.screen_width as f32,
@@ -560,9 +563,14 @@ impl ApplicationHandler for WindowApp {
                         window.set_outer_position(PhysicalPosition::new(x as f64, y as f64).into());
                     }
                     if let Some(fullscreen) = runtime.api.pending_fullscreen.take() {
-                        window.set_fullscreen(
-                            fullscreen.then(|| Fullscreen::Borderless(window.current_monitor())),
-                        );
+                        // dword_50721C (Sys81:62): 1 takes the adapter of the
+                        // window's monitor (sub_45EA30), 0 adapter 0.
+                        let monitor = if runtime.api.window_monitor_adapter_mode == 1 {
+                            window.current_monitor()
+                        } else {
+                            window.primary_monitor()
+                        };
+                        window.set_fullscreen(fullscreen.then(|| Fullscreen::Borderless(monitor)));
                     }
                     if runtime.api.window_mode == 0 {
                         if let Some((width, height)) = runtime.api.pending_window_size.take() {
@@ -759,6 +767,7 @@ impl WindowApp {
         let mut renderer =
             pollster::block_on(Renderer::new_with_font(window.clone(), self.font.clone()))?;
         if let Some(runtime) = self.runtime.as_mut() {
+            runtime.api.display_adapter_description = renderer.adapter_name().to_owned();
             let size = window.surface_size();
             runtime.api.window_surface_width = size.width.min(i32::MAX as u32) as i32;
             runtime.api.window_surface_height = size.height.min(i32::MAX as u32) as i32;

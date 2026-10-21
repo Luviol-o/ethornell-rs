@@ -226,4 +226,35 @@ failure.
 Deferred in 0x80: 20/21, 40/41/44, 70/71 (VM value/memory model), 3A and
 F0..FC (ADR 0004 emulation), 60 (graph reset on a size change, with 90/91).
 
-Next: group 0x81 in table order (`python3 src/tools/audit_mark.py --todo`).
+Group 0x81 done (2026-10-22) except the deferred ones. Fixes:
+
+* 81:04's threshold (dword_503DE8, initially 500 not 1000) now drives the
+  pause detection of the engine clock (`normalize_engine_elapsed_ms`).
+* 81:07 press slots dword_503E40 per button (left/right/middle/X1/X2,
+  (-1, -1) before the first press), recorded where the WndProc does.
+* 81:08/09 buffer limits; 81:0A/0B space folding sub_496650; 81:0B is the
+  D3D adapter description + driver version (renderer adapter name), not
+  CPUID; 81:0E reads the desktop mode, not the game size.
+* Touch (81:16..19) and DirectInput (81:1D) have no host source: empty
+  history, 0 results, no fake mouse data.
+* dword_507690 starts at 0x2000 and 81:1F reaches the app (the app arm was
+  dead).
+* 81:61..63 are the full-screen scaling mode (0 fit, 1 stretch, 2 1:1) and
+  the monitor choice: renderer `PresentationScale`, primary vs current
+  monitor.
+* 81:6D..6F: ps_3_0 reported, no D3DX, so the bicubic effect fails as on a
+  PC without d3dx9_43.dll.
+* 81:B0 returns the LCS length (was len+len-LCS); 81:B7 packs Shift-JIS
+  codes, no UTF-16 conversion.
+* Blob tables 81:D0..D5 rewritten from sub_4478A0..sub_447AA0 (handles,
+  capacity doubling, status codes, pop orders).
+* 81:E0 ports sub_472A10's wait path; 81:EC/ED are host-wide (file lock).
+* The dead app-side 0x81 arms (`native_system_ext.rs` and the lib.rs
+  fallbacks) are gone: the VM answers every 0x81 selector.
+
+Deferred in 0x81: 28..3E and F2/F7 (ADR 0004 file layer: the async CFileDX
+worker sub_4014D0 for 28..2B, file times, drives, dialogs, installer);
+44 (child threads), 6A/6B (the script-error path sub_464C50 -> sub_464A80:
+message box unless captured, capture when dword_566014, throw) — VM model.
+
+Next: group 0x90 in table order.

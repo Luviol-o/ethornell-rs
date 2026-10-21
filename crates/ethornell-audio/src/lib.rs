@@ -320,7 +320,10 @@ impl<B: Backend> AudioSystem<B> {
         }
         let mut settings = playback_settings(volume, playback_rate, panning, fade_in_ms);
         if looped {
-            settings = settings.loop_region(..);
+            // The Ogg box's end-of-stream listener (sub_4AA420) seeks back
+            // to the header's loop start (+0x1C), not to the first sample.
+            let loop_start = buriko_wave_loop_start(bytes).min(i64::MAX as u64) as i64;
+            settings = settings.loop_region(PlaybackPosition::Samples(loop_start)..);
         }
         let mut data = decode_static_sound(bytes, settings)?;
         apply_decode_gain(&mut data, decode_gain);
@@ -534,6 +537,15 @@ fn validate_playback_parameters(volume: f64, gain: f64, rate: f64, panning: f64)
 
 /// Decodes a whole sound, cut to the length its file declares
 /// (`declared_frame_count`).
+/// BURIKO wave box header +0x1C: the sample a looping stream returns to.
+fn buriko_wave_loop_start(bytes: &[u8]) -> u64 {
+    if probe_audio(bytes).kind == AudioKind::BurikoWaveBoxOgg {
+        read_u32(bytes, 0x1C).map_or(0, u64::from)
+    } else {
+        0
+    }
+}
+
 fn decode_static_sound(bytes: &[u8], settings: StaticSoundSettings) -> Result<StaticSoundData> {
     let payload = unwrap_buriko_wave_ogg(bytes).unwrap_or(bytes);
     let mut data = StaticSoundData::from_cursor(Cursor::new(payload.to_vec()), settings)

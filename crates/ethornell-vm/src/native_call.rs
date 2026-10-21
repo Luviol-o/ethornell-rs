@@ -13430,7 +13430,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: SYS81_04_PARAMETERS,
         returns: "zero or one",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target sub_498820 validates 50..60000 and stores the engine-clock discontinuity threshold.",
+        notes: "BGI 1.622 sub_48BE20 -> sub_499390: 50..=60000 sets dword_503DE8 (initially 500), the jump sub_499290 treats as a pause.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS81_COPY_COORDINATE_SLOT,
@@ -13438,7 +13438,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: SYS81_07_PARAMETERS,
         returns: "zero or one",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target sub_48E590 copies one of five two-DWORD coordinate transform slots.",
+        notes: "sub_48BE50 -> sub_48F090: index < 5 copies dword_503E40[index], the logical point of the last press of left/right/middle/X1/X2 (WndProc sub_48F060), (-1, -1) before any.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS81_GET_USER_NAME,
@@ -13446,7 +13446,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: SYS81_08_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target calls GetUserNameA with a 257-byte capacity.",
+        notes: "sub_48BE80: GetUserNameA into a 257-byte buffer; a longer name leaves it unchanged.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS81_GET_COMPUTER_NAME,
@@ -13454,7 +13454,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: SYS81_09_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target calls GetComputerNameA with a 16-byte capacity.",
+        notes: "sub_48BEB0: GetComputerNameA with nSize 16 (NetBIOS name: host name's first label, upper case, 15 chars).",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS81_GET_CPU_BRAND,
@@ -13462,7 +13462,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: SYS81_0A_PARAMETERS,
         returns: "zero or one",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target sub_46F720 gates extended CPUID leaves 0x80000002..4 and normalizes whitespace.",
+        notes: "sub_48BEE0 -> sub_46FC80: CPUID brand string through sub_496650 space folding; 0 without leaf 0x80000004 (no CPUID host).",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS81_GET_CPU_DISPLAY_INFO,
@@ -13470,7 +13470,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: SYS81_0B_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target sub_45E490 normalizes CPU text and copies four cached 16-bit signature fields as DWORDs.",
+        notes: "sub_48BF10 -> sub_45E9F0: D3DADAPTER_IDENTIFIER9 Description (renderer adapter name) through sub_496650 and the DriverVersion words; first argument ignored.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS81_GET_OS_VERSION,
@@ -13478,7 +13478,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: SYS81_0C_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target copies cached GetVersionExA data.",
+        notes: "sub_48BF40 -> sub_46FD60: GetVersionExA major/minor/build/platform and szCSDVersion; zeroed structure without Windows.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS81_GET_PHYSICAL_MEMORY_MB,
@@ -13486,7 +13486,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: SYS81_0D_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target calls GlobalMemoryStatusEx and shifts both physical-memory values right by 20.",
+        notes: "sub_48BFD0: GlobalMemoryStatusEx total/available physical memory >> 20.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS81_GET_ADJUSTED_DESKTOP_DIMENSIONS,
@@ -13494,7 +13494,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: SYS81_0E_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target sub_45E580 applies the wide/tall desktop halving rules.",
+        notes: "sub_48C060 -> sub_45EAE0(.., 1): start-up desktop mode, halved for side-by-side (>= 2.5:1) or stacked (<= 1.25:1) monitors, unsigned.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS81_IS_MAIN_WINDOW_MINIMIZED,
@@ -13510,7 +13510,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: SYS81_10_PARAMETERS,
         returns: "previous value",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target sub_46DA40 returns the old dword_518CAC[6*index] then stores the replacement.",
+        notes: "sub_48C0A0 -> sub_46DFA0: swaps the per-key repeat flag of a virtual key; >= 0x100 is fatal (不正な仮想キーコード).",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS81_COPY_KEYBOARD_STATE,
@@ -13518,7 +13518,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: SYS81_11_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target directly calls GetKeyboardState.",
+        notes: "sub_48C0E0: GetKeyboardState (0x80 held, bit 0 toggled per press).",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS81_SET_KEYBOARD_POLLING_OVERRIDE,
@@ -13526,7 +13526,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: SYS81_14_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target sub_46D540 controls the raw keyboard polling override consumed by sub_46D560.",
+        notes: "sub_48C100 -> sub_46DAA0: dword_566800 background key polling.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS81_CONFIGURE_POINTER_HISTORY,
@@ -13534,7 +13534,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: SYS81_16_PARAMETERS,
         returns: "zero or one",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target clears the linked history and accepts capacities up to 512.",
+        notes: "sub_48C120 -> sub_46B720: touch history capacity <= 0x200 and minimum step; empties the history.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS81_COPY_POINTER_HISTORY,
@@ -13542,7 +13542,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: SYS81_17_PARAMETERS,
         returns: "sample count",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target traverses the pointer-history linked list newest-first.",
+        notes: "sub_48C160 -> sub_46B860: WM_TOUCH history walk; the host delivers no WM_TOUCH, so 0.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS81_REGISTER_TOUCH_INPUT,
@@ -13550,7 +13550,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: SYS81_18_PARAMETERS,
         returns: "zero or one",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target calls RegisterTouchWindow or UnregisterTouchWindow for hWndParent.",
+        notes: "sub_48C1B0 -> sub_46B660: RegisterTouchWindow when available; 0 on hosts without touch windows.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS81_COPY_TOUCH_RECORDS,
@@ -13558,7 +13558,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: SYS81_19_PARAMETERS,
         returns: "record count",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target copies each touch record as six DWORDs.",
+        notes: "sub_48C1E0 -> sub_46B6A0: active touch contacts (none without WM_TOUCH).",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS81_SET_CONTROLLER_WAKE_ENTRY,
@@ -13566,7 +13566,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: SYS81_1B_PARAMETERS,
         returns: "zero or one",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target sub_460E40 writes one of 36 controller wake values.",
+        notes: "sub_48C210 -> sub_4613A0: index < 0x24 stores dword_565F20[index].",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS81_QUERY_CONTROLLER_STATE,
@@ -13574,7 +13574,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: SYS81_1D_PARAMETERS,
         returns: "zero or one",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target sub_460E60 aggregates DirectInput device state and clamps three axes to -1024..1024.",
+        notes: "sub_48C250 -> sub_4613C0: DirectInput joystick sum; no DirectInput devices on the host, so 0 and nothing written.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS81_INJECT_MOUSE_CLICK,
@@ -13582,7 +13582,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: SYS81_1E_PARAMETERS,
         returns: "zero or one",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target posts the matching synthetic mouse down/up messages.",
+        notes: "sub_48C290 -> sub_46EB30: SendMessageA down/up for buttons 1/2/4/5/6 at the GetCursorPos point (screen coordinates read as client ones).",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS81_OPEN_RESOURCE_STREAM,
@@ -13758,7 +13758,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: SYS81_60_PARAMETERS,
         returns: "status 0,1,2",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target sub_461040 validates slot and nonzero dimensions.",
+        notes: "sub_48CBC0 -> sub_4615A0: index >= 8 -> 1, zero dimension -> 2, else the size table entry.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS81_QUERY_EFFECTIVE_DISPLAY_MODE,
@@ -13766,7 +13766,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: NO_PARAMETERS,
         returns: "mode 0..2",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target returns the configured mode, but mode 2 falls back to zero when adjusted desktop dimensions are too small.",
+        notes: "sub_48CC00 -> sub_45EDE0: full-screen scaling mode; 2 falls back to 0 when the adjusted desktop is smaller than the mode.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS81_SET_MONITOR_ADAPTER_MODE,
@@ -13774,7 +13774,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: SYS81_62_PARAMETERS,
         returns: "zero or one",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target sub_45E830 stores the monitor/adapter selection mode.",
+        notes: "sub_48CC20 -> sub_45ED90: dword_50721C (initially 1): full screen on the window's monitor (1) or adapter 0.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS81_SET_CONFIG_INPUT_MODE,
@@ -13782,7 +13782,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: SYS81_63_PARAMETERS,
         returns: "zero or one",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target sub_45E860 stores the display/input configuration mode.",
+        notes: "sub_48CC50 -> sub_45EDC0: dword_565EAC full-screen scaling 0 fit, 1 stretch, 2 unscaled (renderer viewport, sub_45F110).",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS81_CONFIGURE_LOGICAL_SCREEN_SIZE,
@@ -13790,7 +13790,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: SYS81_64_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target sub_45E770 updates logical dimensions and triggers render reconfiguration.",
+        notes: "sub_48CC80 -> sub_45ECD0: windowed client size, zero dimension follows the mode; resizes a window at once.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS81_SET_WINDOW_POSITION_OVERRIDE,
@@ -13814,7 +13814,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: SYS81_69_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target registers/unregisters sixteen PrintScreen hotkeys for modifiers 0..15.",
+        notes: "sub_48CD00 -> sub_49AE40: RegisterHotKey for PrintScreen; nothing script-visible on the host.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS81_SET_ERROR_CAPTURE_MODE,
@@ -13838,7 +13838,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: NO_PARAMETERS,
         returns: "low 16-bit D3D shader version",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target sub_460590 reads the D3DCAPS9 field at offset 0xCC.",
+        notes: "sub_48CD70: LOWORD(D3DCAPS9 PixelShaderVersion), 0x0300 for the renderer.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS81_UNCAUGHT_EXCEPTION_ACTIVE,
@@ -13846,7 +13846,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: NO_PARAMETERS,
         returns: "zero or one",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target directly returns the Microsoft CRT __uncaught_exception result.",
+        notes: "sub_48CD90 -> sub_460B00: whether d3dx9_43 D3DXCreateEffect loaded; the host has no D3DX.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS81_SET_BICUBIC_SHADER,
@@ -13854,7 +13854,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: SYS81_6F_PARAMETERS,
         returns: "zero or one",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target sub_460550 manages the D3DX bicubic scaler shader.",
+        notes: "sub_48CDB0 -> sub_460AB0: 0 drops the bicubic effect (1); 1 needs ps_3_0 and D3DX (sub_460980), so 0 on the host.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS81_WIDE_STRING_DISTANCE,
@@ -13862,7 +13862,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: SYS81_B0_PARAMETERS,
         returns: "insertion/deletion distance or -1",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target sub_495C50 computes len(left)+len(right)-LCS(left,right).",
+        notes: "sub_48CDE0 -> sub_496770: LCS length of two UTF-16 strings (unit-cost grid walk); -1 for null, 0 for an empty second string.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS81_SHIFT_JIS_TO_UTF16,
@@ -13870,7 +13870,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: SYS81_B7_PARAMETERS,
         returns: "UTF-16 unit count or -1",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target converts single-byte and Shift-JIS double-byte code units without a Windows normalization pass.",
+        notes: "sub_48CE10 -> sub_496700: Shift-JIS characters as 16-bit units (double-byte lead << 8 | trail); returns the count, -1 for null.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS81_BLOB_TABLE_OPEN,
@@ -13878,7 +13878,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: SYS81_D0_PARAMETERS,
         returns: "zero or 0x80000001",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target creates a growable array of {pointer,size} blob slots.",
+        notes: "sub_48CE40 -> sub_46AE10: capacity <= 1 -> 0x80000001, else new table, handle ++dword_566684.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS81_BLOB_TABLE_CLOSE,
@@ -13886,7 +13886,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: SYS81_D1_PARAMETERS,
         returns: "zero or 0x80000002",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target removes the matching table node and frees all blobs.",
+        notes: "sub_48CE80 -> sub_46AEC0: 0 or 0x80000002.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS81_BLOB_TABLE_STORE,
@@ -13894,7 +13894,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: SYS81_D2_PARAMETERS,
         returns: "status",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target stores into a requested slot or the first free slot; allocation failure maps to 0x80000003.",
+        notes: "sub_48CEB0 -> sub_46AF30: store at index (or first free with an index output); capacity doubles to fit; size 0 -> 0x80000003.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS81_BLOB_TABLE_REMOVE,
@@ -13902,7 +13902,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: SYS81_D3_PARAMETERS,
         returns: "status",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target clears and frees one occupied slot; invalid slot maps to 0x80000004.",
+        notes: "sub_48CF10 -> sub_46AF90: free a slot; 0x80000004 when empty.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS81_BLOB_TABLE_FETCH,
@@ -13910,7 +13910,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: SYS81_D4_PARAMETERS,
         returns: "status",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target copies one slot and reports 0x80000004 when absent.",
+        notes: "sub_48CF50 -> sub_46AFC0: copy (non-null buffer) and size; 0x80000004 when empty.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS81_BLOB_TABLE_ENUMERATE,
@@ -13918,7 +13918,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: SYS81_D5_PARAMETERS,
         returns: "status",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target emits index/size pairs for occupied slots.",
+        notes: "sub_48CFA0 -> sub_46B000: (index, size) of stored slots and their count.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS81_LAUNCH_PROCESS_WAIT,
@@ -13926,7 +13926,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: SYS81_E0_PARAMETERS,
         returns: "zero or one",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target sub_4724B0 launches, waits while pumping BGI messages, and optionally reads exit code.",
+        notes: "sub_48CFE0 -> sub_472A10(wait, retry): dir\\\\command or root + command, waits and writes the exit code; failure retries through OK|CANCEL and the quit question.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS81_UPDATE_ROLLING_HASH,
@@ -13934,7 +13934,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: SYS81_E9_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target sub_401900 updates a 233-multiplier DWORD plus four byte accumulators.",
+        notes: "sub_48D060 -> sub_401900: rolling hash update (state*233 + byte, byte lanes).",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS81_MD5,
@@ -13942,7 +13942,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: SYS81_EA_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target sub_4A1440 pads with the MD5 constants/rounds and writes four digest DWORDs.",
+        notes: "sub_48D0A0 -> sub_4A1FB0: MD5 of the buffer.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS81_CREATE_NAMED_MUTEX,
@@ -13950,7 +13950,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: SYS81_EC_PARAMETERS,
         returns: "integer handle or zero",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target rejects pre-existing mutex names and returns a monotonic BGI handle.",
+        notes: "sub_48D0E0 -> sub_490470: CreateMutexA(TRUE); 0 when it exists in any process (host file lock), else ++dword_56697C.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS81_RELEASE_NAMED_MUTEX,
@@ -13958,7 +13958,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: SYS81_ED_PARAMETERS,
         returns: "zero or one",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target releases/closes the native mutex and removes its BGI record.",
+        notes: "sub_48D110 -> sub_490500: release and close; 1 for a known handle.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS81_RUN_INSTALLATION_PROCEDURE,
@@ -14510,7 +14510,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: MESSAGE_AUXILIARY_INPUT_MASK_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target handler 0x0048B7D0 calls sub_4319F0 and writes dword_507690. CProcDspMsg::Tick ORs this mask with 0x80000181 before filtering current input bits.",
+        notes: "sub_48C2C0 -> sub_431DC0: dword_507690 (initially 0x2000), the extra input bits of CProcDspMsg/CProcedure.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS_ENQUEUE_MESSAGE,
@@ -20038,6 +20038,12 @@ const PORTABLE_EQUIVALENT_OPCODES: &[NativeOpcode] = &[
     opcodes::SYS_READ_FILE_BYTES,
     opcodes::SYS_READ_FILE_RANGE,
     opcodes::SYS_FILE_SIZE,
+    opcodes::SYS81_COPY_COORDINATE_SLOT,
+    opcodes::SYS81_GET_OS_VERSION,
+    opcodes::SYS81_REGISTER_TOUCH_INPUT,
+    opcodes::SYS81_QUERY_CONTROLLER_STATE,
+    opcodes::SYS81_SET_BICUBIC_SHADER,
+    opcodes::SYS81_LAUNCH_PROCESS_WAIT,
 ];
 
 const PARTIAL_IMPLEMENTATION_OPCODES: &[NativeOpcode] = &[
@@ -20226,10 +20232,6 @@ const PARTIAL_IMPLEMENTATION_OPCODES: &[NativeOpcode] = &[
     opcodes::SYS81_QUEUE_RESOURCE_SEEK,
     opcodes::SYS81_QUEUE_RESOURCE_READ,
     opcodes::SYS81_QUEUE_RESOURCE_CLOSE,
-    opcodes::SYS81_COPY_COORDINATE_SLOT,
-    opcodes::SYS81_GET_OS_VERSION,
-    opcodes::SYS81_REGISTER_TOUCH_INPUT,
-    opcodes::SYS81_QUERY_CONTROLLER_STATE,
     opcodes::SYS81_GET_FILE_TIMES,
     opcodes::SYS81_SET_FILE_TIMES,
     opcodes::SYS81_INTERNET_READ,
@@ -20237,8 +20239,6 @@ const PARTIAL_IMPLEMENTATION_OPCODES: &[NativeOpcode] = &[
     opcodes::SYS81_GET_DISK_FREE_MB,
     opcodes::SYS81_GET_VOLUME_LABEL,
     opcodes::SYS81_QUERY_DEVICE_POWER_STATE,
-    opcodes::SYS81_SET_BICUBIC_SHADER,
-    opcodes::SYS81_LAUNCH_PROCESS_WAIT,
     opcodes::SYS_LOAD_GLOBAL_USER_DATA,
     opcodes::SYS_SAVE_GLOBAL_USER_DATA,
     opcodes::SYS_WAIT_EXCLUSION_SECTION,
