@@ -69,9 +69,19 @@ Float arguments arrive as 16.16 fixed and are multiplied by
       whose arithmetic differs.
 * [x] `legacy_3d_abi` argument counts fixed for D0:67/6A/70/72/74/75 (they
       did not match the handlers and would have misaligned the stack).
-* [ ] Evaluator (D0:80–8E): `DCTESLGEvaluator`, 0x453C20/0x4583E0..0x45BB60,
-      uses the grid's sorted reachable list (MSVC `qsort`, not stable — port
-      the CRT algorithm), `GrdFldMngr` vtbl+10/+14 and unit+0x2C caches.
+* [x] Evaluator (D0:80–8E): `src/engine/logic_slg_evaluator.c`,
+      `crates/ethornell-vm/src/logic/{slg,msvc_qsort}.rs`, plus the grid
+      calls it needs (threat-map cache `sub_453C20`/`sub_4541A0`, snapshot
+      `sub_453260`, neighbours, path points, cell cost/facing, sorted
+      reachable list). The CRT `qsort` (0x4AC3F0) is ported step for step
+      because ties in scores and costs are common and it is not stable.
+      Tests cover the damage formula, facing multiplier, attack choice,
+      approaching an out-of-reach target and counterattacks by facing.
+      Ported behaviour that looks odd but is the target's: a unit's own tile
+      is "occupied" in its own search, so the walk-attack estimate never
+      strikes from where it stands; enemy skills of effect 4 overwrite the
+      acting unit's buffs during the simulation; the acting unit can be
+      queued twice when an enemy walks and acts again.
 * [ ] Space manager (D0:40–7A): `DCTELgclSpcMngr`, 0x455840..0x457A10,
       SSE float math; ctor `sub_4559B0` allocates 0x1800 bytes (64 bodies?).
 
@@ -113,6 +123,14 @@ clone, and write the score into the candidate; the caller then sorts with
 `qsort` (`sub_45BB40`, by +24 descending). Nothing depends on which thread
 took which candidate, so a single-threaded port in queue order gives the
 same result (decision 3 holds).
+
+Evaluator deviations (target crashes or reads garbage): a missing grid
+copy fails D0:8A with -1; targets without a record are skipped; with 0
+sides the side tests are false (the target divides by zero); an ally's
+target facing outside 0..3 skips the ally's hit; scoring runs on one grid
+copy in candidate order — the target's per-thread copies differ only in the
+acting unit's facing left over from the previous candidate, which matters
+only for self-targeted damage skills.
 
 Deviations from the target, all where it would corrupt memory or crash:
 units never placed (x = -1) are skipped when marking occupancy and zones

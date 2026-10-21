@@ -3,6 +3,7 @@
 //! `src/engine/logic_grid_field.c`; function names cite the BGI 1.622 address.
 //! Statuses are the target's internal codes (see `super::status`).
 
+use super::msvc_qsort::qsort;
 use super::spline::CSpline;
 use super::status::*;
 
@@ -98,6 +99,17 @@ pub(crate) struct Unit {
     pub table_id: i32,
     pub zoc_climb: i32,
     field: Option<GridField>,
+    /// +0x2C: threat maps cached by sub_453C20 for the evaluator.
+    cache: Vec<ThreatMaps>,
+}
+
+/// One weapon profile's threat maps: 7 ints per tile, [0] covered and
+/// [1..=4] hits from directions 2..5.
+#[derive(Debug, Clone)]
+pub(crate) struct ThreatMaps {
+    key: [i32; 5],
+    map: Vec<i32>,
+    map2: Option<Vec<i32>>,
 }
 
 /// `DCTELgclGrdFld`: one unit's last movement search.
@@ -336,6 +348,7 @@ impl GridFieldManager {
             table_id: 0,
             zoc_climb: 1,
             field: None,
+            cache: Vec::new(),
         });
         Ok(id)
     }
@@ -472,7 +485,7 @@ impl GridFieldManager {
     /// sub_454390: the field's private map. The target writes the occupied
     /// bit for a unit that was never placed at index -(w+1); the port skips
     /// such units (no in-map tile changes either way).
-    fn search_map(&self, table_id: i32) -> Vec<Tile> {
+    fn search_map(&self, table_id: i32, mark_units: bool) -> Vec<Tile> {
         let mut tiles = self.tiles.clone();
         if let Some(cost) = self.table(table_id) {
             for (tile, extra) in tiles.iter_mut().zip(cost) {
@@ -480,7 +493,7 @@ impl GridFieldManager {
             }
         }
         for unit in self.units.iter().rev() {
-            if !self.in_map(unit.x, unit.y) {
+            if !mark_units || !self.in_map(unit.x, unit.y) {
                 continue;
             }
             tiles[self.index(unit.x, unit.y)].flags |= 1;
@@ -493,6 +506,19 @@ impl GridFieldManager {
     /// climb) and `move` (budget, < 1 unlimited), stopping early once
     /// (dest_x, dest_y) is settled.
     pub(crate) fn search(&mut self, id: i32, jump: i32, budget: i32, dest: (i32, i32)) -> u32 {
+        self.search_with(id, jump, budget, dest, true)
+    }
+
+    /// sub_453830 with its last argument: whether units occupy tiles and
+    /// project zones of control.
+    pub(crate) fn search_with(
+        &mut self,
+        id: i32,
+        jump: i32,
+        budget: i32,
+        dest: (i32, i32),
+        mark_units: bool,
+    ) -> u32 {
         let has_map = self.has_map();
         let (w, h) = (self.w, self.h);
         let Some(index) = self.units.iter().rposition(|unit| unit.id == id) else {
@@ -503,7 +529,7 @@ impl GridFieldManager {
             self.units[index].field = Some(GridField::empty());
             return SEARCH_FAILED;
         }
-        let tiles = self.search_map(self.units[index].table_id);
+        let tiles = self.search_map(self.units[index].table_id, mark_units);
         let unit = &self.units[index];
         let mut field = GridField {
             w,
@@ -585,9 +611,15 @@ impl GridFieldManager {
         arc: i32,
         units_only: bool,
         ignore_units: bool,
+        exclude_self: bool,
     ) -> Result<Vec<(i32, i32, i32)>, u32> {
         if !self.has_map() {
             return Err(NO_MAP);
+        }
+        // The target reads the shooter's tile unchecked; off the map every
+        // line of fire fails (0x80000008), so nothing is found.
+        if !self.in_map(x, y) {
+            return Ok(Vec::new());
         }
         let origin = self.tiles[self.index(x, y)].height;
         let step = range.wrapping_mul(bonus) << 8;
@@ -612,8 +644,8 @@ impl GridFieldManager {
                 if units_only && self.unit_at(tx, ty).is_none() {
                     continue;
                 }
-                // exclude_self is always 1 from the D0:28 wrapper.
-                if self.line_of_fire(tx, ty, x, y, arc, ignore_units) == Ok(true) {
+                let hit = self.line_of_fire(tx, ty, x, y, arc, ignore_units) == Ok(true);
+                if hit || (!exclude_self && tx == x && ty == y) {
                     found.push((tx, ty, distance));
                 }
             }
@@ -716,6 +748,257 @@ impl GridFieldManager {
             .find(|unit| unit.id == id)
             .ok_or(NO_UNIT)?;
         facing_delta(tx, ty, unit.x, unit.y, unit.dir)
+    }
+}
+
+/// The calls the evaluator makes on its own copy of the grid.
+impl GridFieldManager {
+    /// vtbl+20 + sub_4532A0 (via sub_453260): a copy with the map, cost
+    /// tables, units and their threat caches, but no searches. None without
+    /// a map.
+    pub(crate) fn snapshot(&self) -> Option<Self> {
+        if !self.has_map() {
+            return None;
+        }
+        let mut copy = Self::new(self.scale);
+        copy.set_map(self.w, self.h, self.tiles.clone());
+        copy.tables = self.tables.clone();
+        let highest = self.tables.iter().map(|t| t.id as u32).max().unwrap_or(0);
+        copy.next_table_id = highest.wrapping_add(1) as i32;
+        copy.units = self
+            .units
+            .iter()
+            .map(|unit| Unit {
+                field: None,
+                ..unit.clone()
+            })
+            .collect();
+        Some(copy)
+    }
+
+    pub(crate) fn size(&self) -> Result<(i32, i32), u32> {
+        if self.has_map() {
+            Ok((self.w, self.h))
+        } else {
+            Err(NO_MAP)
+        }
+    }
+
+    fn unit(&self, id: i32) -> Result<&Unit, u32> {
+        self.units
+            .iter()
+            .rev()
+            .find(|unit| unit.id == id)
+            .ok_or(NO_UNIT)
+    }
+
+    /// sub_4536F0.
+    pub(crate) fn unit_pos(&self, id: i32) -> Result<(i32, i32), u32> {
+        self.unit(id).map(|unit| (unit.x, unit.y))
+    }
+
+    /// sub_453760.
+    pub(crate) fn unit_dir(&self, id: i32) -> Result<i32, u32> {
+        self.unit(id).map(|unit| unit.dir)
+    }
+
+    /// vtbl+14 sub_454F00: the tile next to the unit in direction `dir`
+    /// (0..3 when `relative`, else 2..5). Not bounds-checked.
+    pub(crate) fn step_from_unit(
+        &self,
+        id: i32,
+        dir: i32,
+        relative: bool,
+    ) -> Result<(i32, i32), u32> {
+        let unit = self.unit(id)?;
+        let (mut x, mut y) = (unit.x, unit.y);
+        let dir = if relative { dir.wrapping_add(2) } else { dir };
+        if step_dir(&mut x, &mut y, dir) {
+            Ok((x, y))
+        } else {
+            Err(BAD_DIRECTION)
+        }
+    }
+
+    /// sub_453AC0: the search cost of (x, y).
+    pub(crate) fn cell_cost(&self, id: i32, x: i32, y: i32) -> Result<i32, u32> {
+        let field = self.field(id)?;
+        field.cell(x, y).map(|cell| cell.cost).map_err(field_status)
+    }
+
+    /// sub_453A50: the direction a unit faces after walking to (x, y)
+    /// (1 for the start).
+    pub(crate) fn cell_facing(&self, id: i32, x: i32, y: i32) -> Result<i32, u32> {
+        let field = self.field(id)?;
+        field
+            .cell(x, y)
+            .map(|cell| reverse_dir(cell.back_dir))
+            .map_err(field_status)
+    }
+
+    /// sub_4538C0 -> DCTELgclGrdFld vtbl+4 sub_454600 with a height limit of
+    /// 1: for the four sides of (x, y) (y-1, y+1, x-1, x+1) that the search
+    /// reached, that are open and within one height step, the step count and
+    /// the tile; -1 elsewhere (six slots, the last two always -1).
+    pub(crate) fn neighbors(
+        &self,
+        id: i32,
+        x: i32,
+        y: i32,
+    ) -> Result<([i32; 6], [(i32, i32); 6]), u32> {
+        let field = self.field(id)?;
+        if field.cells.is_empty() {
+            return Err(NO_SEARCH);
+        }
+        Ok(field.neighbors(x, y, 1))
+    }
+
+    /// sub_4539B0: the tiles walked from the unit's current tile to (x, y).
+    pub(crate) fn path_points(&self, id: i32, x: i32, y: i32) -> Result<Vec<(i32, i32)>, u32> {
+        let (_, dirs) = self.path(id, x, y, true)?;
+        let unit = self.unit(id)?;
+        let (mut cx, mut cy) = (unit.x, unit.y);
+        let mut points = Vec::with_capacity(dirs.len());
+        for dir in dirs {
+            if !step_dir(&mut cx, &mut cy, dir) {
+                return Err(UNREACHABLE);
+            }
+            points.push((cx, cy));
+        }
+        Ok(points)
+    }
+
+    /// sub_453B80 with `sorted`: reachable tiles ordered by cost with the
+    /// CRT qsort (sub_4583C0 compares cell costs).
+    pub(crate) fn reachable_sorted(&self, id: i32) -> Result<Vec<(i32, i32)>, u32> {
+        let field = self.field(id)?;
+        if field.cells.is_empty() {
+            return Err(FAILED);
+        }
+        let mut tiles: Vec<(i32, i32, i32)> = field
+            .reachable()
+            .into_iter()
+            .map(|(x, y)| (x, y, field.cells[field.index(x, y)].cost))
+            .collect();
+        qsort(&mut tiles, |a, b| a.2.wrapping_sub(b.2));
+        Ok(tiles.into_iter().map(|(x, y, _)| (x, y)).collect())
+    }
+
+    /// sub_453C20: rebuild the unit's threat cache for `keys` (weapon
+    /// profiles {kind, range, bonus, arc, radius}); see the C file.
+    pub(crate) fn build_threat_maps(
+        &mut self,
+        id: i32,
+        jump: i32,
+        budget: i32,
+        keys: &[[i32; 5]],
+        mark_units: bool,
+        double_move: bool,
+    ) -> u32 {
+        let Some(index) = self.units.iter().rposition(|unit| unit.id == id) else {
+            return NO_UNIT;
+        };
+        self.units[index].cache.clear();
+        let reach = if double_move {
+            budget.wrapping_mul(2)
+        } else {
+            budget
+        };
+        self.search_with(id, jump, reach, (-1, -1), mark_units);
+        let n = self.map_cells();
+        let origin = (self.units[index].x, self.units[index].y);
+        let mut tiles = vec![origin];
+        if let Ok(reachable) = self.reachable(id) {
+            tiles.extend(reachable);
+        }
+        for key in keys {
+            if self.units[index]
+                .cache
+                .iter()
+                .any(|entry| entry.key == *key)
+            {
+                continue;
+            }
+            let mut map = vec![0; 7 * n];
+            let mut map2 = vec![0; 7 * n];
+            for &(x, y) in &tiles {
+                // The target keeps a stale cost when the lookup fails; it
+                // cannot fail for these tiles, so they are skipped instead.
+                let Ok(cost) = self.cell_cost(id, x, y) else {
+                    continue;
+                };
+                let use_second = if cost <= budget {
+                    false
+                } else if double_move && key[0] == 0 && cost <= budget.wrapping_mul(2) {
+                    true
+                } else {
+                    continue;
+                };
+                let hits = self
+                    .targets(x, y, key[1], key[2], key[3], false, !mark_units, true)
+                    .unwrap_or_default();
+                let target = if use_second { &mut map2 } else { &mut map };
+                for (hx, hy, _) in hits {
+                    if key[4] >= 1 {
+                        let area = self
+                            .targets(hx, hy, key[4], 0, 0, false, false, true)
+                            .unwrap_or_default();
+                        for (ax, ay, _) in area {
+                            let side = if (ax, ay) == (hx, hy) {
+                                direction_to(x, y, hx, hy)
+                            } else {
+                                direction_to(hx, hy, ax, ay)
+                            };
+                            let slot = 7 * self.index(ax, ay);
+                            target[slot + (side - 1) as usize] += 1;
+                            target[slot] = 1;
+                        }
+                    } else if key[4] == 0 {
+                        let side = direction_to(x, y, hx, hy);
+                        let slot = 7 * self.index(hx, hy);
+                        target[slot + (side - 1) as usize] += 1;
+                        target[slot] = 1;
+                    }
+                }
+            }
+            let map2 = (double_move && key[0] == 0).then_some(map2);
+            self.units[index].cache.push(ThreatMaps {
+                key: *key,
+                map,
+                map2,
+            });
+        }
+        0
+    }
+
+    /// sub_4541A0: a cached threat map (`second`: the double-move one).
+    pub(crate) fn threat_map(
+        &self,
+        id: i32,
+        key: &[i32; 5],
+        second: bool,
+    ) -> Result<Vec<i32>, u32> {
+        let unit = self.unit(id)?;
+        let entry = unit
+            .cache
+            .iter()
+            .find(|entry| entry.key == *key)
+            .ok_or(NO_THREAT_KEY)?;
+        let map = if second {
+            entry.map2.as_ref()
+        } else {
+            Some(&entry.map)
+        };
+        map.cloned().ok_or(NO_THREAT_MAP)
+    }
+}
+
+/// The manager's mapping of DCTELogicalField statuses (sub_453A50/sub_453AC0).
+fn field_status(status: u32) -> u32 {
+    match status {
+        NO_CELLS => NO_SEARCH,
+        NOT_REACHED | OUT_OF_FIELD => UNREACHABLE,
+        _ => FAILED,
     }
 }
 
@@ -883,6 +1166,48 @@ impl GridField {
                 },
             );
         }
+    }
+
+    /// sub_457DE0 / sub_457D70 lookup.
+    fn cell(&self, x: i32, y: i32) -> Result<Cell, u32> {
+        if self.cells.is_empty() {
+            return Err(NO_CELLS);
+        }
+        if !(0..self.w).contains(&x) || !(0..self.h).contains(&y) {
+            return Err(OUT_OF_FIELD);
+        }
+        let cell = self.cells[self.index(x, y)];
+        if cell.back_dir == 0 {
+            return Err(NOT_REACHED);
+        }
+        Ok(cell)
+    }
+
+    /// vtbl+4 sub_454600. The target reads (x, y)'s height unchecked; off
+    /// the field the port reports no neighbours.
+    fn neighbors(&self, x: i32, y: i32, max_climb: i32) -> ([i32; 6], [(i32, i32); 6]) {
+        let mut steps = [-1; 6];
+        let mut tiles = [(0, 0); 6];
+        if !(0..self.w).contains(&x) || !(0..self.h).contains(&y) {
+            return (steps, tiles);
+        }
+        let here = self.tiles[self.index(x, y)].height;
+        for (slot, (dx, dy)) in [(0, -1), (0, 1), (-1, 0), (1, 0)].into_iter().enumerate() {
+            let (nx, ny) = (x + dx, y + dy);
+            if !(0..self.w).contains(&nx) || !(0..self.h).contains(&ny) {
+                continue;
+            }
+            let index = self.index(nx, ny);
+            if self.cells[index].back_dir == 0 || self.tiles[index].flags & 0xD != 0 {
+                continue;
+            }
+            if self.tiles[index].height.wrapping_sub(here).wrapping_abs() > max_climb {
+                continue;
+            }
+            steps[slot] = self.cells[index].steps;
+            tiles[slot] = (nx, ny);
+        }
+        (steps, tiles)
     }
 
     /// sub_457C10.
@@ -1096,12 +1421,18 @@ mod tests {
         let mut manager = GridFieldManager::new(1);
         manager.set_map(6, 1, flat_map(6, 1));
         placed(&mut manager, 0, 0);
-        let found = manager.targets(0, 0, 3, 0, 0, false, true).unwrap();
+        let found = manager.targets(0, 0, 3, 0, 0, false, true, true).unwrap();
         let tiles: Vec<_> = found.iter().map(|&(x, y, _)| (x, y)).collect();
         assert_eq!(tiles, [(1, 0), (2, 0), (3, 0)]);
         assert_eq!(found[2].2, 3 << 16);
         placed(&mut manager, 2, 0);
-        let units = manager.targets(0, 0, 5, 0, 0, true, false).unwrap();
+        let units = manager.targets(0, 0, 5, 0, 0, true, false, true).unwrap();
+        // Without exclude_self the shooter's own tile is listed too.
+        let with_self = manager.targets(0, 0, 5, 0, 0, true, false, false).unwrap();
+        assert_eq!(
+            with_self.iter().map(|&(x, _, _)| x).collect::<Vec<_>>(),
+            [0, 2]
+        );
         assert_eq!(units.iter().map(|&(x, _, _)| x).collect::<Vec<_>>(), [2]);
     }
 }

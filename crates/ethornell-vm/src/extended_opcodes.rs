@@ -9,9 +9,7 @@ pub(super) struct ExtendedOpcodeState {
     last_resource_transform: [i32; 7],
     last_resource_blend: [i32; 5],
     next_legacy_handle: i32,
-    legacy_devices: BTreeSet<i32>,
     legacy_meshes: BTreeSet<i32>,
-    legacy_workers: BTreeSet<i32>,
     last_legacy_3d_call: Option<(u8, Vec<i32>)>,
     last_debug_inspection: Option<u8>,
 }
@@ -177,17 +175,6 @@ impl Vm {
         }
 
         let result = match id {
-            0x00 => {
-                let handle = self.alloc_legacy_handle();
-                self.extended_opcodes.legacy_devices.insert(handle);
-                self.write_legacy_output(values.get(2).copied(), handle)?;
-                1
-            }
-            0x01 => i32::from(
-                values
-                    .first()
-                    .is_some_and(|handle| self.extended_opcodes.legacy_devices.remove(handle)),
-            ),
             0x40 => {
                 let handle = self.alloc_legacy_handle();
                 self.extended_opcodes.legacy_meshes.insert(handle);
@@ -199,21 +186,6 @@ impl Vm {
                     .first()
                     .is_some_and(|handle| self.extended_opcodes.legacy_meshes.remove(handle)),
             ),
-            0x80 => {
-                let handle = self.alloc_legacy_handle();
-                self.extended_opcodes.legacy_workers.insert(handle);
-                self.write_legacy_output(values.first().copied(), handle)?;
-                0
-            }
-            0x81 => i32::from(
-                !values
-                    .first()
-                    .is_some_and(|handle| self.extended_opcodes.legacy_workers.remove(handle)),
-            ),
-            0x2d => {
-                self.write_legacy_output(values.get(5).copied(), 0)?;
-                0
-            }
             0x65 | 0x67 => {
                 if let Some(pointer) = values.get(2).copied().filter(|pointer| *pointer != 0) {
                     let pointer = Self::translate_system_descriptor(pointer as u32);
@@ -221,10 +193,6 @@ impl Vm {
                         self.write_int(pointer.wrapping_add(offset), 2, 0)?;
                     }
                 }
-                0
-            }
-            0x87 => {
-                self.write_legacy_output(values.get(1).copied(), -65_536)?;
                 0
             }
             _ => 0,
@@ -551,5 +519,114 @@ mod tests {
         assert_eq!(d0(&mut vm, 0x12, &[int(grid), int(5)]), Some(int(4)));
         assert_eq!(d0(&mut vm, 0x01, &[int(grid)]), Some(int(1)));
         assert_eq!(d0(&mut vm, 0x01, &[int(grid)]), Some(int(0)));
+    }
+
+    #[test]
+    fn evaluator_runs_through_the_script_stack() {
+        let mut vm = Vm::new();
+        let int = Value::Int;
+        let (out, tiles, units, results, count) = (
+            0x1200_0100,
+            0x1200_0200,
+            0x1200_1000,
+            0x1200_4000,
+            0x1200_4400,
+        );
+        d0(&mut vm, 0x00, &[Value::Ptr(out), int(0), int(1)]);
+        let grid = vm.read_int(out, 2).unwrap() as i32;
+        for i in 0..4 * 6 {
+            vm.write_int(tiles + i * 4, 2, 0).unwrap();
+        }
+        d0(
+            &mut vm,
+            0x04,
+            &[int(grid), int(6), int(1), Value::Ptr(tiles)],
+        );
+        let mut ids = Vec::new();
+        for x in [0, 5] {
+            d0(&mut vm, 0x10, &[Value::Ptr(out), int(grid)]);
+            let id = vm.read_int(out, 2).unwrap() as i32;
+            d0(&mut vm, 0x14, &[int(grid), int(id), int(x), int(0)]);
+            ids.push(id);
+        }
+        // Two records of 525 words: teams 1 and 2, melee, 100 HP.
+        for (n, &id) in ids.iter().enumerate() {
+            let base = units + n as u32 * 2100;
+            for word in 0..525u32 {
+                vm.write_int(base + word * 4, 2, 0).unwrap();
+            }
+            for (word, value) in [
+                (0, id),
+                (1, 1 << n),
+                (2, n as i32),
+                (3, -1),
+                (7, 100),
+                (8, 100),
+                (141, 1),
+                (142, 2),
+                (149, 1),
+                (11, 1),
+                (12, 10),
+                (13, 1),
+                (159, 1),
+                (160, 1),
+            ] {
+                vm.write_int(base + word * 4, 2, value as u32).unwrap();
+            }
+        }
+        // D0:80 pushes nothing; the first evaluator handle is 1.
+        assert_eq!(d0(&mut vm, 0x80, &[Value::Ptr(out)]), None);
+        let ai = vm.read_int(out, 2).unwrap() as i32;
+        assert_eq!(ai, 1);
+        assert_eq!(d0(&mut vm, 0x84, &[int(ai), int(0)]), Some(int(16)));
+        assert_eq!(d0(&mut vm, 0x84, &[int(ai), int(2)]), Some(int(0)));
+        assert_eq!(
+            d0(
+                &mut vm,
+                0x88,
+                &[int(ai), int(grid), int(2), Value::Ptr(units), int(1)]
+            ),
+            Some(int(0))
+        );
+        assert_eq!(d0(&mut vm, 0x87, &[Value::Ptr(out), int(ai)]), Some(int(0)));
+        assert_eq!(vm.read_int(out, 2).unwrap(), 0);
+        assert_eq!(
+            d0(
+                &mut vm,
+                0x8A,
+                &[
+                    Value::Ptr(results),
+                    Value::Ptr(count),
+                    int(ai),
+                    int(0),
+                    int(3)
+                ]
+            ),
+            Some(int(0))
+        );
+        assert_eq!(vm.read_int(count, 2).unwrap(), 3);
+        // Best: walk 2 tiles toward the enemy at x=5; from there it could
+        // strike next turn (1 + 15 at 1.5x, weighted 67%) and faces the way
+        // it walked (+1).
+        let best: Vec<i32> = (0..7)
+            .map(|i| vm.read_int(results + i * 4, 2).unwrap() as i32)
+            .collect();
+        assert_eq!(best, [2, 0, 3, -1, -1, -1, 10 + 1]);
+        assert_eq!(d0(&mut vm, 0x87, &[Value::Ptr(out), int(ai)]), Some(int(0)));
+        assert_eq!(vm.read_int(out, 2).unwrap(), 0);
+        assert_eq!(d0(&mut vm, 0x87, &[Value::Ptr(out), int(ai)]), Some(int(0)));
+        assert_eq!(vm.read_int(out, 2).unwrap(), 0xFFFF_0000);
+        // D0:8E copies the script part back, with the chosen target.
+        assert_eq!(
+            d0(&mut vm, 0x8E, &[Value::Ptr(out), int(ai), int(0)]),
+            Some(int(0))
+        );
+        assert_eq!(vm.read_int(out + 3 * 4, 2).unwrap(), 1);
+        assert_eq!(
+            d0(&mut vm, 0x8E, &[Value::Ptr(out), int(ai), int(5)]),
+            Some(int(17))
+        );
+        assert_eq!(d0(&mut vm, 0x81, &[int(ai)]), Some(int(0)));
+        assert_eq!(d0(&mut vm, 0x81, &[int(ai)]), Some(int(1)));
     }
 }

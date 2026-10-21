@@ -3,10 +3,13 @@
 //! and `src/engine/logic_grid_field.c` for the cleaned target code.
 
 mod grid;
+mod msvc_qsort;
+mod slg;
 mod spline;
 
 use super::{Value, Vm, VmResult};
 use grid::{Cell, GridFieldManager, Tile};
+use slg::{Evaluator, SCRIPT_WORDS};
 
 /// The target's internal statuses; `status_to_script` (sub_497120) turns them
 /// into what the script sees.
@@ -31,6 +34,11 @@ pub(crate) mod status {
     pub const NOT_REACHED: u32 = 0x8000_0004;
     pub const OUT_OF_FIELD: u32 = 0x8000_0005;
     pub const PRUNED: u32 = 0x8000_0006;
+    pub const NO_THREAT_KEY: u32 = 0x8000_000D;
+    pub const NO_THREAT_MAP: u32 = 0x8000_000E;
+    // DCTESLGEvaluator.
+    pub const BAD_COUNT: u32 = 0x9000_0002;
+    pub const BAD_INDEX: u32 = 0x9000_0003;
 }
 
 /// sub_497120.
@@ -59,6 +67,18 @@ pub(crate) struct LogicState {
     /// dword_5669EC, newest first when searched; ids from dword_5669E4++ (0..).
     grids: Vec<(i32, GridFieldManager)>,
     next_grid: i32,
+    /// dword_566A00, ids from ++dword_5669FC (1..).
+    jobs: Vec<EvaluatorJob>,
+    next_job: i32,
+}
+
+/// The 0x78-byte job record of D0:80: the evaluator plus the last result a
+/// worker posted (read by D0:87).
+#[derive(Debug)]
+struct EvaluatorJob {
+    id: i32,
+    result: i32,
+    evaluator: Evaluator,
 }
 
 impl LogicState {
@@ -69,6 +89,10 @@ impl LogicState {
             .find(|(id, _)| *id == handle)
             .map(|(_, grid)| grid)
             .ok_or(status::NO_HANDLE)
+    }
+
+    fn job(&mut self, handle: i32) -> Option<&mut EvaluatorJob> {
+        self.jobs.iter_mut().rev().find(|job| job.id == handle)
     }
 }
 
@@ -252,6 +276,7 @@ impl Vm {
                     int(8),
                     int(9) != 0,
                     int(10) != 0,
+                    true,
                 )
             }) {
                 Ok(found) => {
@@ -285,9 +310,163 @@ impl Vm {
                 }
                 Err(status) => status,
             },
+            0x80..=0x8E => return self.execute_evaluator(id, args),
             _ => return Ok(None),
         };
         Ok(Some(status_to_script(result)))
+    }
+
+    /// D0:80..8E. Jobs the target hands to its worker thread run here at
+    /// once; their status goes to the job result that D0:87 reads (ADR 0002).
+    fn execute_evaluator(&mut self, id: u8, args: &[Value]) -> VmResult<Option<i32>> {
+        let int = |index: usize| args.get(index).map(Value::as_i32).unwrap_or_default();
+        let ptr = |index: usize| int(index) as u32;
+        // Unknown evaluator (or grid) handles return a raw 1 everywhere.
+        const UNKNOWN: i32 = 1;
+        Ok(Some(match id {
+            // (out*): no value is pushed.
+            0x80 => {
+                self.logic.next_job = self.logic.next_job.wrapping_add(1);
+                let handle = self.logic.next_job;
+                self.logic.jobs.push(EvaluatorJob {
+                    id: handle,
+                    result: 0,
+                    evaluator: Evaluator::new(),
+                });
+                self.logic_write_i32(ptr(0), handle)?;
+                0
+            }
+            0x81 => match self.logic.jobs.iter().rposition(|job| job.id == int(0)) {
+                Some(index) => {
+                    self.logic.jobs.remove(index);
+                    0
+                }
+                None => UNKNOWN,
+            },
+            0x84 => match self.logic.job(int(0)) {
+                Some(job) => status_to_script(job.evaluator.set_sides(int(1))),
+                None => UNKNOWN,
+            },
+            // (out*, h)
+            0x87 => match self.logic.job(int(1)) {
+                Some(job) => {
+                    let result = std::mem::replace(&mut job.result, 0xFFFF_0000u32 as i32);
+                    self.logic_write_i32(ptr(0), result)?;
+                    0
+                }
+                None => UNKNOWN,
+            },
+            // (h, grid, n, units*, async)
+            0x88 => {
+                if self.logic.job(int(0)).is_none() || self.logic.grid(int(1)).is_err() {
+                    return Ok(Some(UNKNOWN));
+                }
+                let n = int(2) as u32;
+                let status = if n.wrapping_sub(1) >= 64 {
+                    status::BAD_COUNT
+                } else {
+                    let words = self.logic_read_i32s(ptr(3), n as usize * SCRIPT_WORDS)?;
+                    let logic = &mut self.logic;
+                    let grid = logic
+                        .grids
+                        .iter()
+                        .rev()
+                        .find(|(handle, _)| *handle == int(1))
+                        .map(|(_, grid)| grid)
+                        .unwrap();
+                    let job = logic
+                        .jobs
+                        .iter_mut()
+                        .rev()
+                        .find(|job| job.id == int(0))
+                        .unwrap();
+                    job.evaluator.load(grid, n, &words)
+                };
+                self.finish_job(int(0), status, int(4) != 0)
+            }
+            // (out*, count*, h, acting, max): always a job.
+            0x8A => {
+                let Some(job) = self.logic.job(int(2)) else {
+                    return Ok(Some(UNKNOWN));
+                };
+                match job.evaluator.decide(int(3) as u32, int(4) as u32) {
+                    Ok(results) => {
+                        job.result = 0;
+                        let flat: Vec<i32> = results.iter().flatten().copied().collect();
+                        self.logic_write_i32s(ptr(0), &flat)?;
+                        self.logic_write_i32(ptr(1), results.len() as i32)?;
+                    }
+                    Err(status) => job.result = status_to_script(status),
+                }
+                0
+            }
+            // (h, grid)
+            0x8C => {
+                if self.logic.job(int(0)).is_none() || self.logic.grid(int(1)).is_err() {
+                    return Ok(Some(UNKNOWN));
+                }
+                let logic = &mut self.logic;
+                let grid = logic
+                    .grids
+                    .iter()
+                    .rev()
+                    .find(|(handle, _)| *handle == int(1))
+                    .map(|(_, grid)| grid)
+                    .unwrap();
+                let job = logic
+                    .jobs
+                    .iter_mut()
+                    .rev()
+                    .find(|job| job.id == int(0))
+                    .unwrap();
+                status_to_script(job.evaluator.resnapshot(grid))
+            }
+            // (h, index, unit*, with_maps, async)
+            0x8D => {
+                if self.logic.job(int(0)).is_none() {
+                    return Ok(Some(UNKNOWN));
+                }
+                let words = self.logic_read_i32s(ptr(2), SCRIPT_WORDS)?;
+                let job = self.logic.job(int(0)).unwrap();
+                let status = job.evaluator.load_one(int(1) as u32, &words, int(3) != 0);
+                self.finish_job(int(0), status, int(4) != 0)
+            }
+            // (out*, h, index)
+            0x8E => {
+                let Some(job) = self.logic.job(int(1)) else {
+                    return Ok(Some(UNKNOWN));
+                };
+                match job.evaluator.record(int(2) as u32) {
+                    Ok(record) => {
+                        let words = record.script_words().to_vec();
+                        self.logic_write_i32s(ptr(0), &words)?;
+                        0
+                    }
+                    Err(status) => status_to_script(status),
+                }
+            }
+            _ => return Ok(None),
+        }))
+    }
+
+    /// An async job posts its status for D0:87 and returns 0; a synchronous
+    /// call returns the status itself.
+    fn finish_job(&mut self, handle: i32, status: u32, asynchronous: bool) -> i32 {
+        if !asynchronous {
+            return status_to_script(status);
+        }
+        if let Some(job) = self.logic.job(handle) {
+            job.result = status_to_script(status);
+        }
+        0
+    }
+
+    fn logic_read_i32s(&self, ptr: u32, count: usize) -> VmResult<Vec<i32>> {
+        Ok(self
+            .logic_read(ptr, count * 4)?
+            .chunks_exact(4)
+            .map(|word| i32::from_le_bytes(word.try_into().unwrap()))
+            .collect())
     }
 
     fn logic_read(&self, ptr: u32, len: usize) -> VmResult<Vec<u8>> {
