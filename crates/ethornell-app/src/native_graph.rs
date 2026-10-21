@@ -2250,25 +2250,13 @@ impl RuntimeTraceApi {
         blend_mode: i32,
         bitmaps: &[i32],
     ) -> std::result::Result<(), ethornell_vm::VmError> {
-        let fail = |what: String| {
-            Err(ethornell_vm::VmError::Runtime(format!(
-                "Graph90:{selector:02X} {what}"
-            )))
-        };
-        if priority as u32 >= 0x1_0000 {
-            return fail(format!("priority {priority} is out of range"));
-        }
-        if alpha as u32 > 0x100 {
-            return fail(format!("alpha {alpha} exceeds 256"));
-        }
-        if !matches!(blend_mode, 0..=9 | 0x20..=0x27 | 0x40 | 0x41 | 0x80 | 0xC0 | 0xC1 | 0xF0 | 0xFF)
-        {
-            return fail(format!("blend mode {blend_mode:#x} is invalid"));
-        }
+        // sub_498720, sub_498920, sub_4987B0, sub_4986D0 in that order.
+        let _ = selector;
+        target_checks::priority(priority)?;
+        target_checks::effect_level(alpha)?;
+        target_checks::effect_mode(blend_mode)?;
         for bitmap in bitmaps {
-            if *bitmap as u32 >= 0x4000 {
-                return fail(format!("bitmap handle {bitmap} is out of range"));
-            }
+            target_checks::bitmap(*bitmap)?;
         }
         Ok(())
     }
@@ -2938,6 +2926,11 @@ impl RuntimeTraceApi {
                     // the mode-0 path even before a full 90:56 configure.
                     0,
                 );
+                if handle == 0 {
+                    return Some(Err(ethornell_vm::VmError::Runtime(
+                        "これ以上、スプライトオブジェクトを生成する事は出来ません".into(),
+                    )));
+                }
                 tracing::info!(sprite = handle, "GraphCreateSpriteObject");
                 ethornell_vm::Value::Int(handle)
             }
@@ -2957,12 +2950,12 @@ impl RuntimeTraceApi {
                     .any(|processor| processor.is_live() && processor.layer == handle)
                 {
                     return Some(Err(ethornell_vm::VmError::Runtime(format!(
-                        "Graph90:51 sprite #{handle} is still used by an input processor"
+                        "指定されたスプライトには協調しているプロシージャが存在します"
                     ))));
                 }
                 if self.graph_native_owners.contains_key(&handle) {
                     return Some(Err(ethornell_vm::VmError::Runtime(format!(
-                        "Graph90:51 sprite #{handle} is still attached to a parent object"
+                        "指定されたスプライトにはオーナーが存在します"
                     ))));
                 }
                 let released = self.graph90_release_object(
@@ -2972,9 +2965,7 @@ impl RuntimeTraceApi {
                     GRAPH90_CLASS_SPRITE,
                 );
                 if !released {
-                    return Some(Err(ethornell_vm::VmError::Runtime(format!(
-                        "Graph90:51 #{handle} is not a sprite object"
-                    ))));
+                    return Some(Err(ethornell_vm::VmError::Runtime("無効なスプライトハンドルが指定されました".to_string())));
                 }
                 tracing::debug!(handle, "GraphReleaseSpriteObject");
                 ethornell_vm::Value::None
@@ -2994,9 +2985,7 @@ impl RuntimeTraceApi {
                 };
                 if !self.graph90_object_matches(handle, GRAPH90_SPRITE_TAG, 512, GRAPH90_CLASS_SPRITE)
                 {
-                    return Some(Err(ethornell_vm::VmError::Runtime(format!(
-                        "Graph90:53 #{handle} is not a sprite object"
-                    ))));
+                    return Some(Err(ethornell_vm::VmError::Runtime("無効なスプライトハンドルが指定されました".to_string())));
                 }
                 let mode = self
                     .graph_object_properties
@@ -3006,7 +2995,7 @@ impl RuntimeTraceApi {
                     .unwrap_or_default();
                 if matches!(mode, 0 | 1 | 3) && (width <= 0 || height <= 0) {
                     return Some(Err(ethornell_vm::VmError::Runtime(format!(
-                        "Graph90:53 update region {width}x{height} is invalid"
+                        "無効な更新領域情報が指定されました"
                     ))));
                 }
                 if matches!(mode, 5 | 6) {
@@ -3019,6 +3008,14 @@ impl RuntimeTraceApi {
             }
             (0x90, 0x54) => {
                 let args = Self::graph90_source_args(stack, 2);
+                // sub_47CCF0 -> sub_462AA0: an unknown sprite is fatal.
+                if let [handle, _] = args.as_slice()
+                    && !self.graph90_object_matches(*handle, GRAPH90_SPRITE_TAG, 512, GRAPH90_CLASS_SPRITE)
+                {
+                    return Some(Err(ethornell_vm::VmError::Runtime(
+                        "無効なスプライトハンドルが指定されました".into(),
+                    )));
+                }
                 if let [handle, enabled] = args.as_slice()
                     && self.graph90_object_matches(
                         *handle,
@@ -3048,20 +3045,18 @@ impl RuntimeTraceApi {
                 if let [handle, bitmap] = args.as_slice() {
                     if !self.graph90_object_matches(*handle, GRAPH90_SPRITE_TAG, 512, GRAPH90_CLASS_SPRITE)
                     {
-                        return Some(Err(ethornell_vm::VmError::Runtime(format!(
-                            "Graph90:55 #{handle} is not a sprite object"
-                        ))));
+                        return Some(Err(ethornell_vm::VmError::Runtime("無効なスプライトハンドルが指定されました".to_string())));
                     }
                     if *bitmap != -1 {
                         match self.query_bitmap_info(*bitmap) {
                             None => {
                                 return Some(Err(ethornell_vm::VmError::Runtime(format!(
-                                    "Graph90:55 bitmap {bitmap} does not exist"
+                                    "無効なビットマップ [ {bitmap} ] が指定されました"
                                 ))));
                             }
                             Some(info) if !matches!(info.format, 2 | 3) => {
                                 return Some(Err(ethornell_vm::VmError::Runtime(format!(
-                                    "Graph90:55 bitmap {bitmap} is not a grayscale bitmap"
+                                    "ビットマップ [ {bitmap} ] はスクリーンサイズのグレイスケールではありません"
                                 ))));
                             }
                             Some(_) => {}
@@ -3117,14 +3112,11 @@ impl RuntimeTraceApi {
                     512,
                     GRAPH90_CLASS_SPRITE,
                 ) {
-                    return Some(Err(ethornell_vm::VmError::Runtime(format!(
-                        "Graph90:56 #{} is not a sprite object",
-                        args[0]
-                    ))));
+                    return Some(Err(ethornell_vm::VmError::Runtime("無効なスプライトハンドルが指定されました".to_string())));
                 }
                 if self.resource_image_region(args[3]).is_none() {
                     return Some(Err(ethornell_vm::VmError::Runtime(format!(
-                        "Graph90:56 bitmap {} does not exist",
+                        "指定されたビットマップ [ {} ] は無効です",
                         args[3]
                     ))));
                 }
@@ -3214,22 +3206,20 @@ impl RuntimeTraceApi {
                     // Modes 1/3/4 ignore the bitmap and succeed.
                     if *primary_bitmap as u32 >= 0x4000 {
                         return Some(Err(ethornell_vm::VmError::Runtime(format!(
-                            "Graph90:57 bitmap handle {primary_bitmap} is out of range"
+                            "無効なビットマップ番号 [ {primary_bitmap} ] が指定されました"
                         ))));
                     }
                     if !sprite_valid {
-                        return Some(Err(ethornell_vm::VmError::Runtime(format!(
-                            "Graph90:57 #{object} is not a sprite object"
-                        ))));
+                        return Some(Err(ethornell_vm::VmError::Runtime("無効なスプライトハンドルが指定されました".to_string())));
                     }
                     if matches!(mode, 0 | 2 | 5 | 6) && !bitmap_valid {
                         return Some(Err(ethornell_vm::VmError::Runtime(format!(
-                            "Graph90:57 bitmap {primary_bitmap} does not exist"
+                            "指定されたビットマップ [ {primary_bitmap} ] は無効です"
                         ))));
                     }
                     let replaced = self.graph90_replace_sprite_primary(*object, *primary_bitmap)
                         .map_err(|_| ethornell_vm::VmError::Runtime(format!(
-                            "Graph90:57 sprite #{object} could not rebuild bitmap {primary_bitmap}"
+                            "指定されたビットマップ [ {primary_bitmap} ] は無効です"
                         )));
                     let replaced = match replaced {
                         Ok(replaced) => replaced,
@@ -3316,32 +3306,35 @@ impl RuntimeTraceApi {
                         "Graph90:58 expected nine arguments".into(),
                     )));
                 }
-                let fail = |what: String| {
-                    Some(Err(ethornell_vm::VmError::Runtime(format!("Graph90:58 {what}"))))
-                };
-                for bitmap in [args[3], args[4]] {
-                    if bitmap as u32 >= 0x4000 {
-                        return fail(format!("bitmap handle {bitmap} is out of range"));
-                    }
-                }
-                if args[5] as u32 > 0x100 || args[6] as u32 > 0x100 {
-                    return fail(format!("value {} / {} exceeds 256", args[5], args[6]));
-                }
-                if args[7] as u32 >= 0x1_0000 {
-                    return fail(format!("priority {} is out of range", args[7]));
+                let fail = |what: String| Some(Err(ethornell_vm::VmError::Runtime(what)));
+                // sub_47CF70: both bitmaps, mixing ratio (sub_498970),
+                // transparency (sub_4989C0), priority, then sub_4628F0.
+                if let Err(error) = target_checks::bitmap(args[3])
+                    .and_then(|()| target_checks::bitmap(args[4]))
+                    .and_then(|()| target_checks::mixing_ratio(args[5]))
+                    .and_then(|()| target_checks::transparency(args[6]))
+                    .and_then(|()| target_checks::priority(args[7]))
+                {
+                    return Some(Err(error));
                 }
                 if !self.graph90_object_matches(args[0], GRAPH90_SPRITE_TAG, 512, GRAPH90_CLASS_SPRITE)
                 {
-                    return fail(format!("#{} is not a sprite object", args[0]));
+                    return fail("無効なスプライトハンドルが指定されました".into());
                 }
                 let sizes = [args[3], args[4]].map(|bitmap| {
                     self.query_bitmap_info(bitmap).map(|info| (info.width, info.height))
                 });
                 if sizes.iter().any(Option::is_none) {
-                    return fail(format!("bitmap {} / {} does not exist", args[3], args[4]));
+                    return fail(format!(
+                        "指定されたビットマップ [ {} , {} ] のいずれかが無効です",
+                        args[3], args[4]
+                    ));
                 }
                 if sizes[0] != sizes[1] {
-                    return fail(format!("bitmaps {} / {} differ in size", args[3], args[4]));
+                    return fail(format!(
+                        "ビットマップ [ {} , {} ] のサイズが一致しません",
+                        args[3], args[4]
+                    ));
                 }
                 {
                     self.graph90_begin_sprite_configuration(args[0], 1);
@@ -3402,6 +3395,35 @@ impl RuntimeTraceApi {
             }
             (0x90, 0x59) => {
                 let args = Self::graph90_source_args(stack, 13);
+                // sub_47D0D0: priority, transparency, blend mode, then
+                // sub_43EBB0: unknown sprite (255), bitmap (1), a scaled
+                // extent below two pixels (8).
+                if args.len() == 13 {
+                    if let Err(error) =
+                        Self::graph90_validate_sprite_arguments(id, args[12], args[11], args[10], &[])
+                    {
+                        return Some(Err(error));
+                    }
+                    if !self.graph90_object_matches(args[0], GRAPH90_SPRITE_TAG, 512, GRAPH90_CLASS_SPRITE) {
+                        return Some(Err(ethornell_vm::VmError::Runtime(
+                            "無効なスプライトハンドルが指定されました".into(),
+                        )));
+                    }
+                    let Some(info) = self.query_bitmap_info(args[3]) else {
+                        return Some(Err(ethornell_vm::VmError::Runtime(format!(
+                            "無効なビットマップ [ {} ] が指定されました",
+                            args[3]
+                        ))));
+                    };
+                    let width = (i64::from(info.width) * i64::from(args[7])) >> 16;
+                    let height = (i64::from(info.height) * i64::from(args[8])) >> 16;
+                    if width < 2 || height < 2 {
+                        return Some(Err(ethornell_vm::VmError::Runtime(format!(
+                            "無効な伸縮倍率 [ {} , {} ] が指定されました",
+                            args[7], args[8]
+                        ))));
+                    }
+                }
                 if args.len() == 13
                     && self.graph90_object_matches(
                         args[0],
@@ -3473,6 +3495,20 @@ impl RuntimeTraceApi {
             }
             (0x90, 0x5A) => {
                 let args = Self::graph90_source_args(stack, 10);
+                if args.len() == 10 {
+                    if let Err(error) = target_checks::priority(args[9])
+                        .and_then(|()| target_checks::effect_level(args[8]))
+                        .and_then(|()| target_checks::effect_mode(args[7]))
+                        .and_then(|()| target_checks::effect_level(args[6]))
+                    {
+                        return Some(Err(error));
+                    }
+                    if !self.graph90_object_matches(args[0], GRAPH90_SPRITE_TAG, 512, GRAPH90_CLASS_SPRITE) {
+                        return Some(Err(ethornell_vm::VmError::Runtime(
+                            "無効なスプライトハンドルが指定されました".into(),
+                        )));
+                    }
+                }
                 if args.len() == 10
                     && self.graph90_object_matches(
                         args[0],
@@ -3509,6 +3545,22 @@ impl RuntimeTraceApi {
             }
             (0x90, 0x5B) => {
                 let args = Self::graph90_source_args(stack, 10);
+                // sub_47D3F0: both bitmaps, transparency (sub_4989C0) and
+                // priority, then sub_462990's codes.
+                if args.len() == 10 {
+                    if let Err(error) = target_checks::bitmap(args[3])
+                        .and_then(|()| target_checks::bitmap(args[4]))
+                        .and_then(|()| target_checks::transparency(args[8]))
+                        .and_then(|()| target_checks::priority(args[9]))
+                    {
+                        return Some(Err(error));
+                    }
+                    if !self.graph90_object_matches(args[0], GRAPH90_SPRITE_TAG, 512, GRAPH90_CLASS_SPRITE) {
+                        return Some(Err(ethornell_vm::VmError::Runtime(
+                            "無効なスプライトハンドルが指定されました".into(),
+                        )));
+                    }
+                }
                 if args.len() == 10
                     && self.graph90_object_matches(
                         args[0],
@@ -3541,7 +3593,22 @@ impl RuntimeTraceApi {
                     self.graph90_sync_mode4_primary_layer(&args);
                     self.graph90_bind_vm_effect(args[0],args[3],args[4]);
                     if let Err(reason) = self.graph90_refresh_vm_effect(args[0]) {
-                        return Some(Err(ethornell_vm::VmError::Runtime(format!("Graph90:5B {reason}"))));
+                        let message = if reason.contains("primary") {
+                            format!("無効なビットマップ [ {} ] が指定されました", args[3])
+                        } else if reason == "missing VM vector bitmap" {
+                            format!(
+                                "ベクトル＆ディスタンスマップとして指定されたビットマップ [ {} ] は無効です",
+                                args[4]
+                            )
+                        } else if reason.contains("vector") || reason.contains("auxiliary") {
+                            format!(
+                                "指定されたビットマップ [ {} ] はベクトル＆ディスタンスマップではない、",
+                                args[4]
+                            )
+                        } else {
+                            format!("指定された波紋 [ {} ] は登録されていません", args[6])
+                        };
+                        return Some(Err(ethornell_vm::VmError::Runtime(message)));
                     }
                     self.graph90_record_call(args[0], id, &args);
                 }
@@ -3554,21 +3621,14 @@ impl RuntimeTraceApi {
                         "Graph90:5C expected seventeen arguments".into(),
                     )));
                 }
-                // sub_47CC10: primary < 0x4000, transition <= 0x100, blend
-                // mode, alpha <= 0x100, priority < 0x10000.
-                if args[6] as u32 > 0x100 {
-                    return Some(Err(ethornell_vm::VmError::Runtime(format!(
-                        "Graph90:5C transition value {} exceeds 256",
-                        args[6]
-                    ))));
-                }
-                if let Err(error) = Self::graph90_validate_sprite_arguments(
-                    id,
-                    args[16],
-                    args[15],
-                    args[14],
-                    &[args[4]],
-                ) {
+                // sub_47D710: bitmap, mixing ratio (sub_498970), blend mode,
+                // transparency, priority.
+                if let Err(error) = target_checks::bitmap(args[4])
+                    .and_then(|()| target_checks::mixing_ratio(args[6]))
+                    .and_then(|()| target_checks::effect_mode(args[14]))
+                    .and_then(|()| target_checks::effect_level(args[15]))
+                    .and_then(|()| target_checks::priority(args[16]))
+                {
                     return Some(Err(error));
                 }
                 // sub_43EAB0 / sub_427AA0 result codes: 255 missing sprite,
@@ -3582,16 +3642,13 @@ impl RuntimeTraceApi {
                     512,
                     GRAPH90_CLASS_SPRITE,
                 ) {
-                    return Some(Err(ethornell_vm::VmError::Runtime(format!(
-                        "Graph90:5C #{} is not a sprite object",
-                        args[0]
-                    ))));
+                    return Some(Err(ethornell_vm::VmError::Runtime("無効なスプライトハンドルが指定されました".to_string())));
                 }
                 let primary = self.query_bitmap_info(args[4]);
                 let secondary = (args[5] != -1).then(|| self.query_bitmap_info(args[5]));
                 if primary.is_none() || secondary.as_ref().is_some_and(Option::is_none) {
                     return Some(Err(ethornell_vm::VmError::Runtime(format!(
-                        "Graph90:5C bitmap {} / {} does not exist",
+                        "指定されたビットマップ [ {} , {} ] のいずれかが無効です",
                         args[4], args[5]
                     ))));
                 }
@@ -3768,7 +3825,7 @@ impl RuntimeTraceApi {
                         && (width < 2 || height < 2)
                     {
                         return Some(Err(ethornell_vm::VmError::Runtime(format!(
-                            "Graph90:5C projected size {width}x{height} is too small (perspective {})",
+                            "無効な投射スケール [ {} ] が指定されました",
                             args[11]
                         ))));
                     }
@@ -3778,7 +3835,22 @@ impl RuntimeTraceApi {
             (0x90, 0x5D) => {
                 let args = Self::graph90_source_args(stack, 20);
                 if args.len()!=20 {return Some(Err(ethornell_vm::VmError::Runtime("90:5D expected twenty arguments".into())));}
-                if args[4] as u32>=0x4000 || args[6] as u32>256 || args[18] as u32>256 || args[19] as u32>=65536 || !crate::native_effect::is_native_blend_mode(args[17]) {return Some(Err(ethornell_vm::VmError::Runtime("90:5D invalid bitmap, transition, alpha, priority or blend".into())));}
+                // sub_47DA60: bitmap, mixing ratio, blend mode, transparency,
+                // priority; sub_462A10: unknown sprite (255), bitmaps (1),
+                // projection scale (8).
+                if let Err(error) = target_checks::bitmap(args[4])
+                    .and_then(|()| target_checks::mixing_ratio(args[6]))
+                    .and_then(|()| target_checks::effect_mode(args[17]))
+                    .and_then(|()| target_checks::effect_level(args[18]))
+                    .and_then(|()| target_checks::priority(args[19]))
+                {
+                    return Some(Err(error));
+                }
+                if !self.graph90_object_matches(args[0], GRAPH90_SPRITE_TAG, 512, GRAPH90_CLASS_SPRITE) {
+                    return Some(Err(ethornell_vm::VmError::Runtime(
+                        "無効なスプライトハンドルが指定されました".into(),
+                    )));
+                }
                 if args.len() == 20
                     && self.graph90_object_matches(
                         args[0],
@@ -3798,7 +3870,7 @@ impl RuntimeTraceApi {
                     );
                     let primary_info=self.query_bitmap_info(args[4]);
                     let secondary_info=if args[5]==-1 {None}else{self.query_bitmap_info(args[5])};
-                    if primary_info.is_none() || args[5]!=-1 && secondary_info.is_none() {return Some(Err(ethornell_vm::VmError::Runtime("90:5D missing primary or secondary bitmap".into())));}
+                    if primary_info.is_none() || args[5]!=-1 && secondary_info.is_none() {return Some(Err(ethornell_vm::VmError::Runtime(format!("指定されたビットマップ [ {} , {} ] のいずれかが無効です", args[4], args[5]))));}
                     if let (Some(primary),Some(secondary))=(primary_info,secondary_info) {
                         if primary.width!=secondary.width || primary.height!=secondary.height || primary.format!=secondary.format {return Some(Ok(ethornell_vm::Value::None));}
                     }
@@ -3879,6 +3951,14 @@ impl RuntimeTraceApi {
                         parent = ?self.display_tree.parent(args[0]),
                         "GraphConfigureSpriteMode6"
                     );
+                    if let Some((width, height)) = self.graph90_sprite_projected_extent(args[0])
+                        && (width < 2 || height < 2)
+                    {
+                        return Some(Err(ethornell_vm::VmError::Runtime(format!(
+                            "無効な投射スケール [ {} ] が指定されました",
+                            args[14]
+                        ))));
+                    }
                     self.graph90_record_call(args[0], id, &args);
                 } else {return Some(Err(ethornell_vm::VmError::Runtime("90:5D invalid sprite object".into())));}
                 ethornell_vm::Value::None

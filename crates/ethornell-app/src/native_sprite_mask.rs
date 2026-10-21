@@ -15,24 +15,26 @@ pub(crate) struct SpriteMask {
 
 impl RuntimeTraceApi {
     pub(super) fn configure_sprite_mask(&mut self, args: &[i32]) -> ethornell_vm::VmResult<()> {
-        let fail = |reason: &str| ethornell_vm::VmError::Runtime(format!("Graph90:5A {reason}"));
-        if args[6] as u32 > 256
-            || args[8] as u32 > 256
-            || args[9] as u32 >= 65536
-            || !matches!(args[7],0..=9|0x20..=0x27|0x40|0x41|0x80|0xC0|0xC1|0xF0|0xFF)
-        {
-            return Err(fail(
-                "invalid fixed parameter, transparency, priority or blend",
-            ));
-        }
-        let source = self
-            .graph_bitmap_image(args[3])
-            .ok_or_else(|| fail("primary bitmap is absent"))?;
-        let mask_info = self
-            .query_bitmap_info(args[4])
-            .ok_or_else(|| fail("mask bitmap is absent"))?;
+        // sub_47D270: priority, transparency, blend mode, fixed parameter;
+        // sub_462960: either bitmap invalid (1), the mask unsuitable (2).
+        target_checks::priority(args[9])?;
+        target_checks::effect_level(args[8])?;
+        target_checks::effect_mode(args[7])?;
+        target_checks::effect_level(args[6])?;
+        let either = || {
+            ethornell_vm::VmError::Runtime(format!(
+                "指定されたビットマップ [ {} , {} ] のいずれかが無効です",
+                args[3], args[4]
+            ))
+        };
+        let fail = |_: &str| either();
+        let source = self.graph_bitmap_image(args[3]).ok_or_else(either)?;
+        let mask_info = self.query_bitmap_info(args[4]).ok_or_else(either)?;
         if mask_info.format != 3 {
-            return Err(fail("mask bitmap must have format 3"));
+            return Err(ethornell_vm::VmError::Runtime(format!(
+                "指定されたフィルタリング用ビットマップ [ {}  ] は不適切です",
+                args[4]
+            )));
         }
         let mask = self
             .graph_bitmap_image(args[4])

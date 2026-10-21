@@ -15942,7 +15942,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_CREATE_SPRITE_OBJECT_PARAMETERS,
         returns: "0x80000000-tagged sprite handle",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target sub_462350 allocates one of 512 CDspObjSprite slots and encodes the reusable slot as 0x80000000 | index. The manager create path sub_43E510 separately increments a monotonic Sprite construction counter and passes its previous value in ECX to sub_4256C0 -> CDspObj::CDspObj, producing CDspObj+0x18 sort_class=2 and +0x20 sort_index=construction counter; +0x20 is therefore not the public slot and is not reused after release/recreate.",
+        notes: "BGI 1.622 sub_47CBE0 -> sub_4628B0: first free of 512 sprite slots (0x80000000 | slot); none left is fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_RELEASE_SPRITE_OBJECT,
@@ -15950,7 +15950,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_RELEASE_SPRITE_OBJECT_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_47C110 drops the object's input registration (sub_496300), then raises a script error when the sprite is locked by an input processor (+0x130, DCIndProc), still attached to a parent (+0x11C), or is not a live sprite; otherwise sub_43E610 unlinks and destroys the CDspObjSprite and frees its slot.",
+        notes: "sub_47CC10: a cooperating procedure, an owner, or an unknown sprite are fatal (1.622 texts), else released.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_REFRESH_SPRITE_OBJECT,
@@ -15958,7 +15958,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_REFRESH_SPRITE_OBJECT_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_47C170 -> sub_428C00 with the rect (x, y, w, h) passed in registers: missing sprite fatal; modes 0/1/3 invalidate the rect and reject an empty one (fatal); mode 5 re-rasterizes its projected cache in the rect; mode 6 rebuilds its cache; other modes invalidate the sprite.",
+        notes: "sub_47CC70 -> sub_462AB0: update rectangle; 10 invalid region, 255 unknown sprite.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_SET_SPRITE_ENABLED,
@@ -15966,7 +15966,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_SET_SPRITE_ENABLED_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target sub_47C1F0/sub_462540 writes the sprite enabled gate.",
+        notes: "sub_47CCF0 -> sub_462AA0: draw enable (vtable+4); unknown sprite fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_SET_SPRITE_AUX_BITMAP,
@@ -15974,7 +15974,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_SET_SPRITE_AUX_BITMAP_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target sub_47C230 -> sub_462520 -> sub_43ED20 -> sub_427F80 installs or clears the independent CDspObjSprite auxiliary bitmap at Sprite+0x13C (generation +0x140), accepting native bitmap formats 2/3. It does not overwrite the mode primary bitmap at Sprite+0x150; successful changes invalidate/redraw an already-drawable Sprite.",
+        notes: "sub_47CD30 -> sub_462A80: aux grey-scale bitmap; invalid (1), not screen-size grey-scale (2), unknown sprite (255).",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_CONFIGURE_SPRITE_SINGLE_BITMAP,
@@ -15982,7 +15982,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_CONFIGURE_SPRITE_SINGLE_BITMAP_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_47C2D0 pops priority (< 0x10000), alpha (<= 0x100), blit mode (sub_497C40 list), bitmap (< 0x4000), y, x, sprite; sub_43E690 refuses a missing sprite or bitmap (script errors), sub_427410 drops the previous mode's data and binds the bitmap as mode 0, then SetPosition (recursive), blit mode +0xA8, SetAlpha (recursive) and SetPriority.",
+        notes: "sub_47CDD0 -> sub_4628D0: mode 0; priority, transparency, mode, bitmap checks; bitmap (1) and sprite (255) errors.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_REPLACE_SPRITE_BITMAP,
@@ -15990,7 +15990,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_REPLACE_SPRITE_BITMAP_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_47C3E0: bitmap handle >= 0x4000 and a missing sprite are fatal; sub_4272F0 rebuilds modes 0/2/5/6 with the existing geometry (5/6 with secondary=-1, transition=0) and a missing bitmap there is fatal; modes 1/3/4 ignore the bitmap.",
+        notes: "sub_47CEE0 -> sub_462A70: replaces the primary bitmap; bitmap (1), sprite (255).",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_CONFIGURE_SPRITE_DUAL_BITMAP,
@@ -15998,7 +15998,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_CONFIGURE_SPRITE_DUAL_BITMAP_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_47C470 -> sub_462390: bitmap handles >= 0x4000, transition/value > 256, priority >= 0x10000, a missing sprite, a missing bitmap and bitmaps of different sizes are fatal; mode 1 mixes primary and secondary with the sub_40C0F0 integer kernel at the +0x240 transition, then applies the object alpha.",
+        notes: "sub_47CF70 -> sub_4628F0: mode 1 pair; bitmaps, mixing ratio, transparency, priority; either invalid / size mismatch.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_CONFIGURE_SPRITE_SCALED_BITMAP,
@@ -16006,7 +16006,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_CONFIGURE_SPRITE_SCALED_BITMAP_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Current target sub_47C5D0/sub_4623C0 -> sub_427000/sub_4275B0 configures sprite mode 2 as an affine-transformed full bitmap, not a source-crop/destination-rectangle sprite. Args 4/5 are converted to 16.16 transform terms, arg 6 is the rotation term, args 7/8 are stretch ratios, and arg 9 is stored at Sprite+0x280 for the affine blit path. sub_4291E0/sub_429220 compute transformed raster bounds/origin; sub_4281E0 draws at ordinary composite position minus that origin.",
+        notes: "sub_47D0D0 -> sub_43EBB0/sub_427930: mode 2 scaled; checks, unknown sprite, bitmap, scaled extent below 2.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_CONFIGURE_SPRITE_MASKED_BITMAP,
@@ -16014,7 +16014,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_CONFIGURE_SPRITE_MASKED_BITMAP_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target sub_47C770/sub_462400 configures sprite mode 3 with a primary drawable bitmap, mask resource, and fixed-point parameter; configuring this mode does not remove the sprite from the drawable object chain.",
+        notes: "sub_47D270 -> sub_462960: mode 3 mask; checks, unknown sprite, either bitmap, unsuitable filter bitmap.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_CONFIGURE_SPRITE_VM_EFFECT,
@@ -16022,7 +16022,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_CONFIGURE_SPRITE_VM_EFFECT_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "BGI 1.622 Sprite mode 4: format-6 vector sampling and wave-slot window; wraps the complete source allocation. Wave alpha is separate from mask/multiplier coverage.",
+        notes: "sub_47D3F0 -> sub_462990: mode 4 VM effect; bitmaps, transparency, priority, sprite and map/ripple errors.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_CONFIGURE_SPRITE_TRANSFORM_MODE5,
@@ -16030,7 +16030,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_CONFIGURE_SPRITE_TRANSFORM_MODE5_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_47CC10 -> sub_43EAB0 -> sub_427170 -> sub_427AA0 (17 arguments). Exact: argument checks (primary < 0x4000, transition <= 0x100, blend mode, alpha <= 0x100, priority < 0x10000), missing sprite / primary / secondary bitmap fatal, a secondary of another size or format returns silently after position/blend/alpha/priority were applied, projected extent below 2 fatal; vtable+40 integer position = (fixed + screen centre) >> 16 (sub_429AF0); the two-bitmap cache uses the sub_40C1B0/sub_40C430 integer kernels. Partial: the mip pyramid sub_42A650 selects for scale <= 0.5 (sub_42AA20) and the integer affine rasterizer sub_4258D0 -> sub_4168E0/sub_417730 are approximated by the renderer's linear sampling.",
+        notes: "sub_47D710 -> sub_43EE70: mode 5; bitmap, mixing ratio, mode, transparency, priority; 9 (secondary mismatch) silent, 8 projection scale.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_CONFIGURE_SPRITE_TRANSFORM_MODE6,
@@ -16038,7 +16038,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_CONFIGURE_SPRITE_TRANSFORM_MODE6_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target sub_47CF60/sub_4624B0 configures sprite mode 6. The first three values are signed 16.16 X/Y/Z written through CDspObj vtable+60. sub_427D90/sub_42A100 build a projected four-vertex bitmap surface; the mode remains drawable and is not state-only metadata. Remaining fields select primary/optional secondary bitmaps, transition/3D transform state, blend, transparency, and priority.",
+        notes: "sub_47DA60 -> sub_462A10: mode 6; same checks; unknown sprite, bitmaps, projection scale.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_CREATE_FILTER_OBJECT,
@@ -20072,6 +20072,12 @@ const PORTABLE_EQUIVALENT_OPCODES: &[NativeOpcode] = &[
     opcodes::GRAPH90_CONFIGURE_CURRENT_OBJECT_BITMAP_SIZE_POSITION,
     opcodes::GRAPH90_CONFIGURE_CURRENT_OBJECT_BITMAP_SIZE,
     opcodes::GRAPH90_CONFIGURE_CURRENT_OBJECT_BLIT_SOURCES,
+    opcodes::GRAPH90_SET_SPRITE_AUX_BITMAP,
+    opcodes::GRAPH90_CONFIGURE_SPRITE_SCALED_BITMAP,
+    opcodes::GRAPH90_CONFIGURE_SPRITE_MASKED_BITMAP,
+    opcodes::GRAPH90_CONFIGURE_SPRITE_VM_EFFECT,
+    opcodes::GRAPH90_CONFIGURE_SPRITE_TRANSFORM_MODE5,
+    opcodes::GRAPH90_CONFIGURE_SPRITE_TRANSFORM_MODE6,
 ];
 
 const PARTIAL_IMPLEMENTATION_OPCODES: &[NativeOpcode] = &[
@@ -20178,12 +20184,6 @@ const PARTIAL_IMPLEMENTATION_OPCODES: &[NativeOpcode] = &[
     opcodes::GRAPH91_SET_MULTILAYER_LAYER_SOURCE_VELOCITY,
     opcodes::GRAPH91_SET_MULTILAYER_LAYER_TRANSFORM_VELOCITY,
     opcodes::GRAPH90_SET_DISPLAY_OPTIONS,
-    opcodes::GRAPH90_SET_SPRITE_AUX_BITMAP,
-    opcodes::GRAPH90_CONFIGURE_SPRITE_SCALED_BITMAP,
-    opcodes::GRAPH90_CONFIGURE_SPRITE_MASKED_BITMAP,
-    opcodes::GRAPH90_CONFIGURE_SPRITE_VM_EFFECT,
-    opcodes::GRAPH90_CONFIGURE_SPRITE_TRANSFORM_MODE5,
-    opcodes::GRAPH90_CONFIGURE_SPRITE_TRANSFORM_MODE6,
     opcodes::GRAPH90_CONFIGURE_FILTER,
     opcodes::GRAPH90_CONFIGURE_FILTER_WITH_MASK,
     opcodes::GRAPH90_CONFIGURE_MAP_OBJECT,
