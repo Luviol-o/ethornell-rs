@@ -739,11 +739,30 @@ impl RuntimeTraceApi {
             return 0.0;
         };
         native_mixer_volume([
-            self.bgm_primary_volumes[index],
+            // sub_494F50 applies 0 to every primary bank while minimized.
+            if self.sound_minimize_muted { 0 } else { self.bgm_primary_volumes[index] },
             self.bgm_secondary_volumes[index],
             self.bgm_play_volumes[index],
             self.bgm_fade_volumes[index],
         ])
+    }
+
+    /// sub_494F50 (muted) / sub_4946B0 (restored): the primary BGM and SE
+    /// banks apply 0 while the window is minimized and the stored values
+    /// again afterwards; A0:08/A0:09 keep storing in between.
+    pub(super) fn set_sound_minimize_muted(&mut self, muted: bool) {
+        if self.sound_minimize_muted == muted {
+            return;
+        }
+        self.sound_minimize_muted = muted;
+        let bgm = self.bgm_slots.keys().copied().collect::<Vec<_>>();
+        for channel in bgm {
+            self.apply_native_bgm_volume(channel);
+        }
+        let sounds = self.sound_slots.keys().copied().collect::<Vec<_>>();
+        for channel in sounds {
+            self.apply_native_sound_volume(channel);
+        }
     }
 
     fn apply_native_bgm_volume(&mut self, channel: i32) {
@@ -800,7 +819,7 @@ impl RuntimeTraceApi {
             return [0; 4];
         };
         [
-            self.sound_primary_volumes[index],
+            if self.sound_minimize_muted { 0 } else { self.sound_primary_volumes[index] },
             self.sound_secondary_volumes[index],
             self.sound_play_volumes[index],
             self.sound_fade_volumes[index],

@@ -39,6 +39,8 @@ struct WindowApp {
     frame_index: usize,
     input_script: Option<HeadlessInputScript>,
     trackpad_scroll: TrackpadScroll,
+    /// Alt is held: keys go out as WM_SYSKEYDOWN/WM_SYSKEYUP.
+    alt_held: bool,
     failure: Arc<Mutex<Option<String>>>,
     font: ab_glyph::FontArc,
 }
@@ -130,6 +132,7 @@ impl ApplicationHandler for WindowApp {
             frame_index,
             input_script,
             trackpad_scroll,
+            alt_held,
             failure,
             ..
         } = self;
@@ -162,9 +165,30 @@ impl ApplicationHandler for WindowApp {
                     runtime.api.window_surface_height = size.height.min(i32::MAX as u32) as i32;
                 }
             }
+            WindowEvent::Moved(position) => {
+                // WM_WINDOWPOSCHANGING: while Sys81:65 is set, a windowed game
+                // window is put back at the centre of its monitor
+                // (sub_461B40).
+                if let Some(runtime) = runtime.as_ref()
+                    && runtime.api.window_center_lock != 0
+                    && window.fullscreen().is_none()
+                    && let Some(monitor) = window.current_monitor()
+                    && let Some(mode) = monitor.current_video_mode()
+                {
+                    let origin = monitor.position().unwrap_or_default();
+                    let size = window.outer_size();
+                    let x = origin.x + (mode.size().width as i32 - size.width as i32) / 2;
+                    let y = origin.y + (mode.size().height as i32 - size.height as i32) / 2;
+                    if (position.x, position.y) != (x, y) {
+                        window.set_outer_position(PhysicalPosition::new(x, y).into());
+                    }
+                }
+            }
             WindowEvent::Focused(focused) => {
                 if let Some(runtime) = runtime.as_mut() {
-                    runtime.api.window_focused = focused;
+                    runtime
+                        .api
+                        .sync_host_window_state(focused, window.is_minimized().unwrap_or(false));
                     if !focused && runtime.api.input_requires_focus {
                         pending_input_events.clear();
                         runtime.api.pending_input_state = None;
@@ -204,10 +228,15 @@ impl ApplicationHandler for WindowApp {
                         && runtime.api.native_system.drag_drop_enabled
                         && let Ok(paths) = value.try_as_file_paths()
                     {
-                        runtime.api.dropped_files = paths
-                            .iter()
-                            .map(|path| path.to_string_lossy().into_owned())
-                            .collect();
+                        // WM_DROPFILES (sub_499930): event {16, 0, 0}, then
+                        // sub_464010 keeps the first path when there is one.
+                        runtime.api.queued_system_events.push_back([16, 0, 0]);
+                        if !paths.is_empty() {
+                            runtime.api.dropped_files = paths
+                                .iter()
+                                .map(|path| path.to_string_lossy().into_owned())
+                                .collect();
+                        }
                     }
                 }
             }
@@ -230,10 +259,14 @@ impl ApplicationHandler for WindowApp {
                         physical_key: PhysicalKey::Code(code),
                         state: ElementState::Pressed,
                         text,
+                        repeat,
                         ..
                     },
                 ..
             } => {
+                if matches!(code, KeyCode::AltLeft | KeyCode::AltRight) {
+                    *alt_held = true;
+                }
                 let modeless_consumed = runtime
                     .as_ref()
                     .is_some_and(|runtime| runtime.api.has_visible_user_modeless_dialog());
@@ -248,10 +281,14 @@ impl ApplicationHandler for WindowApp {
                     && let Some(descriptor) = input_descriptor_for_keycode(code)
                 {
                     if runtime.is_some() {
-                        queue_runtime_input_event(
-                            pending_input_events,
-                            RuntimeInputEvent::KeyPress { descriptor },
-                        );
+                        // Windows delivers Alt, F10 and keys pressed while Alt
+                        // is held as WM_SYSKEYDOWN.
+                        let event = if *alt_held || descriptor == 0x79 {
+                            RuntimeInputEvent::SysKeyPress { descriptor, repeat }
+                        } else {
+                            RuntimeInputEvent::KeyPress { descriptor }
+                        };
+                        queue_runtime_input_event(pending_input_events, event);
                     }
                     tracing::info!(descriptor, "keyboard advance");
                 }
@@ -265,17 +302,32 @@ impl ApplicationHandler for WindowApp {
                     },
                 ..
             } => {
+                let system = *alt_held || code == KeyCode::F10;
+                if matches!(code, KeyCode::AltLeft | KeyCode::AltRight) {
+                    *alt_held = false;
+                }
                 if let Some(descriptor) = input_descriptor_for_keycode(code)
                     && let Some(runtime) = runtime.as_mut()
                     && !runtime.api.has_visible_user_modeless_dialog()
                 {
-                    queue_runtime_input_event(
-                        pending_input_events,
-                        RuntimeInputEvent::KeyRelease { descriptor },
-                    );
+                    let event = if system {
+                        RuntimeInputEvent::SysKeyRelease { descriptor }
+                    } else {
+                        RuntimeInputEvent::KeyRelease { descriptor }
+                    };
+                    queue_runtime_input_event(pending_input_events, event);
                 }
             }
             WindowEvent::MouseWheel { delta, phase, .. } => {
+                if let MouseScrollDelta::LineDelta(x, _) = delta
+                    && x != 0.0
+                    && runtime.is_some()
+                {
+                    queue_runtime_input_event(
+                        pending_input_events,
+                        RuntimeInputEvent::MouseHorizontalWheel { delta_x: x },
+                    );
+                }
                 let (delta_y, count) = match delta {
                     MouseScrollDelta::LineDelta(_, y) => (y, 1),
                     MouseScrollDelta::PixelDelta(position) => {
@@ -401,18 +453,49 @@ impl ApplicationHandler for WindowApp {
                 let audio_elapsed_ms = host_clock_ms.saturating_sub(*last_audio_clock_ms);
                 *last_audio_clock_ms = host_clock_ms;
                 if let Some(runtime) = runtime.as_mut() {
-                    // sub_45E9E0: the display mode's refresh rate (dword_5177C8).
-                    runtime.api.performance_profile.refresh_rate = window
+                    let focused = runtime.api.window_focused;
+                    runtime
+                        .api
+                        .sync_host_window_state(focused, window.is_minimized().unwrap_or(false));
+                    // GetAdapterDisplayMode (dword_5177C0..C8): the monitor's
+                    // size and refresh rate (sub_45E9E0).
+                    let video_mode = window
                         .current_monitor()
-                        .and_then(|monitor| monitor.current_video_mode())
+                        .and_then(|monitor| monitor.current_video_mode());
+                    runtime.api.performance_profile.refresh_rate = video_mode
+                        .as_ref()
                         .and_then(|mode| mode.refresh_rate_millihertz())
                         .map_or(0, |rate| (u32::from(rate) + 500) / 1000);
+                    if let Some(mode) = video_mode.as_ref() {
+                        runtime.api.desktop_display_size = (mode.size().width, mode.size().height);
+                    }
+                    // EnumDisplayMonitors (dword_566854) and the current
+                    // monitor for sub_46FE90 / sub_461B40.
+                    let monitor_rect = |monitor: &winit::monitor::MonitorHandle| {
+                        let origin = monitor.position()?;
+                        let size = monitor.current_video_mode()?.size();
+                        Some([origin.x, origin.y, origin.x + size.width as i32, origin.y + size.height as i32])
+                    };
+                    runtime.api.monitor_rects =
+                        window.available_monitors().filter_map(|monitor| monitor_rect(&monitor)).collect();
+                    runtime.api.current_monitor_rect =
+                        window.current_monitor().and_then(|monitor| monitor_rect(&monitor));
+                    if let Ok(position) = window.outer_position() {
+                        runtime.api.window_outer_position = (position.x, position.y);
+                    }
+                    let (outer, inner) = (window.outer_size(), window.surface_size());
+                    runtime.api.window_decoration_size = (
+                        outer.width.saturating_sub(inner.width) as i32,
+                        outer.height.saturating_sub(inner.height) as i32,
+                    );
                     let frame_report = runtime_frontend::drive_runtime_frame(
                         runtime,
                         pending_input_events,
                         input_script,
                         *frame_pacing,
-                        elapsed_ms,
+                        // sub_499290 returns the frozen time inside a pause
+                        // section that froze the clock.
+                        if runtime.api.engine_clock_frozen { 0 } else { elapsed_ms },
                         audio_elapsed_ms,
                         Some(audio),
                         "window",
@@ -622,8 +705,10 @@ impl ApplicationHandler for WindowApp {
                 match renderer.render() {
                     Ok(()) => {
                         if let Some(runtime) = runtime.as_mut() {
-                            runtime.api.presentation_state =
-                                runtime.api.engine_time_ms.min(i32::MAX as u64) as i32;
+                            runtime.api.presentation_state = runtime
+                .api
+                .clock_base_ms
+                .wrapping_add(runtime.api.engine_time_ms as u32) as i32;
                         }
                     }
                     Err(err) => {
@@ -673,7 +758,6 @@ impl WindowApp {
         let mut renderer =
             pollster::block_on(Renderer::new_with_font(window.clone(), self.font.clone()))?;
         if let Some(runtime) = self.runtime.as_mut() {
-            runtime.api.graphics_memory_metric = renderer.graphics_memory_metric();
             let size = window.surface_size();
             runtime.api.window_surface_width = size.width.min(i32::MAX as u32) as i32;
             runtime.api.window_surface_height = size.height.min(i32::MAX as u32) as i32;
@@ -795,6 +879,7 @@ pub(super) fn run_window(
         frame_index: 0,
         input_script: HeadlessInputScript::from_env(),
         trackpad_scroll: TrackpadScroll::default(),
+        alt_held: false,
         failure: failure.clone(),
         font,
     };

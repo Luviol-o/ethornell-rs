@@ -1107,9 +1107,9 @@ mod tests {
                         .is_empty()
                 );
             }
-            assert_eq!(api.native_system.bootstrap_root_or_archive, "");
-            api.select_bootstrap("../outside", "system.arc");
-            assert_eq!(api.native_system.bootstrap_root_or_archive, "");
+            assert_eq!(api.native_system.bootstrap_request, None);
+            api.select_bootstrap(Some("../outside"), "system.arc", "ipl._bp");
+            assert_eq!(api.native_system.bootstrap_request, None);
             assert!(super::super::host_dialog::set_wallpaper("/outside", 0, 0) == false);
         });
         assert!(p.read_user("UserData/slot.sud").is_err());

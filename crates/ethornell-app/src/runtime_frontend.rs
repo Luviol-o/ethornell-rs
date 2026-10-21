@@ -86,6 +86,9 @@ fn drive_frame(
     runtime.api.performance_profile.begin();
     let report = runtime.run_frame(pacing, elapsed_ms, audio_elapsed_ms);
     runtime.api.performance_profile.end(false);
+    if let Some(restarted) = runtime.take_restart() {
+        *runtime = restarted;
+    }
     report
 }
 

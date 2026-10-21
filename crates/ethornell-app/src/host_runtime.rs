@@ -198,6 +198,7 @@ impl HostRuntime {
                 Ok(runtime)
             })
         })?;
+        runtime.use_host_clock();
         runtime.api.host.enabled = true;
         runtime.api.host.input_trace = config.trace;
         runtime.api.native_dialog_presentation = false;
@@ -374,7 +375,6 @@ impl HostRuntime {
             self.runtime.api.screen_width.max(1) as f32,
             self.runtime.api.screen_height.max(1) as f32,
         );
-        self.runtime.api.graphics_memory_metric = renderer.graphics_memory_metric();
         self.runtime.api.window_surface_width = w.min(i32::MAX as u32) as i32;
         self.runtime.api.window_surface_height = h.min(i32::MAX as u32) as i32;
         let should_suspend =
@@ -615,8 +615,10 @@ impl HostRuntime {
         renderer.submit(&commands);
         self.runtime.api.performance_profile.end(true);
         renderer.render()?;
-        self.runtime.api.presentation_state =
-            self.runtime.api.engine_time_ms.min(i32::MAX as u64) as i32;
+        self.runtime.api.presentation_state = self.runtime
+                .api
+                .clock_base_ms
+                .wrapping_add(self.runtime.api.engine_time_ms as u32) as i32;
         self.sync_audio()
     }
     fn close(&mut self) {

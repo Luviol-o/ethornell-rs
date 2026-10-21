@@ -425,6 +425,8 @@ mod tests {
         let manager = ResourceManager::open_game(&root).unwrap();
         let mut api =
             super::super::RuntimeTraceApi::new_with_native_root(manager, native_root.clone());
+        // CreateFileA does not create directories (sub_42D940).
+        std::fs::create_dir_all(native_root.join("UserData")).unwrap();
         let absolute = native_root
             .join("UserData/slot.sud")
             .to_string_lossy()

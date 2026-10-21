@@ -15,6 +15,7 @@ use std::sync::{
 };
 
 mod async_program;
+pub mod cpu_record;
 mod debug;
 mod extended_opcodes;
 mod host_request;
@@ -454,7 +455,8 @@ pub trait SysApi {
         0
     }
 
-    /// Last successful native presentation timestamp/state (dword_565EC4).
+    /// Engine clock stored after the last successful Present (sub_460460,
+    /// dword_565ED8).
     fn presentation_state(&mut self) -> i32 {
         0
     }
@@ -464,7 +466,7 @@ pub trait SysApi {
         default_graphics_capability_record()
     }
 
-    /// Renderer-owned capacity field queried by Sys80:0x0B.
+    /// Object-manager cache budget queried by Sys80:0x0B (sub_46FB30).
     fn graphics_memory_metric(&mut self) -> i32 {
         0
     }
@@ -495,6 +497,34 @@ pub trait SysApi {
 
     fn load_file_bytes(&mut self, _archive: &str, _file: &str) -> Option<Vec<u8>> {
         None
+    }
+
+    /// Bytes of a file on disk only, no archive fallback; `path` is a
+    /// resolved BGI path (root + name, or absolute).
+    fn read_disk_file(&mut self, path: &str) -> Option<Vec<u8>> {
+        self.load_file_bytes("", path)
+    }
+
+    /// Whether `path` exists on disk as a non-directory.
+    fn disk_file_exists(&mut self, path: &str) -> bool {
+        self.file_exists("", path)
+    }
+
+    /// Undecoded bytes of `entry` in the archive file `archive` (relative to
+    /// the primary root); no other archive is searched.
+    fn read_archive_entry_raw(&mut self, archive: &str, entry: &str) -> Option<Vec<u8>> {
+        self.load_file_bytes(archive, entry)
+    }
+
+    /// Whether the archive file `archive` holds `entry`.
+    fn archive_entry_exists(&mut self, archive: &str, entry: &str) -> bool {
+        self.file_exists(archive, entry)
+    }
+
+    /// sub_465F80 once a media root exists: MessageBox(title, text,
+    /// OK|CANCEL); true retries, false means the player confirmed quitting.
+    fn media_prompt(&mut self, _title: &str, _text: &str) -> bool {
+        false
     }
 
     fn file_exists(&mut self, archive: &str, file: &str) -> bool {
@@ -558,17 +588,28 @@ pub trait SysApi {
         false
     }
 
-    /// Portable removable-media discovery used by Sys80:0x3F. On success the
-    /// returned directory becomes the target secondary resource root.
-    fn locate_removable_archive_root(
-        &mut self,
-        _archive_name: &str,
-        _prompt: &str,
-        _subdirectory: &str,
-        _retry: bool,
-    ) -> Option<String> {
-        None
+    /// Sys80:3F (sub_4652D0): the roots of the removable and CD-ROM drives
+    /// (GetDriveTypeA 2/5), each with its trailing separator, in drive order.
+    fn removable_drive_roots(&mut self) -> Vec<String> {
+        Vec::new()
     }
+
+    /// GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES: a file or a
+    /// directory.
+    fn path_exists(&mut self, _path: &str) -> bool {
+        false
+    }
+
+    /// MessageBox(caption, text, OK|CANCEL), and on Cancel the YES|NO quit
+    /// question (sub_466D00, sub_4652D0). True asks the caller to check
+    /// again; false means the player confirmed quitting (the caller returns
+    /// 0, nothing exits) or no dialog can be shown.
+    fn retry_or_quit_prompt(&mut self, _caption: &str, _text: &str) -> bool {
+        false
+    }
+
+    /// Sleep(ms) on the script thread.
+    fn sleep_ms(&mut self, _ms: u32) {}
 
     /// Final IO boundary: enforce the host's user-write root policy, commit via
     /// same-filesystem temporary file + flush/sync + atomic replacement, and
@@ -606,8 +647,22 @@ pub trait SysApi {
     /// Installs the target zero-terminated fullscreen-toggle descriptor list.
     fn configure_fullscreen_hotkeys(&mut self, _enabled: bool, _descriptors: &[i32]) {}
 
-    /// Status-5 bootstrap selection used by Sys80:0x6B.
-    fn select_bootstrap(&mut self, _root_or_archive_path: &str, _archive_namespace: &str) {}
+    /// GetWindowRect(hWndParent) left/top, saved into BGI.gdb by Sys80:81.
+    fn window_outer_position(&mut self) -> (i32, i32) {
+        (0, 0)
+    }
+
+    /// sub_46FE90 / sub_461B40: a stored window position stays when at
+    /// least 1/8 of the window would be on some monitor, else the window is
+    /// centred on its monitor ((0, 0) in full screen).
+    fn restore_window_position(&mut self, x: i32, y: i32) -> (i32, i32) {
+        (x, y)
+    }
+
+    /// Sys80:6B (sub_465650) with interpreter status 5: restart the engine
+    /// from `archive`:`file` with `root` as the primary root (`None`: the
+    /// startup default, sub_464F70).
+    fn select_bootstrap(&mut self, _root: Option<&str>, _archive: &str, _file: &str) {}
 
     /// Compares the host desktop aspect with the configured game/base aspect.
     fn display_aspect_mismatch(&mut self) -> bool {
@@ -641,6 +696,12 @@ pub trait SysApi {
     /// Sys80:0x0F mirrors the target WM_ACTIVATE/WM_NCACTIVATE latch.
     fn window_active(&mut self) -> bool {
         true
+    }
+
+    /// The host's monotonic clock in nanoseconds (Sys80:05), or `None` to
+    /// derive it from the engine clock (deterministic replays).
+    fn performance_counter_ns(&mut self) -> Option<u64> {
+        None
     }
 
     fn pointer_position(&mut self, _index: i32) -> Option<(i32, i32)> {
@@ -778,9 +839,10 @@ pub trait SysApi {
         0
     }
 
-    /// Poll a Win32-style message posted after a `CProcWaitWndMsg` waiter was
-    /// registered. The returned pair is `(lParam, wParam)`, matching the target
-    /// procedure's two BP pushes.
+    /// The newest message `message_id` delivered after `registered_after_serial`
+    /// as `(wParam, lParam)`. The WndProc (sub_499930 -> sub_49AAE0) signals
+    /// every waiter for that number and overwrites earlier payloads, so the
+    /// latest message wins and polling must not consume it for other waiters.
     fn poll_window_message(
         &mut self,
         _message_id: i32,
@@ -1928,7 +1990,7 @@ fn portable_physical_memory_mb() -> (u32, u32) {
     )
 }
 
-fn portable_local_system_time() -> [u16; 8] {
+pub(crate) fn portable_local_system_time() -> [u16; 8] {
     // An installed clock (the web build) carries its own zone offset.
     if let Some(time) = ethornell_core::clock::installed() {
         let seconds = time.since_epoch.as_secs() as i64 + i64::from(time.utc_offset_minutes) * 60;
@@ -2004,19 +2066,16 @@ fn portable_local_system_time() -> [u16; 8] {
             zone: *const c_char,
         }
         unsafe extern "C" {
-            fn time(timer: *mut i64) -> i64;
             fn localtime_r(timer: *const i64, result: *mut Tm) -> *mut Tm;
         }
-        let mut seconds = 0i64;
-        // SAFETY: pointers refer to initialized writable storage and localtime_r is reentrant.
-        if unsafe { time(&mut seconds) } != -1 {
+        // One sample for both the calendar fields and the milliseconds.
+        if let Ok(now) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+            let seconds = now.as_secs() as i64;
+            let milliseconds = now.subsec_millis() as u16;
             let mut local = std::mem::MaybeUninit::<Tm>::uninit();
+            // SAFETY: pointers refer to initialized writable storage and localtime_r is reentrant.
             if !unsafe { localtime_r(&seconds, local.as_mut_ptr()) }.is_null() {
                 let local = unsafe { local.assume_init() };
-                let milliseconds = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|duration| duration.subsec_millis() as u16)
-                    .unwrap_or(0);
                 return [
                     local.year.saturating_add(1900).clamp(0, u16::MAX as i32) as u16,
                     local.mon.saturating_add(1).clamp(0, u16::MAX as i32) as u16,
@@ -2034,54 +2093,7 @@ fn portable_local_system_time() -> [u16; 8] {
 }
 
 pub fn default_graphics_capability_record() -> [u32; 16] {
-    let mut record = [0u32; 16];
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    {
-        #[cfg(target_arch = "x86")]
-        use std::arch::x86::{__cpuid, __cpuid_count};
-        #[cfg(target_arch = "x86_64")]
-        use std::arch::x86_64::{__cpuid, __cpuid_count};
-        let vendor = __cpuid(0);
-        let mut vendor_bytes = Vec::with_capacity(12);
-        vendor_bytes.extend_from_slice(&vendor.ebx.to_le_bytes());
-        vendor_bytes.extend_from_slice(&vendor.edx.to_le_bytes());
-        vendor_bytes.extend_from_slice(&vendor.ecx.to_le_bytes());
-        let vendor_name = String::from_utf8_lossy(&vendor_bytes);
-        record[3] = match vendor_name.as_ref() {
-            "GenuineIntel" => 0,
-            "AuthenticAMD" => 1,
-            "CentaurHauls" => 2,
-            "GenuineTMx86" => 3,
-            _ => 4,
-        };
-        let signature = __cpuid(1);
-        let base_family = (signature.eax >> 8) & 0x0f;
-        let ext_family = (signature.eax >> 20) & 0xff;
-        let base_model = (signature.eax >> 4) & 0x0f;
-        let ext_model = (signature.eax >> 16) & 0x0f;
-        record[1] = signature.eax & 0x0f;
-        record[4] = if base_family == 0x0f {
-            base_family + ext_family
-        } else {
-            base_family
-        };
-        record[0] = if matches!(base_family, 0x06 | 0x0f) {
-            base_model | (ext_model << 4)
-        } else {
-            base_model
-        };
-        record[2] = if record[3] == 0 {
-            signature.ebx & 0xff
-        } else if __cpuid(0x8000_0000).eax >= 0x8000_0001 {
-            __cpuid_count(0x8000_0001, 0).ebx & 0xffff
-        } else {
-            0
-        };
-    }
-    record[9] = std::thread::available_parallelism()
-        .map(|count| count.get().min(u32::MAX as usize) as u32)
-        .unwrap_or(1);
-    record
+    cpu_record::processor_record()
 }
 
 fn target_cpu_brand_string() -> Option<String> {
@@ -2288,6 +2300,10 @@ pub struct Vm {
     /// Target primary/secondary process-global filesystem roots.
     primary_resource_root: Option<String>,
     secondary_resource_root: Option<String>,
+    /// dword_566028 / dword_566338: caption and text of the media prompt,
+    /// set by Sys80:3F.
+    media_prompt_title: String,
+    media_prompt_text: String,
     /// Independent validated directory stored by target sub_46B390.
     validated_file_root: Option<String>,
     /// Target process-global dword_507688 written by Sys80:0x50.
@@ -2504,6 +2520,12 @@ impl Vm {
         };
         vm.thread.set_thread_id(MAIN_THREAD_ID);
         vm
+    }
+
+    /// Start the sub_499290 clock at `base_ms` (the host uptime for
+    /// interactive runs).
+    pub fn set_clock_base_ms(&mut self, base_ms: u32) {
+        self.timing.set_base(base_ms);
     }
 
     pub fn advance_time_ms(&mut self, milliseconds: u64) {
@@ -3816,6 +3838,9 @@ impl Vm {
                     return Err(VmError::UnknownDispatch { group: code, id });
                 }
                 let opcode = NativeOpcode { group: code, id };
+                if (code, id) == (0x80, 0x3c) {
+                    self.resolve_sys80_3c_file(api)?;
+                }
                 if api.host_requests_enabled() {
                     if self.intercept_native_host_request(api, opcode)? {
                         self.pc = next_pc;
@@ -3841,92 +3866,32 @@ impl Vm {
                 } else if (code, id) == (0x80, 0x31) {
                     self.sys80_31_read_file_range(api)?
                 } else if (code, id) == (0x80, 0x32) {
-                    // Arguments are pushed as path, source, then byte count.
-                    let length = self.pop_int()? as u32 as usize;
-                    let source = self.pop_ptr()?;
-                    let path = self.pop_string_lossy()?;
-                    let range = self.resolve_range(source, length)?;
-                    Value::Int(i32::from(api.write_file_bytes(&path, &self.memory[range])))
+                    self.sys80_32_write_file(api)?
                 } else if (code, id) == (0x80, 0x34) {
-                    // Target 0x4888C0 pops file first and archive/root second,
-                    // then passes both to sub_4665C0 (ECX=file, stack=archive).
-                    let raw_file = self.pop_value()?;
-                    let raw_archive = self.pop_value()?;
-                    let file = self.value_as_native_string_lossy(raw_file.clone())?;
-                    let archive = self.value_as_native_string_lossy(raw_archive.clone())?;
-                    let found = self.resource_file_exists_with_search(api, &archive, &file);
-                    // sub_466550 rejects an entry name of 0x60 bytes or more
-                    // before it searches the archive (sub_464520 is fatal).
-                    if !found
-                        && !archive.is_empty()
-                        && encoding_rs::SHIFT_JIS.encode(&file).0.len() >= 0x60
-                    {
-                        return Err(VmError::Runtime(format!(
-                            "Sys80:34 resource name {file} is longer than 95 bytes"
-                        )));
-                    }
-                    tracing::debug!(
-                        archive,
-                        file,
-                        ?raw_archive,
-                        ?raw_file,
-                        found,
-                        "Sys80_34_FileExistsWithConfiguredRoots"
-                    );
-                    Value::Int(i32::from(found))
+                    self.sys80_34_file_exists(api)?
                 } else if (code, id) == (0x80, 0x35) {
-                    // Target 0x488900 pops file first and archive/root second,
-                    // then calls sub_4662E0 with ECX=archive and stack=file.
-                    let file = self.pop_string_lossy()?;
-                    let archive = self.pop_string_lossy()?;
-                    let size = self
-                        .resource_file_size_with_search(api, &archive, &file)
-                        .max(0);
-                    tracing::info!(archive, file, size, "Sys80_35_FileSizeWithConfiguredRoots");
-                    Value::Int(size)
+                    self.sys80_35_file_size(api)?
                 } else if (code, id) == (0x80, 0x3e) {
+                    // sub_489650: an existing directory becomes ::Buffer as
+                    // sprintf("%s\\"), which appends even after a separator.
                     let path = self.pop_string_lossy()?;
                     let valid = api.directory_exists(&path);
                     if valid {
-                        self.primary_resource_root = Some(ensure_trailing_separator(&path));
+                        self.primary_resource_root = Some(format!("{path}\\"));
                     }
                     Value::Int(i32::from(valid))
                 } else if (code, id) == (0x80, 0x3f) {
-                    let retry = self.pop_int()? != 0;
-                    let prompt = self.pop_string_lossy()?;
-                    let subdirectory = self.pop_string_lossy()?;
-                    let archive_name = self.pop_string_lossy()?;
-                    let root = api.locate_removable_archive_root(
-                        &archive_name,
-                        &prompt,
-                        &subdirectory,
-                        retry,
-                    );
-                    if let Some(root) = root {
-                        let configured_root = ensure_trailing_separator(&root);
-                        tracing::info!(
-                            archive_name,
-                            subdirectory,
-                            root = %configured_root,
-                            "Sys80_3F_ConfiguredSecondaryResourceRoot"
-                        );
-                        self.secondary_resource_root = Some(configured_root);
-                        Value::Int(1)
-                    } else {
-                        tracing::warn!(
-                            archive_name,
-                            subdirectory,
-                            "Sys80_3F_SecondaryResourceRootNotFound"
-                        );
-                        Value::Int(0)
-                    }
+                    self.sys80_3f_find_media(api)?
                 } else if (code, id) == (0x80, 0x45) {
                     // The target table points at __RTC_NumErrors, but the
                     // dispatch ABI exposes no result; this selector is a
                     // BP-visible no-op in the shipped release image.
                     Value::None
                 } else if (code, id) == (0x80, 0x50) {
+                    // sub_489B30 stores dword_507688 and returns interpreter
+                    // status 1: the thread's slice ends like Sys80:5F.
                     self.system_wait_state = self.pop_int()?;
+                    self.scheduler_signal = Some(SchedulerSignal::Yield);
                     tracing::debug!(
                         value = self.system_wait_state,
                         "Sys80_50_SetSystemWaitState"
@@ -5209,7 +5174,7 @@ impl Vm {
                                 let procedure = InstalledCProcedure::dsp_msg(
                                     self.thread.thread_id(),
                                     opcode,
-                                    self.timing.tick_count().max(0) as u32,
+                                    self.timing.tick_count() as u32,
                                     config,
                                 );
                                 self.install_cprocedure(procedure, trace_events);
@@ -6006,7 +5971,7 @@ impl Vm {
                 // or the procedure is no longer alive. Nothing is pushed.
                 let (terminal, _) = self.drain_procedure_callbacks();
                 let cancelled = !self.procedure_alive(terminal);
-                let now_tick = self.timing.tick_count().max(0) as u32;
+                let now_tick = self.timing.tick_count() as u32;
                 let deadline_reached = now_tick >= procedure.base.native.deadline_tick;
                 if !cancelled && !deadline_reached {
                     return Some(VmStopReason::WaitingForTime);
@@ -6030,7 +5995,7 @@ impl Vm {
                 let callback_completed = procedure.native.callback_completion != 0
                     || callbacks.iter().any(|callback| callback[0].as_i32() == 1);
                 let cancelled = !self.procedure_alive(terminal);
-                let now_tick = self.timing.tick_count().max(0) as u32;
+                let now_tick = self.timing.tick_count() as u32;
                 let deadline_reached = now_tick >= procedure.native.base.deadline_tick;
                 // The input query (sub_46DF00((scope << 16) | 0xFFFF) filtered
                 // by dword_507690 | 0x80000181) runs only when the deadline,
@@ -6079,21 +6044,22 @@ impl Vm {
                 None
             }
             CProcedure::WaitWndMsg(procedure) => {
-                // CProcWaitWndMsg::Tick (sub_43D5D0); no-op callback handler.
+                // CProcWaitWndMsg::Tick (sub_43D990); no-op callback handler.
+                // Signaled: push wParam, lParam. Wait state 0 or a {0,..}
+                // callback (sub_431D90): push -1, -1.
                 let (terminal, _) = self.drain_procedure_callbacks();
                 let cancelled = !self.procedure_alive(terminal);
                 let result = if cancelled {
-                    // Target's engine-disabled path pushes -1 then 0.
-                    Some((-1, 0))
+                    Some((-1, -1))
                 } else {
                     api.poll_window_message(procedure.message_id, procedure.registered_after_serial)
                 };
-                let Some((lparam, wparam)) = result else {
+                let Some((wparam, lparam)) = result else {
                     return Some(VmStopReason::WaitingForProcedure);
                 };
                 self.thread.clear_current_procedure();
-                self.push_value(Value::Int(lparam));
                 self.push_value(Value::Int(wparam));
+                self.push_value(Value::Int(lparam));
                 if trace_events || self.collect_diagnostics {
                     tracing::debug!(
                         message_id = format_args!("0x{:04X}", procedure.message_id),
@@ -6106,7 +6072,7 @@ impl Vm {
                 None
             }
             CProcedure::DspMsg(mut procedure) => {
-                let now_tick = self.timing.tick_count().max(0) as u32;
+                let now_tick = self.timing.tick_count() as u32;
                 let (terminal, callbacks) = self.drain_procedure_callbacks();
                 let cancel = !self.procedure_alive(terminal);
                 for callback in callbacks {
@@ -7967,6 +7933,13 @@ impl Vm {
     fn encode_native_string<'a>(&self,text:&'a str)->std::borrow::Cow<'a,[u8]> {
         if self.native_abi_profile==NativeAbiProfile::Amachoco {std::borrow::Cow::Borrowed(text.as_bytes())} else {encoding_rs::SHIFT_JIS.encode(text).0}
     }
+    fn decode_native_string_lossy(&self, bytes: &[u8]) -> String {
+        if self.native_abi_profile == NativeAbiProfile::Amachoco {
+            String::from_utf8_lossy(bytes).into_owned()
+        } else {
+            encoding_rs::SHIFT_JIS.decode(bytes).0.into_owned()
+        }
+    }
 
     /// Write one target Shift-JIS C string without splitting a multibyte
     /// character. The caller supplies the maximum payload length excluding
@@ -8051,90 +8024,6 @@ impl Vm {
         )))
     }
 
-    fn resource_file_exists_with_search<A>(&self, api: &mut A, archive: &str, file: &str) -> bool
-    where
-        A: SysApi,
-    {
-        let mut archives = vec![archive.to_string()];
-        if let Some(components) = self.composite_archives.get(archive) {
-            archives.extend(components.iter().cloned());
-        }
-        if archives
-            .iter()
-            .any(|candidate_archive| api.file_exists(candidate_archive, file))
-        {
-            return true;
-        }
-        for root in [
-            self.primary_resource_root.as_deref(),
-            self.secondary_resource_root.as_deref(),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            if api.file_exists("", &join_native_path(root, file)) {
-                return true;
-            }
-        }
-        // sub_466440: with dword_506BE0 set, each additional directory is
-        // probed as a loose file `root + dir + "\\" + file`.
-        if self.additional_resource_search_enabled {
-            let roots = [
-                self.primary_resource_root.clone().unwrap_or_default(),
-                self.secondary_resource_root.clone().unwrap_or_default(),
-            ];
-            for root in &roots {
-                for path in &self.additional_resource_paths {
-                    let candidate = join_native_path(&join_native_path(root, path), file);
-                    if api.file_exists("", &candidate) {
-                        return true;
-                    }
-                }
-            }
-        }
-        false
-    }
-
-    fn resource_file_size_with_search<A>(&self, api: &mut A, archive: &str, file: &str) -> i32
-    where
-        A: SysApi,
-    {
-        let mut archives = vec![archive.to_string()];
-        if let Some(components) = self.composite_archives.get(archive) {
-            archives.extend(components.iter().cloned());
-        }
-        for candidate_archive in &archives {
-            let size = api.file_size(candidate_archive, file);
-            if size >= 0 {
-                return size;
-            }
-        }
-        for root in [
-            self.primary_resource_root.as_deref(),
-            self.secondary_resource_root.as_deref(),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            let size = api.file_size("", &join_native_path(root, file));
-            if size >= 0 {
-                return size;
-            }
-        }
-        if self.additional_resource_search_enabled {
-            for path in &self.additional_resource_paths {
-                let candidate = join_native_path(path, file);
-                for candidate_archive in &archives {
-                    let size = api.file_size(candidate_archive, &candidate);
-                    if size >= 0 {
-                        return size;
-                    }
-                }
-            }
-        }
-        -1
-    }
-
     fn load_resource_bytes_with_search<A>(
         &mut self,
         api: &mut A,
@@ -8205,6 +8094,9 @@ impl Vm {
         let pattern = self.pop_string_lossy()?;
         let capacity = self.pop_int()? as u32 as usize;
         let destination = self.pop_ptr()?;
+        // sub_467110 builds each subdirectory pattern from strrchr(pattern,
+        // '\\'); without a backslash it formats "(null)" and finds nothing.
+        let recursive = recursive && pattern.contains('\\');
         let found = api.enumerate_user_files(&pattern, recursive, 0);
         let names = target_file_enumeration_order(&found, recursive, max_count);
         self.write_enumerated_names(destination, capacity, &names)
@@ -8225,7 +8117,7 @@ impl Vm {
             .into_iter()
             .filter(|name| name != "." && name != "..")
             .collect::<Vec<_>>();
-        names.sort_by_key(|name| name.to_ascii_lowercase());
+        names.sort_by_key(|name| ntfs_order_key(name));
         // FindNextFileA stops once the count reaches the limit; the check
         // follows each accepted entry.
         if max_count != 0 {
@@ -8260,53 +8152,6 @@ impl Vm {
         }
         let result = if destination == 0 { written } else { names.len() };
         Ok(Value::Int(result.min(i32::MAX as usize) as i32))
-    }
-
-    fn sys80_31_read_file_range<A>(&mut self, api: &mut A) -> VmResult<Value>
-    where
-        A: SysApi,
-    {
-        // Target pop order: length, offset, file, optional secondary root,
-        // destination. The packed u64 passed to sub_465C30 stores offset in
-        // the low dword and requested length in the high dword.
-        let requested_length = self.pop_int()? as u32 as usize;
-        let offset = self.pop_int()? as u32 as usize;
-        let file = self.pop_string_lossy()?;
-        let secondary_root = self.pop_string_lossy()?;
-        let destination = self.pop_ptr()?;
-
-        let bytes = self
-            .load_resource_bytes_with_search(api, "", &file)
-            .map(|(bytes, _)| bytes)
-            .or_else(|| {
-                (!secondary_root.is_empty())
-                    .then(|| api.load_file_bytes(&secondary_root, &file))
-                    .flatten()
-            });
-        let Some(bytes) = bytes else {
-            return Ok(Value::Int(1));
-        };
-        if bytes.len() > 0x0400_0000 {
-            return Ok(Value::Int(6));
-        }
-        let length = if offset == 0 && requested_length == 0 {
-            bytes.len()
-        } else {
-            requested_length
-        };
-        if length == 0 || length > bytes.len() {
-            return Ok(Value::Int(3));
-        }
-        let Some(end) = offset.checked_add(length) else {
-            return Ok(Value::Int(2));
-        };
-        if end > bytes.len() {
-            return Ok(Value::Int(2));
-        }
-        let range = self.resolve_write_range(destination, length)?;
-        self.memory[range].copy_from_slice(&bytes[offset..end]);
-        self.clear_shadow_values(destination, length);
-        Ok(Value::Int(0))
     }
 
     fn write_loaded_file<A>(
@@ -8420,7 +8265,7 @@ impl Vm {
         // sub_488DE0: a thread sub_444B90 cannot find is a script error.
         if !self.post_async_program_message(thread_or_program.clone(), message, trace_events) {
             return Err(VmError::Runtime(format!(
-                "PostMessage: thread {} does not exist",
+                "無効なスレッドハンドルが指定されました ({})",
                 value_summary(&thread_or_program)
             )));
         }
@@ -8460,13 +8305,13 @@ impl Vm {
         let thread_or_program = self.pop_value()?;
         if !self.async_program_is_active_value(&thread_or_program) {
             return Err(VmError::Runtime(format!(
-                "PostMessages: thread {} does not exist",
+                "無効なスレッドハンドルが指定されました ({})",
                 value_summary(&thread_or_program)
             )));
         }
         if message_count < 1 {
             return Err(VmError::Runtime(format!(
-                "PostMessages: message count {message_count} is below 1"
+                "無効なスレッドメッセージ数 [ {message_count} ] が指定されました"
             )));
         }
         let message_count = message_count as usize;
@@ -8485,16 +8330,19 @@ impl Vm {
         Ok(Value::None)
     }
 
-    /// System80:0x4B — bounded dequeue into a caller-provided array.
-    ///
-    /// Target evidence: System80 slot 0x0050442C and repeated target calls to
-    /// `BPThread_DequeueDword`. Returns the actual number of dequeued values.
-    ///
-    /// BP push order: `[max_count, output_ptr]`; native pop order:
-    /// `output_ptr`, then `max_count`.
+    /// System80:0x4B (sub_489A10): pops the output array, then the count;
+    /// a count below 1 is fatal, there is no upper bound. Dequeues
+    /// (sub_4456D0) until the count or the queue runs out and pushes how
+    /// many were written.
     fn sys80_4b_dequeue_message_array(&mut self) -> VmResult<Value> {
         let output_ptr = self.pop_ptr()?;
-        let max_count = self.pop_int()?.max(0).min(256) as usize;
+        let max_count = self.pop_int()?;
+        if max_count < 1 {
+            return Err(VmError::Runtime(format!(
+                "無効なスレッドメッセージ数 [ {max_count} ] が指定されました"
+            )));
+        }
+        let max_count = max_count as usize;
         let mut received = 0usize;
         while received < max_count {
             let Some(value) = self.thread.pop_message() else {
@@ -8730,10 +8578,12 @@ impl Vm {
     fn sys80_88_create_or_resize_read_flag_table(&mut self) -> VmResult<Value> {
         let bit_count = self.pop_int()?;
         let name = self.pop_string_lossy()?;
+        // sub_446FD0 fails only for a zero byte count ((bits + 7) >> 3,
+        // unsigned); an empty name is a valid table name.
         let Ok(bit_count) = usize::try_from(bit_count) else {
             return Ok(Value::Int(0));
         };
-        if bit_count == 0 || name.is_empty() {
+        if bit_count == 0 {
             return Ok(Value::Int(0));
         }
         let success = if let Some(flags) = self.read_flags.get_mut(&name) {
@@ -8779,21 +8629,17 @@ impl Vm {
         let enabled = self.pop_int()? != 0;
         let start_bit = self.pop_int()?;
         let name = self.pop_string_lossy()?;
-        let status = match (
-            self.read_flags.get_mut(&name),
-            u32::try_from(start_bit),
-            u32::try_from(bit_count),
-        ) {
-            (None, _, _) => 1,
-            (Some(_), Err(_), _) => 2,
-            (Some(_), _, Err(_) | Ok(0)) => 3,
-            (Some(_), _, Ok(bit_count)) if bit_count > 65_536 => 3,
-            (Some(flags), Ok(start_bit), Ok(bit_count)) => {
-                if flags.set_range(start_bit, bit_count, enabled) {
-                    0
-                } else {
-                    3
-                }
+        // sub_447190, all unsigned: unknown table 1; start >= length 2;
+        // count - 1 > 0xFFFF or start + count > length 3.
+        let (start_bit, bit_count) = (start_bit as u32, bit_count as u32);
+        let status = match self.read_flags.get_mut(&name) {
+            None => 1,
+            Some(flags) if start_bit >= flags.bit_len => 2,
+            Some(_) if bit_count.wrapping_sub(1) > 0xFFFF => 3,
+            Some(flags) if start_bit + bit_count > flags.bit_len => 3,
+            Some(flags) => {
+                flags.set_range(start_bit, bit_count, enabled);
+                0
             }
         };
         Ok(Value::Int(status))
@@ -8814,31 +8660,23 @@ impl Vm {
     /// The name is therefore whichever argument names a read-flag table;
     /// when neither does, the order above applies.
     fn sys80_8b_query_read_flag_bit(&mut self) -> VmResult<Value> {
-        let bit_offset = self.pop_int()?;
-        let second = self.pop_value()?;
-        let first = self.pop_value()?;
-        let first_name = self.value_as_native_string_lossy(first.clone());
-        let swapped = !first_name
-            .as_ref()
-            .is_ok_and(|name| self.read_flags.contains_key(name))
-            && self
-                .value_as_native_string_lossy(second.clone())
-                .is_ok_and(|name| self.read_flags.contains_key(&name));
-        let (name, output) = if swapped {
-            (self.value_as_native_string_lossy(second)?, first)
-        } else {
-            (first_name?, second)
-        };
+        // sub_48A670 pops the bit index, the table name, then the output
+        // DWORD; sub_447230 writes the output only on success (status 0;
+        // unknown table 1, index >= length 2, unsigned).
+        let bit_offset = self.pop_int()? as u32;
+        let name = self.pop_string_lossy()?;
+        let output = self.pop_value()?;
         let output_ptr = Self::translate_system_descriptor(output.as_i32() as u32);
-        let (status, enabled) = match (self.read_flags.get(&name), u32::try_from(bit_offset)) {
-            (None, _) => (1, false),
-            (Some(_), Err(_)) => (2, false),
-            (Some(flags), Ok(bit_offset)) => match flags.contains(bit_offset) {
-                Some(enabled) => (0, enabled),
-                None => (2, false),
+        let (status, enabled) = match self.read_flags.get(&name) {
+            None => (1, None),
+            Some(flags) => match flags.contains(bit_offset) {
+                Some(enabled) => (0, Some(enabled)),
+                None => (2, None),
             },
         };
-        self.write_int(output_ptr, 2, u32::from(enabled))?;
+        if let Some(enabled) = enabled {
+            self.write_int(output_ptr, 2, u32::from(enabled))?;
+        }
         Ok(Value::Int(status))
     }
 
@@ -10082,6 +9920,30 @@ impl Vm {
                 Value::None
             }
             (0x80, 0x0b) => Value::Int(api.graphics_memory_metric()),
+            (0x80, 0x2b) => {
+                // sub_489130 pops the path, then the extension, file name,
+                // directory and drive outputs (script order drive, dir,
+                // name, ext, path). sub_42D7F0 splits the path as wide text
+                // (_wsplitpath) and writes each non-null output; a null
+                // path writes nothing and returns 0.
+                let path = self.pop_value()?;
+                let ext = self.pop_ptr()?;
+                let name = self.pop_ptr()?;
+                let dir = self.pop_ptr()?;
+                let drive = self.pop_ptr()?;
+                if matches!(path, Value::Int(0) | Value::Ptr(0) | Value::None) {
+                    Value::Int(0)
+                } else {
+                    let text = self.value_as_string_lossy(path)?;
+                    let parts = msvc_wsplitpath(&text);
+                    for (destination, part) in [(drive, &parts[0]), (dir, &parts[1]), (name, &parts[2]), (ext, &parts[3])] {
+                        if destination != 0 {
+                            self.write_c_string(destination, part)?;
+                        }
+                    }
+                    Value::Int(1)
+                }
+            }
             (0x80, 0x0c) => {
                 let destination = self.pop_ptr()?;
                 let fields = portable_local_system_time();
@@ -10251,7 +10113,7 @@ impl Vm {
                         }
                         if !terminated {
                             return Err(VmError::Runtime(
-                                "Sys80:62 fullscreen hotkey descriptor list exceeds 15 entries"
+                                "ディスプレイスタイルチェンジの対象として指定されたキーの配列が長過ぎます"
                                     .into(),
                             ));
                         }
@@ -10469,8 +10331,12 @@ impl Vm {
             }
             (0x80, 0x04) => Value::Int(self.timing.tick_count()),
             (0x80, 0x05) => {
+                // sub_4888D0 -> sub_499430: QueryPerformanceCounter as
+                // nanoseconds; it does not stop inside clock pause sections.
                 let ptr = self.pop_ptr()?;
-                let counter = self.timing.performance_counter();
+                let counter = api
+                    .performance_counter_ns()
+                    .unwrap_or_else(|| self.timing.performance_counter() as u64);
                 self.write_int(ptr, 2, counter as u32)?;
                 self.write_int(ptr.wrapping_add(4), 2, (counter >> 32) as u32)?;
                 Value::Int(1)
@@ -10483,19 +10349,7 @@ impl Vm {
                 let ptr = self.pop_ptr()?;
                 Value::Int(i32::from(self.free_heap(ptr)))
             }
-            (0x80, 0x33) => {
-                // sub_489340 pops the file, then a nullable directory. Without
-                // one the file is taken below the primary root.
-                let file = self.pop_string_lossy()?;
-                let directory = match self.pop_value()? {
-                    Value::Int(0) | Value::Ptr(0) | Value::None => None,
-                    value => Some(self.value_as_native_string_lossy(value)?),
-                };
-                let root = directory
-                    .or_else(|| self.primary_resource_root.clone())
-                    .unwrap_or_default();
-                Value::Int(i32::from(api.delete_file(&root, &file)))
-            }
+            (0x80, 0x33) => self.sys80_33_delete_file(api)?,
             (0x80, 0x25) => self.sys80_25_enumerate_files(api)?,
             (0x80, 0x26) => self.sys80_26_enumerate_directories(api)?,
             (0x80, 0x6d) => {
@@ -10527,17 +10381,24 @@ impl Vm {
             (0x80, 0x38) => {
                 // sub_489480 pops the NUL-terminated archive-name pointer list,
                 // then the composite name; sub_406BC0 refuses a name already
-                // in the archive chain and sub_445C50 an empty list.
+                // in the archive chain, sub_445C50 an empty list and
+                // sub_445C00 a null name. Names compare after the DBCS-aware
+                // ASCII lowering of sub_42EE60; the chain's plain archives are
+                // keyed by full path, which a composite name never matches.
                 let list = self.pop_ptr()?;
-                let name = self.pop_string_lossy()?;
+                let name = match self.pop_value()? {
+                    Value::Int(0) | Value::Ptr(0) | Value::None => None,
+                    value => Some(self.value_as_string_lossy(value)?),
+                };
                 let members = self.read_zero_terminated_string_pointer_list(list, 0x10000)?;
-                let key = name.to_ascii_lowercase();
-                let registered = !members.is_empty()
-                    && !self
-                        .composite_archives
-                        .keys()
-                        .any(|existing| existing.eq_ignore_ascii_case(&key));
-                if registered {
+                let registered = name.as_ref().is_some_and(|name| {
+                    !members.is_empty()
+                        && !self
+                            .composite_archives
+                            .keys()
+                            .any(|existing| existing.eq_ignore_ascii_case(name))
+                });
+                if let Some(name) = name.filter(|_| registered) {
                     api.register_composite_archive(&name, &members);
                     self.composite_archives.insert(name, members);
                 }
@@ -10554,22 +10415,33 @@ impl Vm {
                 Value::Int(i32::from(valid))
             }
             (0x80, 0x3a) => {
+                // sub_467AD0: 0 GetWindowsDirectoryA and 4 SHGetFolderPathA
+                // (CSIDL_PROGRAM_FILES) report 1 even when they fail and leave
+                // the buffer alone; 1..3 (CSIDL 16/2/5) and 5 (the registry's
+                // ProgramFilesDir) report whether a path was written; other
+                // modes report 0.
                 let mode = self.pop_int()?;
                 let destination = self.pop_ptr()?;
-                if let Some(path) = api.special_folder_path(mode) {
-                    self.write_c_string(destination, &path)?;
-                    Value::Int(1)
-                } else {
-                    Value::Int(0)
+                let path = api.special_folder_path(mode);
+                if let Some(path) = &path {
+                    self.write_c_string(destination, path)?;
                 }
+                Value::Int(i32::from(path.is_some() || matches!(mode, 0 | 4)))
             }
             (0x80, 0x3b) => {
+                // sub_489570 -> sub_467070 -> sub_466E80: one filter
+                // "description(*.ext)"; the 780-byte path buffer is cleared
+                // before the mode check (0 open, 1 save, otherwise 4); the
+                // result is GetOpen/SaveFileNameA - 1.
                 let mode = self.pop_int()?;
+                let initial_directory = self.pop_string_lossy()?;
                 let title = self.pop_string_lossy()?;
-                let destination = self.pop_ptr()?;
                 let extension = self.pop_string_lossy()?;
                 let description = self.pop_string_lossy()?;
-                let initial_directory = self.pop_string_lossy()?;
+                let destination = self.pop_ptr()?;
+                let range = self.resolve_write_range(destination, 0x30c)?;
+                self.memory[range].fill(0);
+                self.clear_shadow_values(destination, 0x30c);
                 match api.open_file_dialog(
                     &initial_directory,
                     &description,
@@ -10586,18 +10458,17 @@ impl Vm {
                 }
             }
             (0x80, 0x3d) => {
+                // sub_464F00: kind 0 copies ::Buffer, kind 1 the media root
+                // only when one was found; anything else returns 0.
                 let kind = self.pop_int()?;
                 let ptr = self.pop_ptr()?;
                 let root = match kind {
-                    0 => self
-                        .primary_resource_root
-                        .clone()
-                        .or_else(|| api.primary_resource_root()),
-                    1 => self.secondary_resource_root.clone(),
+                    0 => Some(self.resource_primary_root(api)),
+                    1 => Some(self.resource_media_root()).filter(|root| !root.is_empty()),
                     _ => None,
                 };
                 if let Some(root) = root {
-                    self.write_c_string(ptr, &ensure_trailing_separator(&root))?;
+                    self.write_c_string(ptr, &root)?;
                     Value::Int(1)
                 } else {
                     Value::Int(0)
@@ -10789,8 +10660,15 @@ impl Vm {
                 Value::None
             }
             (0x80, 0x70) => {
+                // sub_48A090 -> sub_46C0F0: an index above 12 is fatal; the
+                // handler only ever pushes 1.
                 let shift = self.pop_int()?;
-                Value::Int(i32::from(self.allocate_global_config(shift)))
+                if !self.allocate_global_config(shift) {
+                    return Err(VmError::Runtime(format!(
+                        "無効なサイズ番号 [ {shift} ] が指定されました"
+                    )));
+                }
+                Value::Int(1)
             }
             (0x80, 0x71) => {
                 self.global_config.fill(0);
@@ -10806,11 +10684,10 @@ impl Vm {
             }
             (0x80, 0x78) => {
                 // sub_489650 pops the label pointer first and the slot second.
+                // sub_48A140 ignores whether sub_4664F0 wrote the file.
                 let label = self.pop_string_lossy()?;
                 let slot = self.pop_int()?;
-                if !self.save_config_slot(api, slot, &label)? {
-                    return Err(VmError::Runtime("configuration save commit failed".into()));
-                }
+                self.save_config_slot(api, slot, &label)?;
                 Value::None
             }
             (0x80, 0x79) => {
@@ -11245,7 +11122,7 @@ impl Vm {
         let positions_from_top: &[usize] = match (group, id) {
             // Host continuations intercept before the VM-owned dialog paths
             // that would otherwise pop/decode these arguments themselves.
-            (0x80, 0x3b) => &[1, 3, 4, 5],
+            (0x80, 0x3b) => &[1, 2, 3, 4],
             (0x80, 0x3c) => &[0, 1, 2],
             (0x80, 0x3f) => &[1, 2, 3],
             (0x80, 0xf0) => &[0, 7],
@@ -12217,13 +12094,52 @@ fn is_plausible_text_payload(text: &str) -> bool {
 /// first, then each subdirectory in turn with its relative prefix. The limit
 /// is checked after each file; a subdirectory gets the remainder, and a
 /// remainder of zero means unlimited there, as in the target.
+/// MSVC _wsplitpath: drive ("X:"), directory up to the last '\\' or '/',
+/// file name, and extension from the last '.' of the remainder.
+fn msvc_wsplitpath(path: &str) -> [String; 4] {
+    let chars = path.chars().collect::<Vec<_>>();
+    let (drive, rest) = if chars.len() >= 2 && chars[1] == ':' {
+        (chars[..2].iter().collect::<String>(), &chars[2..])
+    } else {
+        (String::new(), &chars[..])
+    };
+    let split = rest.iter().rposition(|&c| c == '\\' || c == '/').map_or(0, |index| index + 1);
+    let directory = rest[..split].iter().collect::<String>();
+    let leaf = &rest[split..];
+    let dot = leaf.iter().rposition(|&c| c == '.').unwrap_or(leaf.len());
+    [
+        drive,
+        directory,
+        leaf[..dot].iter().collect(),
+        leaf[dot..].iter().collect(),
+    ]
+}
+
+/// NTFS directory order (what FindFirstFileA/FindNextFileA return): UTF-16
+/// code units compared after the volume's simple uppercase mapping.
+fn ntfs_order_key(name: &str) -> Vec<u16> {
+    name.encode_utf16()
+        .map(|unit| {
+            char::from_u32(u32::from(unit))
+                .and_then(|c| {
+                    let mut upper = c.to_uppercase();
+                    match (upper.next(), upper.next()) {
+                        (Some(u), None) if (u as u32) <= 0xFFFF => Some(u as u32 as u16),
+                        _ => None,
+                    }
+                })
+                .unwrap_or(unit)
+        })
+        .collect()
+}
+
 fn target_file_enumeration_order(found: &[String], recursive: bool, max_count: usize) -> Vec<String> {
     fn walk(paths: &[Vec<String>], depth: usize, recursive: bool, max: usize, out: &mut Vec<String>) {
         let mut files = paths
             .iter()
             .filter(|path| path.len() == depth + 1)
             .collect::<Vec<_>>();
-        files.sort_by_key(|path| path[depth].to_ascii_lowercase());
+        files.sort_by_key(|path| ntfs_order_key(&path[depth]));
         let mut count = 0usize;
         for path in files {
             out.push(path.join("\\"));
@@ -12240,8 +12156,8 @@ fn target_file_enumeration_order(found: &[String], recursive: bool, max_count: u
             .filter(|path| path.len() > depth + 1)
             .map(|path| path[depth].clone())
             .collect::<Vec<_>>();
-        directories.sort_by_key(|name| name.to_ascii_lowercase());
-        directories.dedup_by_key(|name| name.to_ascii_lowercase());
+        directories.sort_by_key(|name| ntfs_order_key(name));
+        directories.dedup_by_key(|name| ntfs_order_key(name));
         for directory in directories {
             let nested = paths
                 .iter()
@@ -13345,7 +13261,7 @@ mod tests {
         window_messages: std::collections::VecDeque<(i32, i32, i32, i32)>,
         system92_text_output_pair: [i32; 2],
         system92_text_fragment_records: Vec<System92TextFragmentRecord>,
-        performance_profiling_enabled: Option<bool>,
+        performance_profiling_enabled: Option<i32>,
         performance_metric: i32,
         presentation_state: i32,
         graphics_capability_record: [u32; 16],
@@ -13355,6 +13271,7 @@ mod tests {
         fullscreen_hotkeys: Vec<i32>,
         special_folder: Option<String>,
         file_dialog_result: Option<Result<Option<String>, i32>>,
+        file_dialog_args: Option<String>,
         resource_dialog_result: Option<Result<Option<String>, i32>>,
         resource_dialog_filters: Vec<(String, String)>,
         browse_folder_result: Option<String>,
@@ -13375,7 +13292,7 @@ mod tests {
             Ok(Value::None)
         }
 
-        fn set_performance_profiling(&mut self, enabled: bool) {
+        fn set_performance_profiling(&mut self, enabled: i32) {
             self.performance_profiling_enabled = Some(enabled);
         }
 
@@ -13413,12 +13330,18 @@ mod tests {
 
         fn open_file_dialog(
             &mut self,
-            _initial_dir: &str,
-            _description: &str,
-            _extension: &str,
-            _title: &str,
-            _mode: i32,
+            initial_dir: &str,
+            description: &str,
+            extension: &str,
+            title: &str,
+            mode: i32,
         ) -> Result<Option<String>, i32> {
+            self.file_dialog_args = Some(
+                [initial_dir, description, extension, title]
+                    .map(str::to_string)
+                    .join("|")
+                    + &format!("|{mode}"),
+            );
             self.file_dialog_result.take().unwrap_or(Ok(None))
         }
 
@@ -13511,14 +13434,11 @@ mod tests {
             message_id: i32,
             registered_after_serial: i32,
         ) -> Option<(i32, i32)> {
-            let index = self
-                .window_messages
+            self.window_messages
                 .iter()
-                .position(|&(serial, id, _, _)| {
-                    serial > registered_after_serial && id == message_id
-                })?;
-            let (_, _, lparam, wparam) = self.window_messages.remove(index)?;
-            Some((lparam, wparam))
+                .rev()
+                .find(|&&(serial, id, _, _)| serial > registered_after_serial && id == message_id)
+                .map(|&(_, _, wparam, lparam)| (wparam, lparam))
         }
     }
 
@@ -13937,7 +13857,7 @@ mod tests {
             api.deleted,
             [
                 (String::new(), "a.sav".into()),
-                ("C:\\save".into(), "b.sav".into())
+                (String::new(), "C:\\save\\b.sav".into())
             ]
         );
         vm.stack.clear();
@@ -14194,7 +14114,7 @@ mod tests {
             super::native_thread::InstalledCProcedure::dsp_msg(
                 vm.thread.thread_id(),
                 opcode,
-                vm.timing.tick_count().max(0) as u32,
+                vm.timing.tick_count() as u32,
                 super::NativeMessageProcedureConfig {
                     class: super::NativeMessageProcedureClass::DspMsg,
                     initial_delay_enabled: false,
@@ -14660,11 +14580,11 @@ mod tests {
         assert_eq!(vm.read_c_string(folder_out).unwrap(), "/portable/Desktop");
 
         vm.stack.extend([
-            Value::Str("/portable".into()),
+            Value::Ptr(file_out),
             Value::Str("Save data".into()),
             Value::Str("dat".into()),
-            Value::Ptr(file_out),
             Value::Str("Choose file".into()),
+            Value::Str("/portable".into()),
             Value::Int(1),
         ]);
         vm.dispatch(
@@ -14674,6 +14594,10 @@ mod tests {
         .unwrap();
         assert_eq!(vm.stack.pop(), Some(Value::Int(0)));
         assert_eq!(vm.read_c_string(file_out).unwrap(), "/portable/save.dat");
+        assert_eq!(
+            api.file_dialog_args.as_deref(),
+            Some("/portable|Save data|dat|Choose file|1")
+        );
     }
 
     #[test]
@@ -14768,13 +14692,13 @@ mod tests {
             ..SchedulingApi::default()
         };
 
-        vm.stack.push(Value::Int(1));
+        vm.stack.push(Value::Int(7));
         vm.dispatch(
             &test_instruction(0x10, 0x80, "sys1", vec![0x80, 0x06], Vec::new()),
             &mut api,
         )
         .unwrap();
-        assert_eq!(api.performance_profiling_enabled, Some(true));
+        assert_eq!(api.performance_profiling_enabled, Some(7));
 
         vm.write_value(destination, 2, &Value::Ptr(0x1200_4321))
             .unwrap();
@@ -17302,9 +17226,13 @@ mod tests {
             Some(VmStopReason::WaitingForProcedure)
         );
 
+        // (serial, id, wParam, lParam): the newest one wins and stays for
+        // other waiters.
         api.window_messages.push_back((12, 0x0201, 0x1234, 1));
+        api.window_messages.push_back((13, 0x0201, 0x5678, 2));
         assert_eq!(vm.poll_current_procedure(&mut api, false), None);
-        assert_eq!(vm.stack, [Value::Int(0x1234), Value::Int(1)]);
+        assert_eq!(vm.stack, [Value::Int(0x5678), Value::Int(2)]);
+        assert_eq!(api.window_messages.len(), 4);
         assert!(vm.thread.current_procedure().is_none());
     }
 
@@ -17576,7 +17504,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("fullscreen hotkey descriptor list exceeds 15 entries")
+                .contains("キーの配列が長過ぎます")
         );
         assert!(!api.fullscreen_hotkeys_enabled);
         assert!(api.fullscreen_hotkeys.is_empty());
@@ -18270,21 +18198,18 @@ mod tests {
         vm.dispatch(&size_instruction, &mut missing_api).unwrap();
         assert_eq!(vm.stack.pop(), Some(Value::Int(0)));
 
-        let mut null_archive_api = ArchiveBytesApi {
-            expected_archive: String::new(),
-            expected_file: "marker.dat".into(),
+        // A null archive looks for the loose file below the primary root.
+        let root = ensure_trailing_separator("/game");
+        let mut null_archive_api = RootFileBytesApi {
+            expected_file: format!("{root}marker.dat"),
             bytes: b"marker".to_vec(),
-            calls: Vec::new(),
+            primary_root: Some("/game".into()),
         };
         vm.stack
             .extend([Value::Int(0), Value::Str("marker.dat".into())]);
         vm.dispatch(&exists_instruction, &mut null_archive_api)
             .unwrap();
         assert_eq!(vm.stack.pop(), Some(Value::Int(1)));
-        assert_eq!(
-            null_archive_api.calls.first(),
-            Some(&(String::new(), "marker.dat".to_string()))
-        );
     }
 
     #[test]
@@ -18324,7 +18249,7 @@ mod tests {
     }
 
     #[test]
-    fn sys80_30_clears_target_header_when_resource_is_missing() {
+    fn sys80_30_clears_target_header_then_fails_when_resource_is_missing() {
         let instruction =
             test_instruction(0, 0x80, "sys1", vec![0x80, 0x30], vec![BpOperand::U8(0x30)]);
         let destination = 0x1900;
@@ -18342,9 +18267,10 @@ mod tests {
             calls: Vec::new(),
         };
 
-        vm.dispatch(&instruction, &mut api).unwrap();
-
-        assert_eq!(vm.stack, [Value::Int(0)]);
+        // sub_466010 -> sub_465F80: without a media root a missing file is
+        // a script error.
+        let error = vm.dispatch(&instruction, &mut api).unwrap_err();
+        assert!(error.to_string().contains("[ missing.arc : missing.bin ]"));
         assert_eq!(
             &vm.memory[destination as usize..destination as usize + 16],
             &[0; 16]
@@ -18417,8 +18343,10 @@ mod tests {
             Value::Int(2),
             Value::Int(3),
         ]);
-        let mut api = FileBytesApi {
+        let mut api = RootFileBytesApi {
+            expected_file: format!("{}sample.bin", ensure_trailing_separator("/game")),
             bytes: b"abcdefgh".to_vec(),
+            primary_root: Some("/game".into()),
         };
 
         assert_eq!(
@@ -18756,8 +18684,8 @@ mod tests {
         assert_eq!(vm.try_builtin_sys(0x80, 0x8a).unwrap(), Some(Value::Int(0)));
 
         vm.stack.extend([
-            Value::Str("main".into()),
             Value::Ptr(0x1000),
+            Value::Str("main".into()),
             Value::Int(11),
         ]);
         assert_eq!(vm.try_builtin_sys(0x80, 0x8b).unwrap(), Some(Value::Int(0)));
@@ -18771,8 +18699,8 @@ mod tests {
         ]);
         assert_eq!(vm.try_builtin_sys(0x80, 0x8a).unwrap(), Some(Value::Int(0)));
         vm.stack.extend([
-            Value::Str("main".into()),
             Value::Ptr(0x1000),
+            Value::Str("main".into()),
             Value::Int(11),
         ]);
         assert_eq!(vm.try_builtin_sys(0x80, 0x8b).unwrap(), Some(Value::Int(0)));
@@ -18782,8 +18710,8 @@ mod tests {
             .extend([Value::Str("main".into()), Value::Int(15), Value::Int(1)]);
         assert_eq!(vm.try_builtin_sys(0x80, 0x89).unwrap(), Some(Value::Int(0)));
         vm.stack.extend([
-            Value::Str("main".into()),
             Value::Ptr(0x1000),
+            Value::Str("main".into()),
             Value::Int(15),
         ]);
         assert_eq!(vm.try_builtin_sys(0x80, 0x8b).unwrap(), Some(Value::Int(0)));
@@ -18810,8 +18738,8 @@ mod tests {
         vm.stack.extend([Value::Str("main".into()), Value::Int(24)]);
         assert_eq!(vm.try_builtin_sys(0x80, 0x88).unwrap(), Some(Value::Int(1)));
         vm.stack.extend([
-            Value::Str("main".into()),
             Value::Ptr(0x1000),
+            Value::Str("main".into()),
             Value::Int(15),
         ]);
         assert_eq!(vm.try_builtin_sys(0x80, 0x8b).unwrap(), Some(Value::Int(0)));
@@ -18820,8 +18748,8 @@ mod tests {
         vm.stack.extend([Value::Str("main".into()), Value::Int(12)]);
         assert_eq!(vm.try_builtin_sys(0x80, 0x88).unwrap(), Some(Value::Int(1)));
         vm.stack.extend([
-            Value::Str("main".into()),
             Value::Ptr(0x1000),
+            Value::Str("main".into()),
             Value::Int(15),
         ]);
         assert_eq!(vm.try_builtin_sys(0x80, 0x8b).unwrap(), Some(Value::Int(2)));
@@ -18859,12 +18787,13 @@ mod tests {
         let mut vm = Vm::new();
         vm.write_int(0x1000, 2, 7).unwrap();
         vm.stack.extend([
-            Value::Str("missing".into()),
             Value::Ptr(0x1000),
+            Value::Str("missing".into()),
             Value::Int(3),
         ]);
         assert_eq!(vm.try_builtin_sys(0x80, 0x8b).unwrap(), Some(Value::Int(1)));
-        assert_eq!(vm.read_int(0x1000, 2).unwrap(), 0);
+        // sub_447230 leaves the output untouched on failure.
+        assert_eq!(vm.read_int(0x1000, 2).unwrap(), 7);
     }
 
     #[test]

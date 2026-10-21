@@ -320,6 +320,10 @@ pub fn run(config: AppConfig) -> Result<()> {
     if headless {
         run_headless("ethornell-rs runtime", image, text, bgm.ok(), runtime)
     } else {
+        let mut runtime = runtime;
+        if let Some(runtime) = runtime.as_mut() {
+            runtime.use_host_clock();
+        }
         run_window("ethornell-rs runtime", image, text, bgm.ok(), runtime)
     }
 }
@@ -351,6 +355,8 @@ struct RuntimeCursorMotion {
 }
 
 impl RuntimeCursorMotion {
+    /// sub_48F280: steps = ups*duration/1000 (32-bit unsigned), at least 1;
+    /// the first step falls due after duration/steps.
     fn new(
         start: (i32, i32),
         target: (i32, i32),
@@ -359,11 +365,7 @@ impl RuntimeCursorMotion {
         interpolation_mode: i32,
         cancel_on_large_move: bool,
     ) -> Self {
-        let steps = updates_per_second
-            .saturating_mul(duration_ms)
-            .checked_div(1_000)
-            .unwrap_or(0)
-            .max(1);
+        let steps = (updates_per_second.wrapping_mul(duration_ms) / 1_000).max(1);
         Self {
             start,
             target,
@@ -387,12 +389,13 @@ impl RuntimeCursorMotion {
         // instead of relying on floating-point truncation toward zero.
         // sub_48E8D0: mode 1 quantizes the angle to an integer before cos;
         // both modes multiply in 32 bits and shift arithmetically.
+        // sub_48F3D0 divides the signed products by the unsigned step count.
         let factor_fixed = if self.interpolation_mode == 1 {
-            let angle = 46_080 - (46_080 * step as i64 / i64::from(self.steps)) as i32;
-            ((f64::from(angle) * std::f64::consts::PI / 46_080.0).cos() + 1.0) * 32_768.0
+            let angle = 46_080i32.wrapping_sub(((46_080u32.wrapping_mul(step)) / self.steps) as i32);
+            (((f64::from(angle) * std::f64::consts::PI / 46_080.0).cos() + 1.0) * 32_768.0) as i32
         } else {
-            (((step as i64) << 16) / i64::from(self.steps)) as f64
-        } as i32;
+            ((step << 16) / self.steps) as i32
+        };
         let interpolate = |start: i32, target: i32| {
             let delta = target.wrapping_sub(start);
             start.wrapping_add(delta.wrapping_mul(factor_fixed) >> 16)
@@ -576,13 +579,32 @@ struct RuntimeTraceApi {
     screen_width: i32,
     screen_height: i32,
     display_mode_sizes: [Option<(i32, i32)>; 8],
+    /// dword_506B88 / dword_518614: the Sys80:60 size index and pixel mode.
+    display_size_index: i32,
+    /// GetAdapterDisplayMode width/height (dword_5177C0/C4); 0 when unknown.
+    desktop_display_size: (u32, u32),
+    /// Monitor rectangles [left, top, right, bottom] (dword_566854), the
+    /// window's current monitor, and the window frame width/height.
+    monitor_rects: Vec<[i32; 4]>,
+    current_monitor_rect: Option<[i32; 4]>,
+    window_decoration_size: (i32, i32),
+    window_outer_position: (i32, i32),
+    display_pixel_mode: i32,
+    /// dword_51773C/517740 and dword_507218: the windowed client size, and
+    /// whether it follows the size index (Sys81:64 with a zero dimension).
+    windowed_client_size: (i32, i32),
+    windowed_size_follows_mode: bool,
     window_surface_width: i32,
     window_surface_height: i32,
     engine_time_ms: u64,
     presentation_state: i32,
     performance_profile: RuntimePerformanceProfile,
-    graphics_capabilities: [u32; 16],
-    graphics_memory_metric: i32,
+    /// dword_518930, filled on first use (sub_46F100 measures the clock for
+    /// one second).
+    graphics_capabilities: Option<[u32; 16]>,
+    /// The display-mode size sub_461670 last passed to sub_46FB30 (the
+    /// startup mode 2 until Sys80:60 selects another).
+    object_cache_budget_size: (i32, i32),
     debug_graph: bool,
     trace_render_tree: bool,
     graph_trace: VecDeque<String>,
@@ -751,6 +773,25 @@ struct RuntimeTraceApi {
     /// Text nodes Graph90:A1 drew into each Window's text layer.
     item_grid_nodes: BTreeMap<i32, Vec<i32>>,
     sound_slots: BTreeMap<i32, SoundSlot>,
+    /// dword_5669A8: primary sound banks muted while minimized.
+    sound_minimize_muted: bool,
+    /// dword_566940: the DirectShow movie volume is held at -10000 while
+    /// minimized.
+    movie_minimize_muted: bool,
+    /// dword_566700: the window is not minimized (WM_SIZE).
+    window_restored: bool,
+    /// dword_566A70 / dword_566A68: inside a clock pause section, and whether
+    /// the engine clock is frozen (sub_4992E0 / sub_499330).
+    clock_pause_section: bool,
+    pub(crate) engine_clock_frozen: bool,
+    /// dword_566A60 (Sys81:68): deactivation freezes the clock and pauses
+    /// DirectShow movies.
+    pause_on_deactivate: bool,
+    /// Interactive frontends read the host clocks (Sys80:04 base, Sys80:05);
+    /// deterministic replays derive them from the engine clock.
+    pub(crate) host_realtime_clock: bool,
+    /// The sub_499290 value at engine time 0.
+    pub(crate) clock_base_ms: u32,
     bgm_slots: BTreeMap<i32, SoundSlot>,
     /// Target BGM gain bank set by A0:08 (dword_55FF18 / sub_4A3270).
     bgm_primary_volumes: [u8; 16],
@@ -916,6 +957,7 @@ struct RuntimeTraceApi {
     pending_window_position: Option<(i32, i32)>,
     pending_window_size: Option<(u32, u32)>,
     pending_fullscreen: Option<bool>,
+    display_toggle_requested: bool,
     pending_window_visible: Option<bool>,
     pending_window_minimize: bool,
     pending_cursor_visible: Option<bool>,
@@ -928,6 +970,17 @@ struct RuntimeTraceApi {
     cursor_idle_timeout_ms: u64,
     cursor_idle_remaining_ms: u64,
     window_focused: bool,
+    /// dword_566778 / dword_56677C: the last left/right press went to a Knob.
+    left_press_captured: bool,
+    right_press_captured: bool,
+    /// IsIconic(hWndParent), refreshed by the window frontend.
+    window_iconic: bool,
+    /// dword_566708: set by Sys80:65, cleared when the window is activated
+    /// while no longer iconic (WM_ACTIVATE).
+    window_minimize_latch: bool,
+    /// dword_566A74 (Sys81:65): while non-zero, WM_WINDOWPOSCHANGING keeps a
+    /// windowed game window centred (sub_461B40).
+    window_center_lock: i32,
     input_requires_focus: bool,
     system_mode_flag: i32,
     system_extension_state: i32,
@@ -980,14 +1033,33 @@ impl RuntimeTraceApi {
             window_mode: 0,
             screen_width: 1280,
             screen_height: 720,
-            display_mode_sizes: [None, None, None, None, None, None, Some((1280, 720)), None],
+            // dword_506B8C / dword_506BAC.
+            display_mode_sizes: [
+                Some((320, 240)),
+                Some((640, 480)),
+                Some((800, 600)),
+                Some((1024, 768)),
+                Some((1024, 576)),
+                Some((1024, 600)),
+                Some((1280, 720)),
+                Some((1920, 1080)),
+            ],
+            display_size_index: 2,
+            desktop_display_size: (0, 0),
+            monitor_rects: Vec::new(),
+            current_monitor_rect: None,
+            window_decoration_size: (0, 0),
+            window_outer_position: (0, 0),
+            display_pixel_mode: 0,
+            windowed_client_size: (0, 0),
+            windowed_size_follows_mode: true,
             window_surface_width: 0,
             window_surface_height: 0,
             engine_time_ms: 0,
             presentation_state: 0,
             performance_profile: RuntimePerformanceProfile::default(),
-            graphics_capabilities: ethornell_vm::default_graphics_capability_record(),
-            graphics_memory_metric: 0,
+            graphics_capabilities: None,
+            object_cache_budget_size: (800, 600),
             debug_graph: std::env::var("DEBUG").ok().as_deref() == Some("1"),
             trace_render_tree: std::env::var_os("TRACE_RENDER_TREE").is_some(),
             graph_trace: VecDeque::new(),
@@ -1112,6 +1184,14 @@ impl RuntimeTraceApi {
             next_screen_text_child: -100_000,
             item_grid_nodes: BTreeMap::new(),
             sound_slots: BTreeMap::new(),
+            sound_minimize_muted: false,
+            movie_minimize_muted: false,
+            window_restored: true,
+            clock_pause_section: false,
+            engine_clock_frozen: false,
+            pause_on_deactivate: false,
+            host_realtime_clock: false,
+            clock_base_ms: 0,
             bgm_slots: BTreeMap::new(),
             bgm_primary_volumes: [128; 16],
             bgm_secondary_volumes: [128; 16],
@@ -1255,6 +1335,7 @@ impl RuntimeTraceApi {
             pending_window_position: None,
             pending_window_size: None,
             pending_fullscreen: None,
+            display_toggle_requested: false,
             pending_window_visible: None,
             pending_window_minimize: false,
             pending_cursor_visible: None,
@@ -1264,6 +1345,11 @@ impl RuntimeTraceApi {
             cursor_idle_timeout_ms: 0,
             cursor_idle_remaining_ms: 0,
             window_focused: true,
+            left_press_captured: false,
+            right_press_captured: false,
+            window_iconic: false,
+            window_minimize_latch: false,
+            window_center_lock: 0,
             input_requires_focus: false,
             system_mode_flag: 0,
             system_extension_state: 0,
@@ -3076,6 +3162,110 @@ impl RuntimeTraceApi {
                 .unwrap_or(true)
             && !properties.is_some_and(|p| p.native.suppress_draw != 0)
             && properties.is_none_or(|p| p.mask_alpha < 256 && p.alpha_multiplier != 0)
+    }
+
+    /// sub_4992E0: enter a clock pause section; the clock freezes when
+    /// `always` (modal dialogs) or Sys81:68 asks for it.
+    fn enter_clock_pause(&mut self, always: bool) {
+        if self.window_restored && !self.clock_pause_section {
+            if always || self.pause_on_deactivate {
+                self.engine_clock_frozen = true;
+            }
+            self.clock_pause_section = true;
+        }
+    }
+
+    /// sub_499330.
+    fn leave_clock_pause(&mut self) {
+        if self.window_restored && self.clock_pause_section {
+            self.engine_clock_frozen = false;
+            self.clock_pause_section = false;
+        }
+    }
+
+    /// The target WndProc (sub_499930) host-window transitions, applied in
+    /// message order: WM_ACTIVATE(inactive), WM_SIZE(minimized/restored),
+    /// WM_ACTIVATE(active).
+    pub(crate) fn sync_host_window_state(&mut self, focused: bool, minimized: bool) {
+        if !focused && self.window_focused {
+            self.window_focused = false;
+            self.enter_clock_pause(false);
+        }
+        if minimized && self.window_restored {
+            self.set_sound_minimize_muted(true);
+            self.set_movie_minimize_muted(true);
+            self.enter_clock_pause(false);
+            self.window_restored = false;
+        } else if !minimized && !self.window_restored {
+            self.set_sound_minimize_muted(false);
+            self.set_movie_minimize_muted(false);
+            self.window_restored = true;
+        }
+        self.window_iconic = minimized;
+        if focused && !self.window_focused {
+            self.window_focused = true;
+            self.leave_clock_pause();
+            if !minimized {
+                self.window_minimize_latch = false;
+            }
+        }
+        self.apply_display_toggle_request();
+    }
+
+    /// dword_506B8C/506BAC[dword_506B88].
+    fn display_mode_size(&self) -> (i32, i32) {
+        self.display_mode_sizes
+            .get(self.display_size_index as usize)
+            .copied()
+            .flatten()
+            .unwrap_or((self.screen_width, self.screen_height))
+    }
+
+    /// The windowed half of sub_461670: the client size is the mode's size
+    /// while dword_507218 is set (and is remembered), otherwise the stored
+    /// Sys81:64 size.
+    fn apply_windowed_client_size(&mut self) {
+        if self.windowed_size_follows_mode {
+            self.windowed_client_size = self.display_mode_size();
+        }
+        let (width, height) = self.windowed_client_size;
+        if width > 0 && height > 0 {
+            self.pending_window_size = Some((width as u32, height as u32));
+        }
+    }
+
+    /// sub_4619B0, the per-frame half of sub_4619A0: a pending toggle runs
+    /// only while the Sys80:62 key list is enabled (dword_566710) and no
+    /// global DirectShow movie plays (dword_566974); on success the new
+    /// mode is posted as event {1, fullscreen, 0}. The request is dropped
+    /// either way.
+    fn apply_display_toggle_request(&mut self) {
+        if !std::mem::take(&mut self.display_toggle_requested) {
+            return;
+        }
+        let movie_playing = self
+            .global_movie_handle
+            .is_some_and(|handle| self.graph_effects.state(handle) == 0);
+        if !self.native_system.fullscreen_hotkeys_enabled || movie_playing {
+            return;
+        }
+        let fullscreen = self.window_mode == 0;
+        self.window_mode = i32::from(fullscreen);
+        self.pending_fullscreen = Some(fullscreen);
+        self.queued_system_events.push_back([1, i32::from(fullscreen), 0]);
+    }
+
+    /// sub_490260: hold the global DirectShow movie at -10000 while
+    /// minimized, then restore the stored Graph90:F3 volume.
+    fn set_movie_minimize_muted(&mut self, muted: bool) {
+        if self.movie_minimize_muted == muted {
+            return;
+        }
+        self.movie_minimize_muted = muted;
+        if let Some(handle) = self.global_movie_handle {
+            let volume = if muted { 0 } else { self.global_movie_volume };
+            let _ = self.graph_effects.set_volume(handle, volume);
+        }
     }
 
     /// sub_46D6E0: add an object node to the pointer chain with the object's
@@ -8510,8 +8700,8 @@ impl RuntimeTraceApi {
         target_y: i32,
         target_x: i32,
     ) {
-        if self.pending_window_minimize {
-            self.cursor_motion = None;
+        // sub_48F280 does nothing while the window is iconic.
+        if self.window_iconic {
             return;
         }
         // sub_48E680 truncates like Sys80:08.
@@ -8522,8 +8712,8 @@ impl RuntimeTraceApi {
         self.cursor_motion = Some(RuntimeCursorMotion::new(
             start,
             (target_x, target_y),
-            duration_ms.max(0) as u32,
-            updates_per_second.max(0) as u32,
+            duration_ms as u32,
+            updates_per_second as u32,
             interpolation_mode,
             cancel_on_large_move != 0,
         ));
@@ -8539,7 +8729,34 @@ impl RuntimeTraceApi {
         );
     }
 
+    /// sub_48F430's displacement tolerance: ceil of the presentation scale
+    /// (dword_5177B8/BC, sub_45F2A0) in 16.16. Windowed and stretched
+    /// full-screen use larger/smaller per axis, aspect-fit full-screen the
+    /// smaller axis ratio.
+    fn cursor_motion_tolerance(&self) -> (u32, u32) {
+        let logical = (self.screen_width as u32, self.screen_height as u32);
+        let surface = (self.window_surface_width as u32, self.window_surface_height as u32);
+        if logical.0 == 0 || logical.1 == 0 || surface.0 == 0 || surface.1 == 0 {
+            return (1, 1);
+        }
+        let symmetric = |a: u32, b: u32| if b > a { (b << 16) / a } else { (a << 16) / b };
+        let (sx, sy) = if self.window_mode != 0 && self.native_system.display_scaling_mode == 0 {
+            let scale = (f64::from(surface.0) / f64::from(logical.0))
+                .min(f64::from(surface.1) / f64::from(logical.1));
+            let fixed = (scale * 65_536.0) as i64 as u32;
+            (fixed, fixed)
+        } else {
+            (symmetric(logical.0, surface.0), symmetric(logical.1, surface.1))
+        };
+        (sx.wrapping_add(0xFFFF) >> 16, sy.wrapping_add(0xFFFF) >> 16)
+    }
+
     fn tick_cursor_motion(&mut self, elapsed_ms: u32) {
+        // sub_48F430 drops the motion while the window is inactive.
+        if !self.window_focused {
+            self.cursor_motion = None;
+            return;
+        }
         let Some(mut motion) = self.cursor_motion.take() else {
             return;
         };
@@ -8548,12 +8765,10 @@ impl RuntimeTraceApi {
             if motion.cancel_on_large_move {
                 let current = self
                     .mouse_pos
-                    .map(|(x, y)| (x.round() as i32, y.round() as i32))
+                    // sub_48F180 truncates like Sys80:08.
+                    .map(|(x, y)| (x as i32, y as i32))
                     .unwrap_or(motion.last_generated);
-                let tolerance_x =
-                    cursor_motion_scale_tolerance(self.screen_width, self.window_surface_width);
-                let tolerance_y =
-                    cursor_motion_scale_tolerance(self.screen_height, self.window_surface_height);
+                let (tolerance_x, tolerance_y) = self.cursor_motion_tolerance();
                 let dx = (current.0 - motion.last_generated.0).unsigned_abs();
                 let dy = (current.1 - motion.last_generated.1).unsigned_abs();
                 if dx > tolerance_x || dy > tolerance_y {
@@ -8570,10 +8785,8 @@ impl RuntimeTraceApi {
                 tracing::debug!(?point, "completed target cursor motion");
                 return;
             }
-            motion.next_step_ms = motion
-                .duration_ms
-                .saturating_mul(motion.step.saturating_add(1))
-                / motion.steps;
+            motion.next_step_ms =
+                motion.duration_ms.wrapping_mul(motion.step.wrapping_add(1)) / motion.steps;
         }
         self.cursor_motion = Some(motion);
     }
@@ -8660,6 +8873,61 @@ impl RuntimeEngine {
             },
             last_report: None,
         }
+    }
+
+    /// Sys80:6B status 5: sub_48D480 leaves its main loop and initializes the
+    /// engine again from the selected bootstrap. A fresh engine over the new
+    /// root replaces this one; on failure the old (halted) engine stays.
+    fn take_restart(&mut self) -> Option<Self> {
+        let (root, archive, file) = self.api.native_system.bootstrap_request.take()?;
+        let native_root = match root {
+            Some(root) => {
+                let path = runtime_file_path_from_root(&self.api.manager, &self.api.native_root, &root)?;
+                if !path.is_dir() {
+                    tracing::warn!(root, "bootstrap root does not exist");
+                    return None;
+                }
+                path
+            }
+            None => self.api.native_root.clone(),
+        };
+        let manager = match ResourceManager::open_game(&native_root) {
+            Ok(manager) => manager,
+            Err(err) => {
+                tracing::warn!(%err, root = %native_root.display(), "bootstrap root unusable");
+                return None;
+            }
+        };
+        let bytes = match manager.read_decoded_from_archive(&archive, &file) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                tracing::warn!(%err, archive, file, "bootstrap program unavailable");
+                return None;
+            }
+        };
+        let mut engine = Self::new(
+            &format!("{archive}:{file}"),
+            &bytes,
+            manager,
+            native_root,
+            self.options.trace,
+            self.options.fail_on_stub,
+            self.api.native_dialog_presentation,
+        );
+        if self.api.host_realtime_clock {
+            engine.use_host_clock();
+        }
+        tracing::info!(archive, file, "engine restarted from the selected bootstrap");
+        Some(engine)
+    }
+
+    /// Interactive runs start sub_499290 at the host's millisecond uptime and
+    /// read QueryPerformanceCounter from the host, like the target.
+    pub(crate) fn use_host_clock(&mut self) {
+        let base = (platform::host_uptime_ns() / 1_000_000) as u32;
+        self.vm.set_clock_base_ms(base);
+        self.api.clock_base_ms = base;
+        self.api.host_realtime_clock = true;
     }
 
     fn begin_native_pass(&mut self, elapsed_ms: u64) {
@@ -9002,15 +9270,17 @@ fn query_runtime_input_event_bits_split(api:&mut RuntimeTraceApi,keyboard_scope:
             }
         }
     }
+    // sub_46E460 samples the skip gate inside the keyboard branch, before
+    // the pointer descriptors are drained.
+    if keyboard_registered && ethornell_vm::SysApi::query_configured_input_gate(api) != 0 {
+        result |= i32::MIN;
+    }
     if pointer_registered && api.input_configuration_enabled != 0 {
         for (descriptor, bit) in [(1, 1), (2, 2), (4, 4), (5, 0x10), (6, 0x20)] {
             if drain_native_input_descriptor(api, descriptor) != 0 {
                 result |= bit;
             }
         }
-    }
-    if keyboard_registered && ethornell_vm::SysApi::query_configured_input_gate(api) != 0 {
-        result |= i32::MIN;
     }
     if consume && result != 0 {
         let was_animating = api.text_runtime.is_animating();
@@ -15392,8 +15662,30 @@ mod input_tests {
         )
         .unwrap();
         assert_eq!((api.screen_width, api.screen_height), (1280, 720));
+        // The explicit Sys81:64 size survives the mode change (dword_507218
+        // is 0) ...
+        assert_eq!(api.pending_window_size.take(), Some((800, 600)));
+        // ... until a zero dimension makes the window follow the mode again.
         api.configure_screen_size(0, 600);
-        assert_eq!(api.pending_window_size, None);
+        assert_eq!(api.pending_window_size.take(), Some((1280, 720)));
+    }
+
+    #[test]
+    fn display_toggle_runs_on_the_frame_step_only_while_keys_are_enabled() {
+        let manager =
+            ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let mut api = super::RuntimeTraceApi::new(manager);
+        super::toggle_native_display_mode(&mut api);
+        api.sync_host_window_state(true, false);
+        assert_eq!((api.window_mode, api.pending_fullscreen), (0, None));
+        assert!(api.queued_system_events.is_empty());
+
+        api.configure_fullscreen_hotkeys(true, &[13]);
+        super::toggle_native_display_mode(&mut api);
+        assert_eq!(api.window_mode, 0);
+        api.sync_host_window_state(true, false);
+        assert_eq!((api.window_mode, api.pending_fullscreen), (1, Some(true)));
+        assert_eq!(api.queued_system_events.pop_front(), Some([1, 1, 0]));
     }
 
     #[test]
@@ -17745,6 +18037,16 @@ mod input_tests {
         assert!(super::windows_wildcard_matches("save*.dat", "SAVE012.DAT"));
         assert!(super::windows_wildcard_matches("??.sav", "01.SAV"));
         assert!(!super::windows_wildcard_matches("??.sav", "001.SAV"));
+        // DOS wildcard rewriting of FindFirstFileA.
+        assert!(super::windows_wildcard_matches("*.*", "README"));
+        assert!(super::windows_wildcard_matches("*.*", "a.b.c"));
+        assert!(super::windows_wildcard_matches("*.", "README"));
+        assert!(!super::windows_wildcard_matches("*.", "read.me"));
+        assert!(super::windows_wildcard_matches("??.sav", "1.SAV"));
+        assert!(super::windows_wildcard_matches("*.c", "a.b.c"));
+        assert!(!super::windows_wildcard_matches("*.b", "a.b.c"));
+        assert!(super::windows_wildcard_matches("data0????.arc", "data02001.arc"));
+        assert!(super::windows_wildcard_matches("*", ""));
     }
 
     #[test]
@@ -17801,7 +18103,20 @@ enum RuntimeInputEvent {
     MouseWheel {
         delta_y: f32,
     },
+    /// WM_MOUSEHWHEEL: descriptor 143 for a non-negative delta, else 142.
+    MouseHorizontalWheel {
+        delta_x: f32,
+    },
     KeyPress {
+        descriptor: i32,
+    },
+    /// WM_SYSKEYDOWN / WM_SYSKEYUP: keys pressed while Alt is held, F10 and
+    /// Alt itself. `repeat` is lParam bit 30.
+    SysKeyPress {
+        descriptor: i32,
+        repeat: bool,
+    },
+    SysKeyRelease {
         descriptor: i32,
     },
     KeyRelease {
@@ -17875,7 +18190,7 @@ mod window_release_tests {
 mod runtime_input_queue_tests {
     use super::{
         RuntimeCursorMotion, RuntimeInputEvent, RuntimeTraceApi, apply_runtime_input_event,
-        cursor_motion_scale_tolerance, queue_runtime_input_event,
+        queue_runtime_input_event,
     };
     use ethornell_vm::Value;
     use std::collections::VecDeque;
@@ -17975,8 +18290,16 @@ mod runtime_input_queue_tests {
         assert_eq!(motion.steps, 3);
         assert_eq!(motion.point_for_step(1), (6, 6));
         assert_eq!(motion.point_for_step(3), (0, -1));
-        assert_eq!(cursor_motion_scale_tolerance(1280, 1280), 1);
-        assert_eq!(cursor_motion_scale_tolerance(640, 1280), 2);
+        let manager =
+            ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let mut api = super::RuntimeTraceApi::new(manager);
+        (api.screen_width, api.screen_height) = (1280, 720);
+        (api.window_surface_width, api.window_surface_height) = (1280, 720);
+        assert_eq!(api.cursor_motion_tolerance(), (1, 1));
+        (api.window_surface_width, api.window_surface_height) = (640, 360);
+        assert_eq!(api.cursor_motion_tolerance(), (2, 2));
+        (api.window_surface_width, api.window_surface_height) = (1920, 1080);
+        assert_eq!(api.cursor_motion_tolerance(), (2, 2));
     }
 
     #[test]
@@ -18088,23 +18411,28 @@ fn push_runtime_window_message(
     }
 }
 
-fn cursor_motion_scale_tolerance(logical: i32, surface: i32) -> u32 {
-    if logical <= 0 || surface <= 0 {
-        return 1;
-    }
-    let smaller = logical.min(surface) as u64;
-    let larger = logical.max(surface) as u64;
-    larger.div_ceil(smaller).clamp(1, u64::from(u32::MAX)) as u32
-}
 
 fn drain_native_input_descriptor(api: &mut RuntimeTraceApi, descriptor: i32) -> i32 {
-    let aggregate: &[i32] = match descriptor {
-        193 => &[13],
-        194 => &[32],
-        195 => &[38, 14],
-        196 => &[40, 15],
-        197..=215 => &[],
+    // The 193/194 child lists are the class 0x100/0x200 tables Sys80:1B
+    // rewrites (dword_5067C0 / dword_506800); 195/196 are fixed.
+    let class_list = |api: &RuntimeTraceApi, mask: i32| {
+        api.configured_input_classes.get(&mask).cloned().unwrap_or_default()
+    };
+    let aggregate: Vec<i32> = match descriptor {
+        193 => class_list(api, 0x100),
+        194 => class_list(api, 0x200),
+        195 => vec![38, 14],
+        196 => vec![40, 15],
+        197..=215 => Vec::new(),
         _ => {
+            // sub_46E0A0 first drops a down record whose key is no longer
+            // physically held (sub_46E060).
+            if api.input_down_descriptors.contains(&descriptor)
+                && !ethornell_vm::SysApi::query_key_held(api, descriptor)
+            {
+                api.input_down_descriptors.remove(&descriptor);
+                api.input_down_reported.remove(&descriptor);
+            }
             let count = api.input_event_counts.remove(&descriptor).unwrap_or(0) as i32;
             let first_held = api.input_down_descriptors.contains(&descriptor)
                 && api.input_down_reported.insert(descriptor);
@@ -18114,7 +18442,7 @@ fn drain_native_input_descriptor(api: &mut RuntimeTraceApi, descriptor: i32) -> 
     let mut count = 0i32;
     let mut held = 0i32;
     for child in aggregate {
-        let value = drain_native_input_descriptor(api, *child);
+        let value = drain_native_input_descriptor(api, child);
         count = count.wrapping_add(value & i32::MAX);
         held |= value & i32::MIN;
     }
@@ -18144,12 +18472,12 @@ fn note_native_input_press(api: &mut RuntimeTraceApi, descriptor: i32) -> bool {
     }
     if mouse || was_up {
         let count = api.input_event_counts.entry(descriptor).or_default();
-        *count = count.saturating_add(1).min(i32::MAX as u32);
+        *count = count.wrapping_add(1);
         let accumulator = api
             .input_descriptor_accumulators
             .entry(descriptor)
             .or_default();
-        *accumulator = accumulator.saturating_add(1).min(i32::MAX as u32);
+        *accumulator = accumulator.wrapping_add(1);
         let deadline = api.engine_time_ms.saturating_add(500);
         api.input_descriptor_deadlines.insert(descriptor, deadline);
     }
@@ -18163,7 +18491,7 @@ fn note_native_input_accumulator(api: &mut RuntimeTraceApi, descriptor: i32) {
         .input_descriptor_accumulators
         .entry(descriptor)
         .or_default();
-    *accumulator = accumulator.saturating_add(1).min(i32::MAX as u32);
+    *accumulator = accumulator.wrapping_add(1);
 }
 
 /// The WndProc side effects of a newly delivered press: the input serial
@@ -18180,8 +18508,10 @@ fn note_native_double_click(api: &mut RuntimeTraceApi, button: i32, x: f32, y: f
     let double = api.last_button_press.is_some_and(|(last, at, lx, ly)| {
         last == button
             && now.saturating_sub(at) <= 500
-            && (x - lx).abs() <= 4.0
-            && (y - ly).abs() <= 4.0
+            // SM_CXDOUBLECLK/SM_CYDOUBLECLK: a 4x4 box centred on the first
+            // press.
+            && (x - lx).abs() <= 2.0
+            && (y - ly).abs() <= 2.0
     });
     if double {
         api.last_button_press = None;
@@ -18295,10 +18625,15 @@ fn apply_runtime_input_event(api: &mut RuntimeTraceApi, event: RuntimeInputEvent
     api.note_cursor_activity();
     // Mapping mode 1 (Sys80:1E, sub_48EE70) turns the right button into the
     // left one: WndProc re-sends WM_RBUTTONDOWN/UP as WM_LBUTTONDOWN/UP.
+    // WM_RBUTTONDBLCLK still queues event 129 before the re-sent
+    // WM_LBUTTONDOWN, which is never a double click itself.
+    let mut left_double_click_checked = false;
     let event = match event {
         RuntimeInputEvent::ButtonPress { button: 2, x, y }
             if api.native_system.mouse_button_mapping_mode() == 1 =>
         {
+            note_native_double_click(api, 2, x, y);
+            left_double_click_checked = true;
             RuntimeInputEvent::MousePress { x, y }
         }
         RuntimeInputEvent::ButtonRelease { button: 2, x, y }
@@ -18317,24 +18652,32 @@ fn apply_runtime_input_event(api: &mut RuntimeTraceApi, event: RuntimeInputEvent
             push_runtime_window_message(api, 0x0200, pack_window_message_point(x, y), 0);
         }
         RuntimeInputEvent::MousePress { x, y } => {
-            note_native_double_click(api, 1, x, y);
+            if !left_double_click_checked {
+                note_native_double_click(api, 1, x, y);
+            }
             note_native_input_message(api, INPUT_DESCRIPTOR_MOUSE_LEFT);
-            note_native_input_press(api, INPUT_DESCRIPTOR_MOUSE_LEFT);
             let point = Some((x, y));
             api.mouse_pos = point;
             api.mouse_pressed = true;
+            api.input_physically_held.insert(INPUT_DESCRIPTOR_MOUSE_LEFT);
             api.pending_object_state = point;
             api.pending_input_state = Some(0x1000_0002);
             api.pending_input_descriptor = Some(INPUT_DESCRIPTOR_MOUSE_LEFT);
             api.pending_input_consumed = false;
-            // Target WndProc selects/captures CDspObjKnob before it feeds the
-            // generic mouse-left descriptor (sub_463780/sub_4637C0 versus
-            // sub_46DA80). A slider drag therefore owns this physical edge and
-            // must not simultaneously activate DCIPIcon/CProcDspMsg.
+            // WM_LBUTTONDOWN: a Knob under the pointer (sub_463CE0) captures
+            // the press and only the activation accumulator moves
+            // (sub_46E080); otherwise the record takes the press
+            // (sub_46DFE0). A captured press never reaches DCIPIcon or
+            // CProcDspMsg.
             if api.process_graph_knob_mouse_press((x, y)) {
-                let _ = drain_native_input_descriptor(api, INPUT_DESCRIPTOR_MOUSE_LEFT);
+                note_native_input_accumulator(api, INPUT_DESCRIPTOR_MOUSE_LEFT);
+                api.left_press_captured = true;
                 api.pending_input_consumed = true;
-            } else if api.process_graph_input_mouse_press((x, y)) {
+            } else if {
+                api.left_press_captured = false;
+                note_native_input_press(api, INPUT_DESCRIPTOR_MOUSE_LEFT);
+                api.process_graph_input_mouse_press((x, y))
+            } {
                 // DCIPIcon participates in the same native input-descriptor
                 // drain as CProcDspMsg. Preserve that one-owner consumption.
                 api.pending_input_consumed = true;
@@ -18342,7 +18685,12 @@ fn apply_runtime_input_event(api: &mut RuntimeTraceApi, event: RuntimeInputEvent
             push_runtime_window_message(api, 0x0201, pack_window_message_point(x, y), 1);
         }
         RuntimeInputEvent::MouseRelease { x, y } => {
-            note_native_input_release(api, INPUT_DESCRIPTOR_MOUSE_LEFT);
+            // WM_LBUTTONUP after a captured press clears only the capture
+            // flag (dword_566778); otherwise the record is released.
+            api.input_physically_held.remove(&INPUT_DESCRIPTOR_MOUSE_LEFT);
+            if !std::mem::take(&mut api.left_press_captured) {
+                note_native_input_release(api, INPUT_DESCRIPTOR_MOUSE_LEFT);
+            }
             let point = Some((x, y));
             api.mouse_pos = point;
             api.mouse_pressed = false;
@@ -18366,17 +18714,16 @@ fn apply_runtime_input_event(api: &mut RuntimeTraceApi, event: RuntimeInputEvent
             if delta_y == 0.0 {
                 return;
             }
+            // WM_MOUSEWHEEL counts the message and queues [3, 14|15, 0]
+            // before a watched Knob may take the wheel; otherwise the record
+            // gets an immediate press/release pair.
+            let descriptor = if delta_y < 0.0 {
+                INPUT_DESCRIPTOR_MOUSE_WHEEL_DOWN
+            } else {
+                INPUT_DESCRIPTOR_MOUSE_WHEEL_UP
+            };
+            note_native_input_message(api, descriptor);
             if !api.process_graph_knob_mouse_wheel(delta_y) {
-                // Target WndProc falls through to native input descriptors
-                // when no Knob is watched: positive wheel -> descriptor 14,
-                // negative wheel -> descriptor 15, each as an immediate
-                // press/release pair.
-                let descriptor = if delta_y < 0.0 {
-                    INPUT_DESCRIPTOR_MOUSE_WHEEL_DOWN
-                } else {
-                    INPUT_DESCRIPTOR_MOUSE_WHEEL_UP
-                };
-                note_native_input_message(api, descriptor);
                 note_native_input_press(api, descriptor);
                 note_native_input_release(api, descriptor);
                 api.pending_input_state = Some(0x1000_0006);
@@ -18398,20 +18745,25 @@ fn apply_runtime_input_event(api: &mut RuntimeTraceApi, event: RuntimeInputEvent
             }
             if note_native_input_press(api, descriptor) {
                 note_native_input_message(api, descriptor);
-                // sub_4617B0 / sub_461440: a registered fullscreen hotkey
-                // toggles the display mode on the press edge.
-                if api.native_system.fullscreen_hotkeys_enabled
-                    && api.native_system.fullscreen_hotkeys.contains(&descriptor)
-                {
-                    let fullscreen = api.window_mode == 0;
-                    api.window_mode = i32::from(fullscreen);
-                    api.pending_fullscreen = Some(fullscreen);
+                // sub_461D10: a registered fullscreen hotkey toggles the
+                // display mode on the press edge.
+                if native_fullscreen_hotkey(api, descriptor) {
+                    toggle_native_display_mode(api);
                 }
                 api.pending_input_state = Some(0x1000_0002);
                 api.pending_input_descriptor = Some(descriptor);
                 api.pending_input_consumed = false;
             }
             push_runtime_window_message(api, 0x0100, 0, descriptor);
+        }
+        RuntimeInputEvent::MouseHorizontalWheel { delta_x } => {
+            if delta_x == 0.0 {
+                return;
+            }
+            let descriptor = if delta_x >= 0.0 { 143 } else { 142 };
+            note_native_input_message(api, descriptor);
+            note_native_input_press(api, descriptor);
+            note_native_input_release(api, descriptor);
         }
         RuntimeInputEvent::ButtonPress { button, x, y } => {
             // WM_RBUTTONDOWN / WM_MBUTTONDOWN / WM_XBUTTONDOWN.
@@ -18420,7 +18772,19 @@ fn apply_runtime_input_event(api: &mut RuntimeTraceApi, event: RuntimeInputEvent
                 note_native_double_click(api, 2, x, y);
             }
             note_native_input_message(api, button);
-            note_native_input_press(api, button);
+            api.input_physically_held.insert(button);
+            // A right press over a Knob (sub_463CE0) sets its +0x0C flag and
+            // moves only the accumulator; the release then clears the
+            // capture flag (dword_56677C) instead of the record.
+            if button == 2 && api.graph_knob_at_point((x, y)).is_some() {
+                note_native_input_accumulator(api, button);
+                api.right_press_captured = true;
+            } else {
+                if button == 2 {
+                    api.right_press_captured = false;
+                }
+                note_native_input_press(api, button);
+            }
             let message = match button {
                 2 => 0x0204,
                 4 => 0x0207,
@@ -18430,13 +18794,56 @@ fn apply_runtime_input_event(api: &mut RuntimeTraceApi, event: RuntimeInputEvent
         }
         RuntimeInputEvent::ButtonRelease { button, x, y } => {
             api.mouse_pos = Some((x, y));
-            note_native_input_release(api, button);
+            api.input_physically_held.remove(&button);
+            if !(button == 2 && std::mem::take(&mut api.right_press_captured)) {
+                note_native_input_release(api, button);
+            }
             let message = match button {
                 2 => 0x0205,
                 4 => 0x0208,
                 _ => 0x020C,
             };
             push_runtime_window_message(api, message, pack_window_message_point(x, y), 0);
+        }
+        RuntimeInputEvent::SysKeyPress { descriptor, repeat } => {
+            match descriptor {
+                // Alt+Enter toggles the display mode on the first press while
+                // the window is not minimized (sub_4619A0); Enter itself is not
+                // recorded.
+                13 => {
+                    if api.window_restored && !repeat {
+                        toggle_native_display_mode(api);
+                    }
+                }
+                // Alt+F4 posts WM_CLOSE.
+                115 => api.pending_window_close_request = true,
+                // F10 is a system key; it takes the WM_KEYDOWN record path.
+                121 => {
+                    if note_native_input_press(api, descriptor) {
+                        note_native_input_message(api, descriptor);
+                        if native_fullscreen_hotkey(api, descriptor) {
+                            toggle_native_display_mode(api);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        RuntimeInputEvent::SysKeyRelease { descriptor } => {
+            match descriptor {
+                // Alt is recorded on its release, as a press then a release.
+                18 => {
+                    if note_native_input_press(api, descriptor) {
+                        note_native_input_message(api, descriptor);
+                        if native_fullscreen_hotkey(api, descriptor) {
+                            toggle_native_display_mode(api);
+                        }
+                    }
+                    note_native_input_release(api, descriptor);
+                }
+                121 => note_native_input_release(api, descriptor),
+                _ => {}
+            }
         }
         RuntimeInputEvent::KeyRelease { descriptor } => {
             note_native_input_release(api, descriptor);
@@ -18446,6 +18853,18 @@ fn apply_runtime_input_event(api: &mut RuntimeTraceApi, event: RuntimeInputEvent
             push_runtime_window_message(api, 0x0101, 0, descriptor);
         }
     }
+}
+
+/// sub_461D10: whether `descriptor` is in the enabled fullscreen hotkey list.
+fn native_fullscreen_hotkey(api: &RuntimeTraceApi, descriptor: i32) -> bool {
+    api.native_system.fullscreen_hotkeys_enabled
+        && api.native_system.fullscreen_hotkeys.contains(&descriptor)
+}
+
+/// sub_4619A0: request the windowed/full-screen toggle; the frame step
+/// (`apply_display_toggle_request`, sub_4619B0) carries it out.
+fn toggle_native_display_mode(api: &mut RuntimeTraceApi) {
+    api.display_toggle_requested = true;
 }
 
 fn apply_headless_input_event(api: &mut RuntimeTraceApi, event: HeadlessInputEvent) {
@@ -19391,6 +19810,8 @@ impl RuntimeTraceApi {
     /// `[2, 0, 0]`; otherwise DefWindowProc receives WM_CLOSE and the native
     /// window is allowed to close. Returns true only for that latter case.
     fn handle_host_window_close(&mut self, source: &'static str) -> bool {
+        // WM_CLOSE counts as an input message (sub_46EB10).
+        self.input_message_serial = self.input_message_serial.wrapping_add(1);
         let mode = self.native_system.native_close_mode;
         if mode != 0 {
             tracing::info!(mode, source, "WM_CLOSE allowed by native close mode");
@@ -19433,9 +19854,11 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
             HostRequest::Native {opcode,args} => {
                 let (g,id)=(opcode.group,opcode.id);
                 if g == 0x80 && id == 0x3C {
-                    // Args in push order: file, unused context, message. A
-                    // present file answers 1 without a prompt (app handler);
-                    // otherwise Retry rechecks in complete_request.
+                    // Args in push order: path (primary root + file, resolved
+                    // by the VM), caption, text. A present file answers 1
+                    // without a prompt (app handler); otherwise a nonzero
+                    // answer (OK) rechecks in complete_request and 0 means the
+                    // host confirmed the quit question (sub_466D00).
                     let text = |index: usize| match args.get(index) {Some(Value::Str(s)) => s.clone(), _ => String::new()};
                     let file = text(0);
                     if self.required_file_present(&file) {return Ok(None);}
@@ -19486,11 +19909,17 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
     }
 
     fn graphics_capability_record(&mut self) -> [u32; 16] {
-        self.graphics_capabilities
+        *self
+            .graphics_capabilities
+            .get_or_insert_with(ethornell_vm::cpu_record::processor_record)
     }
 
+    /// sub_443540: the CObjectManager +0x58 budget sub_46FB30 computed for
+    /// the current display mode.
     fn graphics_memory_metric(&mut self) -> i32 {
-        self.graphics_memory_metric
+        let record = self.graphics_capability_record();
+        let (width, height) = self.object_cache_budget_size;
+        ethornell_vm::cpu_record::object_cache_budget(&record, width as u32, height as u32) as i32
     }
 
     fn observe_dispatch(&mut self, opcode: ethornell_vm::NativeOpcode) {
@@ -19594,6 +20023,45 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
         self.cached_file_exists(archive, file)
     }
 
+    fn read_disk_file(&mut self, path: &str) -> Option<Vec<u8>> {
+        if let Some(policy) = file_policy::active() {
+            return policy.read_loose(path).ok();
+        }
+        let host = find_runtime_file_from_root(&self.manager, &self.native_root, "", path)?;
+        host.is_file().then(|| std::fs::read(&host).ok()).flatten()
+    }
+
+    fn disk_file_exists(&mut self, path: &str) -> bool {
+        if let Some(policy) = file_policy::active() {
+            return policy.metadata(path).is_some_and(|meta| !meta.is_dir());
+        }
+        find_runtime_file_from_root(&self.manager, &self.native_root, "", path)
+            .is_some_and(|host| host.is_file())
+    }
+
+    fn read_archive_entry_raw(&mut self, archive: &str, entry: &str) -> Option<Vec<u8>> {
+        if is_empty_archive_arg(archive) {
+            return None;
+        }
+        if file_policy::active().is_some() {
+            return read_runtime_bytes(&self.manager, archive, entry);
+        }
+        let found = find_runtime_resource(&self.manager, archive, entry)?;
+        self.manager.read_by_entry_raw(&found).ok()
+    }
+
+    fn archive_entry_exists(&mut self, archive: &str, entry: &str) -> bool {
+        !is_empty_archive_arg(archive) && find_runtime_resource(&self.manager, archive, entry).is_some()
+    }
+
+    fn media_prompt(&mut self, title: &str, text: &str) -> bool {
+        let retry = retry_or_quit_prompt(title, text);
+        if !retry {
+            self.quit_requested = true;
+        }
+        retry
+    }
+
     fn file_size(&mut self, archive: &str, file: &str) -> i32 {
         self.cached_file_size(archive, file)
     }
@@ -19624,14 +20092,11 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
 
     fn special_folder_path(&mut self, mode: i32) -> Option<String> {
         if file_policy::restricted() { self.host.unsupported("special folders"); return None; }
-        let game_root = self.native_root.clone();
         let home = std::env::var_os("USERPROFILE")
             .or_else(|| std::env::var_os("HOME"))
             .map(PathBuf::from);
         let path = match mode {
-            0 => std::env::var_os("WINDIR")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| game_root.clone()),
+            0 => std::env::var_os("WINDIR").map(PathBuf::from)?,
             1 => home.as_ref().map(|root| root.join("Desktop"))?,
             2 => {
                 #[cfg(target_os = "windows")]
@@ -19646,12 +20111,7 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
                 }
             }
             3 => home.as_ref().map(|root| root.join("Documents"))?,
-            4 => std::env::var_os("CommonProgramFiles")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| game_root.clone()),
-            5 => std::env::var_os("ProgramFiles")
-                .map(PathBuf::from)
-                .unwrap_or(game_root),
+            4 | 5 => std::env::var_os("ProgramFiles").map(PathBuf::from)?,
             _ => return None,
         };
         Some(path.to_string_lossy().into_owned())
@@ -19754,216 +20214,21 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
         )
     }
 
-    fn locate_removable_archive_root(
-        &mut self,
-        archive_name: &str,
-        prompt: &str,
-        subdirectory: &str,
-        retry: bool,
-    ) -> Option<String> {
-        if file_policy::restricted() { self.host.unsupported("secondary resource root discovery"); return None; }
-        fn append_directory_children(root: &Path, output: &mut Vec<PathBuf>) {
-            let Ok(entries) = std::fs::read_dir(root) else {
-                return;
-            };
-            for entry in entries.flatten() {
-                if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
-                    output.push(entry.path());
-                }
-            }
-        }
+    fn removable_drive_roots(&mut self) -> Vec<String> {
+        if file_policy::restricted() { self.host.unsupported("removable drives"); return Vec::new(); }
+        removable_drive_roots()
+    }
 
-        fn native_relative_path(value: &str) -> Option<PathBuf> {
-            let normalized = value.trim().replace('\\', "/");
-            let without_drive = if normalized.as_bytes().get(1) == Some(&b':')
-                && normalized
-                    .as_bytes()
-                    .first()
-                    .is_some_and(|byte| byte.is_ascii_alphabetic())
-            {
-                &normalized[2..]
-            } else {
-                &normalized
-            };
-            let normalized = without_drive.trim_start_matches('/');
-            if normalized.is_empty() {
-                return None;
-            }
-            let mut path = PathBuf::new();
-            for component in Path::new(normalized).components() {
-                match component {
-                    std::path::Component::CurDir => {}
-                    std::path::Component::Normal(name) => path.push(name),
-                    std::path::Component::ParentDir
-                    | std::path::Component::RootDir
-                    | std::path::Component::Prefix(_) => return None,
-                }
-            }
-            (!path.as_os_str().is_empty()).then_some(path)
-        }
+    fn path_exists(&mut self, path: &str) -> bool {
+        self.disk_file_exists(path) || self.directory_exists(path)
+    }
 
-        fn matched_root(marker: &Path) -> Option<PathBuf> {
-            if marker.is_dir() {
-                Some(marker.to_path_buf())
-            } else if marker.is_file() {
-                marker.parent().map(Path::to_path_buf)
-            } else {
-                None
-            }
-        }
+    fn retry_or_quit_prompt(&mut self, caption: &str, text: &str) -> bool {
+        retry_or_quit_prompt(caption, text)
+    }
 
-        let archive_marker = native_relative_path(archive_name);
-        let secondary_marker = native_relative_path(subdirectory);
-        let title = self
-            .pending_window_title
-            .clone()
-            .unwrap_or_else(|| "Ethornell".to_string());
-        let game_root = self.native_root.clone();
-
-        tracing::info!(
-            archive_name,
-            subdirectory,
-            retry,
-            game_root = %game_root.display(),
-            loaded_archives = self.manager.archives().archives.len(),
-            "LocateRemovableArchiveRoot"
-        );
-
-        loop {
-            if let Some(root) = std::env::var_os("ETHORNELL_SECONDARY_RESOURCE_ROOT")
-                .map(PathBuf::from)
-                .filter(|root| root.is_dir())
-            {
-                tracing::info!(root = %root.display(), "secondary resource root selected from environment");
-                return Some(root.to_string_lossy().into_owned());
-            }
-
-            let mut candidates = vec![game_root.clone()];
-            if let Some(parent) = game_root.parent() {
-                candidates.push(parent.to_path_buf());
-            }
-            if let Ok(current) = std::env::current_dir() {
-                candidates.push(current);
-            }
-            if let Ok(executable) = std::env::current_exe()
-                && let Some(parent) = executable.parent()
-            {
-                candidates.push(parent.to_path_buf());
-            }
-            #[cfg(target_os = "windows")]
-            for drive in b'A'..=b'Z' {
-                let root = PathBuf::from(format!("{}:\\", drive as char));
-                if root.exists() {
-                    candidates.push(root);
-                }
-            }
-            #[cfg(target_os = "macos")]
-            append_directory_children(Path::new("/Volumes"), &mut candidates);
-            #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-            {
-                append_directory_children(Path::new("/mnt"), &mut candidates);
-                if let Some(user) = std::env::var_os("USER") {
-                    append_directory_children(&Path::new("/media").join(&user), &mut candidates);
-                    append_directory_children(&Path::new("/run/media").join(user), &mut candidates);
-                }
-            }
-            candidates.sort();
-            candidates.dedup();
-
-            let mut marker_variants = Vec::<PathBuf>::new();
-            if let Some(marker) = archive_marker.as_ref() {
-                marker_variants.push(marker.clone());
-            }
-            if let Some(marker) = secondary_marker.as_ref() {
-                marker_variants.push(marker.clone());
-            }
-            if let (Some(first), Some(second)) =
-                (secondary_marker.as_ref(), archive_marker.as_ref())
-            {
-                marker_variants.push(first.join(second));
-                marker_variants.push(second.join(first));
-            }
-            marker_variants.sort();
-            marker_variants.dedup();
-
-            for candidate in &candidates {
-                for marker in &marker_variants {
-                    if let Some(found) = resolve_existing_path_case_insensitive(candidate, marker)
-                        && let Some(root) = matched_root(&found)
-                    {
-                        tracing::info!(
-                            candidate = %candidate.display(),
-                            marker = %marker.display(),
-                            found = %found.display(),
-                            root = %root.display(),
-                            "removable archive marker matched filesystem"
-                        );
-                        return Some(root.to_string_lossy().into_owned());
-                    }
-                }
-            }
-
-            // ResourceManager has already parsed every archive below the game
-            // root. A request for one of those archive containers is a valid
-            // hit even though it is not an entry *inside* another archive.
-            for archive in &self.manager.archives().archives {
-                let relative = archive
-                    .path
-                    .strip_prefix(&game_root)
-                    .unwrap_or(archive.path.as_path());
-                let relative_key = relative.to_string_lossy().replace('\\', "/");
-                let file_name = archive
-                    .path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .unwrap_or_default();
-                let matched = marker_variants.iter().any(|marker| {
-                    let marker_key = marker.to_string_lossy().replace('\\', "/");
-                    relative_key.eq_ignore_ascii_case(&marker_key)
-                        || file_name.eq_ignore_ascii_case(
-                            marker
-                                .file_name()
-                                .and_then(|name| name.to_str())
-                                .unwrap_or_default(),
-                        )
-                });
-                if matched {
-                    let root = archive.path.parent().unwrap_or(game_root.as_path());
-                    tracing::info!(
-                        archive = %archive.path.display(),
-                        root = %root.display(),
-                        "removable archive marker matched loaded archive"
-                    );
-                    return Some(root.to_string_lossy().into_owned());
-                }
-            }
-
-            tracing::warn!(
-                archive_name,
-                subdirectory,
-                candidates = ?candidates,
-                loaded_archives = ?self
-                    .manager
-                    .archives()
-                    .archives
-                    .iter()
-                    .map(|archive| archive.path.display().to_string())
-                    .collect::<Vec<_>>(),
-                "removable archive marker not found"
-            );
-
-            if !retry
-                || !host_dialog::show_message(
-                    host_dialog::MessageDialogKind::RetryCancel,
-                    &title,
-                    prompt,
-                    true,
-                )
-                .unwrap_or(false)
-            {
-                return None;
-            }
-        }
+    fn sleep_ms(&mut self, ms: u32) {
+        std::thread::sleep(std::time::Duration::from_millis(u64::from(ms)));
     }
 
     fn write_file_bytes(&mut self, path: &str, bytes: &[u8]) -> bool {
@@ -19980,12 +20245,9 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
             tracing::warn!(path, "WriteFileBytes rejected path");
             return false;
         };
-        let result = (|| -> std::io::Result<()> {
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            std::fs::write(&path, bytes)
-        })();
+        // CreateFileA(CREATE_ALWAYS) in sub_42D940: a missing parent
+        // directory fails the write.
+        let result = std::fs::write(&path, bytes);
         let ok = result.is_ok();
         // Scripts probe saves through absolute paths and configured roots as
         // well as relative paths. Invalidate all aliases, including cached
@@ -20090,6 +20352,47 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
         self.dropped_files.front().cloned()
     }
 
+    fn window_outer_position(&mut self) -> (i32, i32) {
+        self.window_outer_position
+    }
+
+    fn restore_window_position(&mut self, x: i32, y: i32) -> (i32, i32) {
+        // sub_45ECB0: the stored windowed client size.
+        let (width, height) = self.windowed_client_size;
+        let visible = self.monitor_rects.iter().any(|&[left, top, right, bottom]| {
+            left + (width >> 3) - width <= x
+                && x <= right - (width >> 3)
+                && top + (height >> 3) - height <= y
+                && y <= bottom - (height >> 3)
+        });
+        if visible {
+            return (x, y);
+        }
+        if self.window_mode != 0 {
+            return (0, 0);
+        }
+        // sub_461B40: centred on the window's monitor (desktop size as
+        // sub_45EAE0(.., 1) reports it); the frame terms come from the host
+        // decorations in place of dword_517F24 and SM_CYCAPTION +
+        // SM_CYFIXEDFRAME.
+        let Some([left, top, ..]) = self.current_monitor_rect else {
+            return (0, 0);
+        };
+        let (mut desktop_width, mut desktop_height) = self.desktop_display_size;
+        if desktop_height != 0 && 4 * desktop_width / desktop_height >= 10 {
+            desktop_width >>= 1;
+        }
+        if desktop_width != 0 && desktop_height / desktop_width != 0 && 100 * desktop_height / desktop_width < 125 {
+            desktop_height >>= 1;
+        }
+        let (frame_width, frame_height) = self.window_decoration_size;
+        let caption = frame_height - frame_width / 2;
+        (
+            left + (desktop_width as i32 - frame_width - width) / 2,
+            top + (desktop_height as i32 - height) / 2 - caption,
+        )
+    }
+
     fn configure_fullscreen_hotkeys(&mut self, enabled: bool, descriptors: &[i32]) {
         self.native_system.fullscreen_hotkeys_enabled = enabled;
         // Target sub_461740 only replaces dword_566700 while enabled. A
@@ -20102,28 +20405,40 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
         }
     }
 
-    fn select_bootstrap(&mut self, root_or_archive_path: &str, archive_namespace: &str) {
-        if file_policy::restricted() && (root_or_archive_path.contains(['/', '\\', ':']) || root_or_archive_path.contains("..")) {
+    fn select_bootstrap(&mut self, root: Option<&str>, archive: &str, file: &str) {
+        if file_policy::restricted() && root.is_some() {
             self.host.unsupported("bootstrap root change"); return;
         }
-        self.native_system.bootstrap_root_or_archive = root_or_archive_path.to_owned();
-        self.native_system.bootstrap_namespace = archive_namespace.to_owned();
-        tracing::info!(root_or_archive_path, archive_namespace, "SelectBootstrap");
+        self.native_system.bootstrap_request =
+            Some((root.map(str::to_owned), archive.to_owned(), file.to_owned()));
+        tracing::info!(root, archive, file, "SelectBootstrap");
     }
 
+    /// Sys80:6F (sub_461AB0): the desktop mode (sub_45EAE0(.., 1) halves a
+    /// width of 2.5:1 or more and a height of 1:1..1.25:1 or more, i.e. a
+    /// spanned dual monitor) against the display mode's size, both as
+    /// (int)(10000.0 * w / h) in double precision.
     fn display_aspect_mismatch(&mut self) -> bool {
-        let desktop_width = self.window_surface_width;
-        let desktop_height = self.window_surface_height;
-        if desktop_width <= 0
-            || desktop_height <= 0
-            || self.screen_width <= 0
-            || self.screen_height <= 0
-        {
+        let (mut width, mut height) = match self.desktop_display_size {
+            (0, _) | (_, 0) => (
+                self.window_surface_width.max(0) as u32,
+                self.window_surface_height.max(0) as u32,
+            ),
+            size => size,
+        };
+        let (mode_width, mode_height) = self.display_mode_size();
+        if width == 0 || height == 0 || mode_width <= 0 || mode_height <= 0 {
             return false;
         }
-        let desktop_aspect = i64::from(desktop_width) * 10_000 / i64::from(desktop_height);
-        let game_aspect = i64::from(self.screen_width) * 10_000 / i64::from(self.screen_height);
-        desktop_aspect != game_aspect
+        if 4 * width / height >= 10 {
+            width >>= 1;
+        }
+        if height / width != 0 && 100 * height / width < 125 {
+            height >>= 1;
+        }
+        let desktop = (10000.0 * (f64::from(width) / f64::from(height))) as i32;
+        let mode = (f64::from(mode_width) / f64::from(mode_height) * 10000.0) as i32;
+        desktop != mode
     }
 
     fn registered_object_value(&mut self, object: i32) -> Option<i32> {
@@ -20164,6 +20479,22 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
         self.window_focused
     }
 
+    fn window_minimized(&mut self) -> bool {
+        self.window_iconic
+    }
+
+    fn set_pause_on_deactivate(&mut self, enabled: bool) {
+        self.pause_on_deactivate = enabled;
+    }
+
+    fn set_window_position_override(&mut self, value: i32) {
+        self.window_center_lock = value;
+    }
+
+    fn performance_counter_ns(&mut self) -> Option<u64> {
+        self.host_realtime_clock.then(platform::host_uptime_ns)
+    }
+
     fn keyboard_state(&mut self) -> [u8; 256] {
         let mut state = [0u8; 256];
         if !self.pending_input_consumed
@@ -20197,13 +20528,18 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
         }
     }
 
+    /// Sys81:64 (sub_48CC80 -> sub_45ECD0): two nonzero dimensions become
+    /// the windowed client size; otherwise the size follows the display
+    /// mode again. Windowed, the window is resized at once (sub_461670).
+    /// Script coordinates stay in the display mode's logical canvas.
     fn configure_screen_size(&mut self, width: i32, height: i32) {
-        if width > 0 && height > 0 {
-            // Sys81:64 selects the presentation size. Script coordinates and
-            // bitmap layouts stay in the display mode's logical canvas.
-            self.pending_window_size = Some((width as u32, height as u32));
-            tracing::info!(width, height, "native window size requested");
+        let explicit = width != 0 && height != 0;
+        self.windowed_size_follows_mode = !explicit;
+        self.windowed_client_size = if explicit { (width, height) } else { self.display_mode_size() };
+        if self.window_mode == 0 {
+            self.apply_windowed_client_size();
         }
+        tracing::info!(width, height, explicit, "native window size requested");
     }
 
     fn register_display_mode(&mut self, index: usize, width: i32, height: i32) {
@@ -20271,7 +20607,9 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
         ) else {
             return false;
         };
-        let ok = std::fs::remove_file(&path).is_ok();
+        // DeleteFileA refuses read-only files (sub_489340).
+        let read_only = std::fs::metadata(&path).is_ok_and(|meta| meta.permissions().readonly());
+        let ok = !read_only && std::fs::remove_file(&path).is_ok();
         if ok && let Ok(relative) = path.strip_prefix(self.manager.archives().root.as_path()) {
             let key = runtime_file_cache_key("", &relative.to_string_lossy());
             self.file_exists_cache.remove(&key);
@@ -21028,12 +21366,14 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
         message_id: i32,
         registered_after_serial: i32,
     ) -> Option<(i32, i32)> {
-        let index = self.window_messages.iter().position(|message| {
-            message.message_id == message_id
-                && message.serial.wrapping_sub(registered_after_serial) > 0
-        })?;
-        let message = self.window_messages.remove(index)?;
-        Some((message.lparam, message.wparam))
+        self.window_messages
+            .iter()
+            .rev()
+            .find(|message| {
+                message.message_id == message_id
+                    && message.serial.wrapping_sub(registered_after_serial) > 0
+            })
+            .map(|message| (message.wparam, message.lparam))
     }
 
     fn sample_configured_input(&mut self) {
@@ -21121,6 +21461,9 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
         query_runtime_input_event_bits(self, input_scope, true, true)
     }
 
+    /// sub_46E390: the skip gate over the 0x80000000 descriptor list
+    /// (dword_5069F8). "Down" is the physical key state (sub_46DAC0); a hit
+    /// counts only while the window is not minimized (dword_566700).
     fn query_configured_input_gate(&mut self) -> i32 {
         let mut latched = self.input_latched_state != 0;
         let mut any_down = false;
@@ -21131,13 +21474,13 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
                 .cloned()
                 .unwrap_or_default();
             for descriptor in descriptors {
-                let down = self.input_down_descriptors.contains(&descriptor);
+                let down = self.query_key_held(descriptor);
                 any_down |= down;
                 if self.input_poll_active {
-                    if drain_native_input_descriptor(self, descriptor) != 0 && self.window_focused {
+                    if drain_native_input_descriptor(self, descriptor) != 0 && self.window_restored {
                         latched = true;
                     }
-                } else if down && self.window_focused {
+                } else if down && self.window_restored {
                     latched = true;
                     break;
                 }
@@ -21200,8 +21543,7 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
                     self.input_descriptor_accumulators
                         .get(descriptor)
                         .copied()
-                        .unwrap_or_default()
-                        .min(i32::MAX as u32) as i32,
+                        .unwrap_or_default() as i32,
                 );
             }
         }
@@ -21387,17 +21729,9 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
                 let attrs = pop_int_value(stack).unwrap_or_default();
                 let path = pop_string_value(stack).unwrap_or_else(|| "<unknown>".into());
                 let ok = runtime_file_path_from_root(&self.manager, &self.native_root, &path)
-                    .map(|path| {
-                        if let Ok(mut perms) =
-                            std::fs::metadata(&path).map(|meta| meta.permissions())
-                        {
-                            perms.set_readonly(attrs & 0x01 != 0);
-                            std::fs::set_permissions(&path, perms).is_ok()
-                        } else {
-                            false
-                        }
-                    })
-                    .unwrap_or(false);
+                    .is_some_and(|path| {
+                        native_system::set_win32_file_attributes(&path, attrs as u32)
+                    });
                 tracing::info!(path, attrs, ok, "SetFileAttributes");
                 return Ok(ethornell_vm::Value::Int(i32::from(ok)));
             }
@@ -21419,7 +21753,7 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
                                 let _ = std::fs::set_permissions(&destination_path, permissions);
                             }
                         }
-                        std::fs::copy(&source_path, &destination_path).is_ok()
+                        native_system::win32_copy_file(&source_path, &destination_path)
                     }
                     _ => false,
                 };
@@ -21518,24 +21852,37 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
                 return Ok(ethornell_vm::Value::None);
             }
             (0x80, 0x60) => {
+                // sub_489DD0 -> sub_461670: pops fullscreen, pixel mode
+                // (< 2) and size index (< 8), both checked unsigned.
                 let fullscreen = pop_int_value(stack).unwrap_or_default() != 0;
-                let adapter = pop_int_value(stack).unwrap_or_default();
+                let pixel_mode = pop_int_value(stack).unwrap_or_default();
                 let mode = pop_int_value(stack).unwrap_or_default();
-                if !(0..2).contains(&adapter) || !(0..8).contains(&mode) {
-                    return Err(ethornell_vm::VmError::Runtime(format!(
-                        "Sys80:60 invalid display mode={mode} adapter={adapter}"
-                    )));
+                if !(0..2).contains(&pixel_mode) {
+                    return Err(ethornell_vm::VmError::Runtime(
+                        "無効なピクセルモードが設定されました".into(),
+                    ));
                 }
+                if !(0..8).contains(&mode) {
+                    return Err(ethornell_vm::VmError::Runtime(
+                        "無効なスクリーンサイズが設定されました".into(),
+                    ));
+                }
+                self.display_size_index = mode;
+                self.display_pixel_mode = pixel_mode;
                 self.window_mode = i32::from(fullscreen);
                 self.pending_fullscreen = Some(fullscreen);
-                if let Some((width, height)) = self.display_mode_sizes[mode as usize] {
-                    if width > 0 && height > 0 {
-                        self.screen_width = width;
-                        self.screen_height = height;
-                        self.graph90_refresh_background_screen_layout();
-                    }
+                let (width, height) = self.display_mode_size();
+                // sub_46FB30 budgets the object cache for the mode's size.
+                self.object_cache_budget_size = (width, height);
+                if width > 0 && height > 0 {
+                    self.screen_width = width;
+                    self.screen_height = height;
+                    self.graph90_refresh_background_screen_layout();
                 }
-                tracing::info!(mode, adapter, fullscreen, "ConfigureDisplayMode");
+                if !fullscreen {
+                    self.apply_windowed_client_size();
+                }
+                tracing::info!(mode, pixel_mode, fullscreen, "ConfigureDisplayMode");
                 return Ok(ethornell_vm::Value::None);
             }
             (0x80, 0x61) => {
@@ -21560,19 +21907,21 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
                 ));
             }
             (0x80, 0x64) => {
+                // sub_489EB0: sub_49ACE0 shows or hides the window, then
+                // sub_46DF80 clears every input record either way.
                 let visible = pop_int_value(stack).unwrap_or_default() != 0;
                 self.pending_window_visible = Some(visible);
-                if !visible {
-                    self.pending_input_state = None;
-                    self.pending_input_descriptor = None;
-                    self.pending_click = None;
-                    self.pending_object_state = None;
-                }
+                self.clear_native_input_records();
+                self.pending_input_state = None;
+                self.pending_input_descriptor = None;
+                self.pending_click = None;
+                self.pending_object_state = None;
                 tracing::info!(visible, "SetWindowVisible");
                 return Ok(ethornell_vm::Value::None);
             }
             (0x80, 0x65) => {
                 self.pending_window_minimize = true;
+                self.window_minimize_latch = true;
                 self.pending_input_state = None;
                 self.pending_input_descriptor = None;
                 self.pending_click = None;
@@ -21594,7 +21943,7 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
                 let cursor_index = pop_int_value(stack).unwrap_or_default();
                 if !(0..=4).contains(&cursor_index) {
                     return Err(ethornell_vm::VmError::Runtime(format!(
-                        "Sys80:67 invalid cursor index {cursor_index}"
+                        "指定されたマウスカーソル形状番号 [ {cursor_index} ] は無効です"
                     )));
                 }
                 self.native_system.cursor_index = cursor_index;
@@ -21797,9 +22146,9 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
                 tracing::info!(?value, "GetAdjustedDesktopDimensions");
                 return Ok(ethornell_vm::Value::None);
             }
+            // The VM answers Sys81:0F (IsIconic) before host dispatch.
             (0x81, 0x0f) => {
-                tracing::debug!(stack = ?summarize_values(stack), "FontAcquireFromStackFrame");
-                return Ok(ethornell_vm::Value::None);
+                return Ok(ethornell_vm::Value::Int(i32::from(self.window_iconic)));
             }
             (0x81, 0x18) => {
                 let value = pop_int_value(stack).unwrap_or_default();
@@ -23188,9 +23537,15 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                 // sub_48F6F0 accepts only the inclusive 0..128 range. The
                 // public handler ignores its Boolean result, so an invalid
                 // value leaves the process-global volume unchanged.
+                // sub_4901F0 stores the volume and applies it to the one
+                // global DirectShow movie unless the window is minimized.
                 if (0..=128).contains(&volume) {
                     self.global_movie_volume = volume;
-                    let _ = self.graph_effects.set_all_movie_volumes(volume);
+                    if !self.movie_minimize_muted
+                        && let Some(handle) = self.global_movie_handle
+                    {
+                        let _ = self.graph_effects.set_volume(handle, volume);
+                    }
                 }
                 tracing::debug!(
                     volume,
@@ -26318,55 +26673,114 @@ fn enumerate_matching_files(
     }
 }
 
+/// FindFirstFileA pattern matching: kernel32 rewrites the pattern into DOS
+/// wildcards ('?' -> DOS_QM, '*' before '.' -> DOS_STAR, '.' before '?', '*'
+/// or the end -> DOS_DOT) and the file system matches it case-insensitively
+/// with FsRtlIsNameInExpression semantics. Short (8.3) names are not
+/// generated on portable hosts, so only the long name is matched.
 fn windows_wildcard_matches(pattern: &str, value: &str) -> bool {
-    let pattern = pattern.to_ascii_lowercase().into_bytes();
-    let value = value.to_ascii_lowercase().into_bytes();
-    let (mut pattern_index, mut value_index) = (0usize, 0usize);
-    let (mut star, mut retry_value) = (None, 0usize);
-    while value_index < value.len() {
-        if pattern.get(pattern_index) == Some(&b'?')
-            || pattern.get(pattern_index) == value.get(value_index)
-        {
-            pattern_index += 1;
-            value_index += 1;
-        } else if pattern.get(pattern_index) == Some(&b'*') {
-            star = Some(pattern_index);
-            pattern_index += 1;
-            retry_value = value_index;
-        } else if let Some(star_index) = star {
-            pattern_index = star_index + 1;
-            retry_value += 1;
-            value_index = retry_value;
-        } else {
-            return false;
+    #[derive(Clone, Copy, PartialEq)]
+    enum Token {
+        Char(char),
+        Star,
+        DosStar,
+        DosQm,
+        DosDot,
+    }
+    let upper = |c: char| {
+        let mut u = c.to_uppercase();
+        match (u.next(), u.next()) {
+            (Some(u), None) => u,
+            _ => c,
         }
+    };
+    let chars = pattern.chars().collect::<Vec<_>>();
+    let tokens = chars
+        .iter()
+        .enumerate()
+        .map(|(i, &c)| {
+            let next = chars.get(i + 1).copied();
+            match c {
+                '?' => Token::DosQm,
+                '*' if next == Some('.') => Token::DosStar,
+                '*' => Token::Star,
+                '.' if matches!(next, None | Some('?') | Some('*')) => Token::DosDot,
+                c => Token::Char(upper(c)),
+            }
+        })
+        .collect::<Vec<_>>();
+    let name = value.chars().map(upper).collect::<Vec<_>>();
+    let last_dot = name.iter().rposition(|&c| c == '.');
+    // Breadth-first NFA over (token index) for each name position.
+    let mut states = vec![false; tokens.len() + 1];
+    let close = |states: &mut Vec<bool>, at_end: bool, position: usize| {
+        // Epsilon moves: stars match zero characters; DOS_DOT matches zero
+        // characters at the end; DOS_QM skips at a period or the end.
+        let mut index = 0;
+        while index < tokens.len() {
+            if states[index] {
+                let skip = match tokens[index] {
+                    Token::Star => true,
+                    Token::DosStar => last_dot.is_none_or(|dot| position <= dot),
+                    Token::DosDot => at_end,
+                    Token::DosQm => at_end || name.get(position) == Some(&'.'),
+                    Token::Char(_) => false,
+                };
+                if skip && !states[index + 1] {
+                    states[index + 1] = true;
+                }
+            }
+            index += 1;
+        }
+    };
+    states[0] = true;
+    close(&mut states, name.is_empty(), 0);
+    for (position, &c) in name.iter().enumerate() {
+        let mut next = vec![false; tokens.len() + 1];
+        for (index, token) in tokens.iter().enumerate() {
+            if !states[index] {
+                continue;
+            }
+            match *token {
+                Token::Char(expected) => {
+                    if expected == c {
+                        next[index + 1] = true;
+                    }
+                }
+                Token::Star => next[index] = true,
+                // Up to (not including) the final period, then the
+                // pattern's own '.' must take it.
+                Token::DosStar => {
+                    if last_dot.is_none_or(|dot| position < dot) {
+                        next[index] = true;
+                    }
+                }
+                Token::DosQm => {
+                    if c != '.' {
+                        next[index + 1] = true;
+                    }
+                }
+                Token::DosDot => {
+                    if c == '.' {
+                        next[index + 1] = true;
+                    }
+                }
+            }
+        }
+        states = next;
+        close(&mut states, position + 1 == name.len(), position + 1);
     }
-    while pattern.get(pattern_index) == Some(&b'*') {
-        pattern_index += 1;
-    }
-    pattern_index == pattern.len()
+    states[tokens.len()]
 }
 
 fn runtime_file_attributes(manager: &ResourceManager, file: &str) -> i32 {
     if let Some(policy) = file_policy::active() {
-        return policy.metadata(file).map(|m| (if m.readonly() { 1 } else { 0 }) | if m.is_dir() { 0x10 } else { 0x80 }).unwrap_or(-1);
+        return policy.metadata(file).map(|m| (if m.readonly() { 1 } else { 0 }) | if m.is_dir() { 0x10 } else { 0x20 }).unwrap_or(-1);
     }
     let Some(path) = runtime_file_path(manager, file) else {
         return -1;
     };
-    let Ok(metadata) = std::fs::metadata(path) else {
-        return -1;
-    };
-    let mut attrs = 0;
-    if metadata.permissions().readonly() {
-        attrs |= 0x01;
-    }
-    if metadata.is_dir() {
-        attrs |= 0x10;
-    } else {
-        attrs |= 0x80;
-    }
-    attrs
+    native_system::win32_file_attributes(&path).map_or(-1, |attrs| attrs as i32)
 }
 
 fn infer_text_color(args: &[ethornell_vm::Value]) -> Option<[f32; 4]> {
@@ -26835,4 +27249,70 @@ mod selector_audit {
         }
         assert!(stubbed.is_empty(), "{} selectors reach the stub: {}", stubbed.len(), stubbed.join(" "));
     }
+}
+
+/// sub_466D00 / sub_4652D0 / sub_465F80: MessageBox(caption, text,
+/// OK|CANCEL); Cancel asks the quit question (Japanese text when the system
+/// language is Japanese, sub_46FC50) with YES|NO. True means check again.
+/// Without a dialog the player cannot answer, which counts as quitting.
+pub(crate) fn retry_or_quit_prompt(caption: &str, text: &str) -> bool {
+    match host_dialog::show_message(host_dialog::MessageDialogKind::OkCancel, caption, text, true) {
+        Some(true) => return true,
+        None => return false,
+        Some(false) => {}
+    }
+    let quit = if platform::system_language_is_japanese() {
+        "中止しますか？"
+    } else {
+        "Are you sure you want to quit?"
+    };
+    host_dialog::show_message(host_dialog::MessageDialogKind::YesNo, caption, quit, false)
+        == Some(false)
+}
+
+/// GetLogicalDriveStringsA + GetDriveTypeA in {REMOVABLE, CDROM}. Other
+/// hosts list mounted removable volumes (ADR 0004 maps them to drive
+/// letters); ETHORNELL_SECONDARY_RESOURCE_ROOT adds one emulated drive
+/// first.
+fn removable_drive_roots() -> Vec<String> {
+    let mut roots = Vec::<PathBuf>::new();
+    if let Some(root) = std::env::var_os("ETHORNELL_SECONDARY_RESOURCE_ROOT")
+        .map(PathBuf::from)
+        .filter(|root| root.is_dir())
+    {
+        roots.push(root);
+    }
+    let mut add_children = |parent: &Path| {
+        let Ok(entries) = std::fs::read_dir(parent) else {
+            return;
+        };
+        let mut children: Vec<PathBuf> = entries
+            .flatten()
+            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+            .map(|entry| entry.path())
+            .collect();
+        children.sort();
+        roots.extend(children);
+    };
+    #[cfg(target_os = "windows")]
+    {
+        let _ = &mut add_children;
+        roots.extend(platform::removable_drive_roots().into_iter().map(PathBuf::from));
+    }
+    // /Volumes also holds a symlink to the boot volume; read_dir's file type
+    // does not follow it, so it is skipped.
+    #[cfg(target_os = "macos")]
+    add_children(Path::new("/Volumes"));
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    if let Some(user) = std::env::var_os("USER") {
+        add_children(&Path::new("/media").join(&user));
+        add_children(&Path::new("/run/media").join(user));
+    }
+    roots
+        .into_iter()
+        .map(|root| {
+            let root = root.to_string_lossy().into_owned();
+            if root.ends_with(['/', '\\']) { root } else { format!("{root}{}", std::path::MAIN_SEPARATOR) }
+        })
+        .collect()
 }

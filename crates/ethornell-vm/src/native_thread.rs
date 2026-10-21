@@ -368,9 +368,14 @@ impl CThread {
         self.native.status_flags |= CTHREAD_FLAG_TERMINATED;
     }
 
+    /// sub_445660: CThread+0x84 = now + duration (32-bit wrap).
     pub(crate) fn set_deadline_from_now(&mut self, now_ms: i32, duration_ms: i32) {
-        self.native.deadline_tick =
-            (now_ms.max(0) as u32).saturating_add(duration_ms.max(0) as u32);
+        self.native.deadline_tick = (now_ms as u32).wrapping_add(duration_ms as u32);
+    }
+
+    /// sub_445680: CThread+0x84 += duration.
+    pub(crate) fn extend_deadline(&mut self, duration_ms: i32) {
+        self.native.deadline_tick = self.native.deadline_tick.wrapping_add(duration_ms as u32);
     }
 
     pub(crate) fn deadline_tick(&self) -> u32 {
@@ -378,14 +383,13 @@ impl CThread {
     }
 
     pub(crate) fn deadline_reached(&self, now_ms: i32) -> bool {
-        (now_ms.max(0) as u32) >= self.native.deadline_tick
+        self.remaining_deadline_ms(now_ms) == 0
     }
 
+    /// sub_445630: the signed 32-bit distance to CThread+0x84, or 0 once it
+    /// is not positive.
     pub(crate) fn remaining_deadline_ms(&self, now_ms: i32) -> i32 {
-        self.native
-            .deadline_tick
-            .saturating_sub(now_ms.max(0) as u32)
-            .min(i32::MAX as u32) as i32
+        (self.native.deadline_tick.wrapping_sub(now_ms as u32) as i32).max(0)
     }
 
     pub(crate) fn sync_operand_index(&mut self, stack_len: usize) {

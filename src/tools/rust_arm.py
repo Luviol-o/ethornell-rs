@@ -18,12 +18,29 @@ pat = re.compile(
     % (group, ident, group, ident),
     re.I,
 )
+call = (root / "crates/ethornell-vm/src/native_call.rs").read_text()
+names = [
+    m.group(1)
+    for m in re.finditer(
+        r"pub const (\w+): NativeOpcode = NativeOpcode \{\s*group:\s*(0x[0-9A-Fa-f]+),\s*id:\s*(0x[0-9A-Fa-f]+)",
+        call,
+    )
+    if int(m.group(2), 16) == group and int(m.group(3), 16) == ident
+]
+if names:
+    pat = re.compile(pat.pattern + "|opcodes::(?:%s)\\s*(?:=>|\\|)" % "|".join(names), re.I)
 for path in sorted(root.glob("crates/*/src/**/*.rs")):
     if "native_call.rs" in path.name or "native_contract_reference" in path.name:
         continue
-    lines = path.read_text(errors="replace").split("\n")
+    text = path.read_text(errors="replace")
+    lines = text.split("\n")
+    # Per-group dispatchers (`if group != 0x80 { return None }` then
+    # `match id { 0x1E => ... }`).
+    grouped = re.search(r"group\s*!=\s*0x0*%x\b" % group, text, re.I)
+    id_arm = re.compile(r"^\s*(?:\|\s*)?(?:0x0*%x\s*\|\s*)*0x0*%x\b[^=]*=>" % (ident, ident), re.I)
     for i, line in enumerate(lines):
-        if pat.search(line) and "#[test]" not in "".join(lines[max(0, i - 3):i]):
+        hit = pat.search(line) or (grouped and id_arm.search(line))
+        if hit and "#[test]" not in "".join(lines[max(0, i - 3):i]):
             rel = path.relative_to(root)
             print(f"===== {rel}:{i + 1}")
             print("\n".join(lines[i:i + ctx]))

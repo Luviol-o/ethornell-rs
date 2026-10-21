@@ -13502,7 +13502,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: NO_PARAMETERS,
         returns: "zero or one",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target directly returns IsIconic(hWndParent).",
+        notes: "BGI 1.622 sub_48C080 pushes IsIconic(hWndParent); the window frontend refreshes the iconic state every frame and on focus changes.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS81_SWAP_INPUT_BINDING,
@@ -13794,11 +13794,11 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS81_SET_WINDOW_POSITION_OVERRIDE,
-        symbol: "Sys81_65_SetWindowPositionOverride",
+        symbol: "Sys81_65_SetWindowCenterLock",
         parameters: SYS81_65_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target value is consumed by WM_WINDOWPOSCHANGING position override logic.",
+        notes: "BGI 1.622 sub_48CCB0 -> sub_49ADC0 stores dword_566A74 (.bss, initially 0). While non-zero, WM_WINDOWPOSCHANGING of a windowed (not full-screen) game window replaces the position with the centred one (sub_461B40); hosts re-centre on every move.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS81_SWAP_PAUSE_ON_DEACTIVATE,
@@ -13806,7 +13806,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: SYS81_68_PARAMETERS,
         returns: "previous value",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target sub_498800 swaps dword_566A4C and returns the old value.",
+        notes: "BGI 1.622 sub_48CCD0 -> sub_499370: swaps dword_566A60 and pushes the old value. While set, WM_ACTIVATE(inactive) freezes the engine clock (sub_4992E0) and pauses DirectShow movies; activation resumes.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS81_SET_PRINT_SCREEN_HOTKEY_CAPTURE,
@@ -13982,7 +13982,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: RNG_SEED_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target handler 0x00487D20 pops one DWORD and calls the imported Microsoft CRT srand directly.",
+        notes: "BGI 1.622 sub_488820: srand(value) on the main thread's MSVC CRT state, shared with every native rand() caller (particles, Sys80:01/02).",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS_RAND,
@@ -13990,7 +13990,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: NO_PARAMETERS,
         returns: "Microsoft CRT rand value",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target handler 0x00487D40 calls the imported rand and pushes its result unchanged.",
+        notes: "BGI 1.622 sub_488840: pushes MSVC rand() (holdrand*214013+2531011, bits 16..30; initial seed 1).",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS_RAND_MAX,
@@ -13998,7 +13998,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: RAND_MAX_PARAMETERS,
         returns: "value in 0..max_exclusive-1, or zero for max<=0",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target handler 0x00487D60 combines three CRT rand calls as (((r0<<8)^r1)<<8)^r2 before signed remainder by a positive bound.",
+        notes: "BGI 1.622 sub_488860: for n > 0 returns (((rand()<<8)^rand())<<8^rand()) % n with the three rand() calls in that order; n <= 0 returns 0 without calling rand().",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS_GET_ENGINE_TICK,
@@ -14006,7 +14006,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: NO_PARAMETERS,
         returns: "engine milliseconds",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target 0x00487DB0 calls sub_498720, the pause-adjusted GetTickCount/timeGetTime engine clock.",
+        notes: "BGI 1.622 sub_4888B0 -> sub_499290: wrapping 32-bit millisecond clock; host jumps backwards or over 500 ms (dword_503DE8) are excluded, and the value is frozen inside a pause section that froze it (deactivation with Sys81:68, modal dialogs). Interactive runs start at the host uptime, deterministic replays at 0.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS_QUERY_PERFORMANCE_COUNTER_NS,
@@ -14014,7 +14014,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: PERFORMANCE_COUNTER_PARAMETERS,
         returns: "boolean success",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target 0x00487DD0 writes a u64 equal to counter/frequency*1,000,000,000; failed Win32 queries fall back to the engine millisecond clock and frequency 1000.",
+        notes: "BGI 1.622 sub_4888D0 -> sub_499430: QueryPerformanceCounter/frequency*1e9 as a u64 written low then high DWORD; returns 1. Not stopped by clock pauses; interactive runs read the host monotonic clock, replays derive it from the engine clock.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS_SET_PERFORMANCE_PROFILING,
@@ -14022,7 +14022,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: PERFORMANCE_PROFILING_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target 0x00487E00 writes dword_565AC4 and, when enabled, resets accumulated count, time, dispersion and frame budget state.",
+        notes: "BGI 1.622 sub_488900 -> sub_401600: stores the raw flag; non-zero resets count/total/within-budget/pending and sets the budget to 96% of one display refresh (sub_46F8E0, refresh rate dword_5177C8 or 60). Samples (sub_4017F0/sub_401830) time the update pass (sub_48D480, kept pending) plus scene composition before Present (sub_462010/sub_462050); Present and its vsync wait are not measured. Nanoseconds stand in for the QueryPerformanceCounter frequency; without a raster status (sub_45FBF0 failure) only the time test decides within-budget.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS_READ_PERFORMANCE_METRIC,
@@ -14030,7 +14030,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: PERFORMANCE_METRIC_PARAMETERS,
         returns: "void; metric is written through output_ptr",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target 0x00487E20 calls sub_401670. Selector 0 returns sample count; 1 average microseconds; 2 a 1/10000 throughput ratio; 3 a 1/10000 squared-dispersion ratio.",
+        notes: "BGI 1.622 sub_488920 -> sub_401670 pops the metric then the output pointer: 0 sample count; 1 total/(freq*count)*1e6; 2 (budget>>1)*count/total*10000 when total > 0; 3 within^2/count^2*10000; other selectors and empty states write 0. x87 results are truncated through __int64 to a DWORD.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS_READ_CURSOR_POINT,
@@ -14038,7 +14038,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: NO_PARAMETERS,
         returns: "two values: client-space x, then y",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_487E50 -> sub_48E680: (0,0) before the window exists, else the first touch contact or the cursor mapped from client to game coordinates by sub_45E8D0 (integer truncation); pushes x then y.",
+        notes: "BGI 1.622 sub_488950 -> sub_48F180: the active touch contact (dword_5666B0), else the cursor in client space mapped to game space by sub_45EE30 with (int) truncation; (0, 0) before the window exists; pushes x then y. Hosts deliver cursor positions already in game space; the target window cannot be resized (sub_461C40), the portable window can, with the same mapping.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS_QUERY_PRESENTATION_STATE,
@@ -14046,7 +14046,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: NO_PARAMETERS,
         returns: "renderer presentation state/timestamp",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target 0x00487E90 returns dword_565EC4. The render-present path updates it from the engine clock after a successful native present.",
+        notes: "BGI 1.622 sub_488990 -> sub_460450 returns dword_565ED8, which sub_460460 sets to the engine clock (sub_499290) after a successful Present; 0 before the first frame.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS_COPY_GRAPHICS_CAPABILITIES,
@@ -14054,7 +14054,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPHICS_CAPABILITY_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target 0x00487EB0 copies exactly 0x40 bytes from dword_518920, the graphics initialization/capability cache.",
+        notes: "BGI 1.622 sub_4889B0 copies 0x40 bytes from dword_518930 (.bss), which sub_46F100 fills at startup: [0] vendor index, [1] family (extended bits OR-ed in for 0/15), [2] model with extended model, [3] stepping, [4] brand byte (Intel) or CPUID 0x80000001 EBX word, [5]/[6]/[7] L1/L2/L3 words from the CPUID 2 descriptor table and CPUID 4 levels (Intel) or CPUID 0x80000005/6, [8] RDTSC MHz over one second, [9] processor count; a failed CPUID query returns early. Hosts without CPUID keep the zero record (cpu_record.rs).",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS_QUERY_GRAPHICS_MEMORY_METRIC,
@@ -14062,7 +14062,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: NO_PARAMETERS,
         returns: "renderer-owned capacity/memory field",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target 0x00487EE0 reaches sub_431130 and returns the DWORD at the active renderer object offset +0x58.",
+        notes: "BGI 1.622 sub_4889E0 -> sub_443540 returns CObjectManager+0x58, set by sub_46FB30 at startup (display mode 2) and on every display-mode change (sub_461670) from the processor record and that mode's size (dword_506B8C/dword_506BAC), in the target's 32-bit arithmetic.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS_GET_LOCAL_TIME,
@@ -14070,7 +14070,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: SYSTEM_TIME_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target 0x00487F00 passes the BP destination directly to Win32 GetLocalTime.",
+        notes: "BGI 1.622 sub_488A00: GetLocalTime into the 16-byte SYSTEMTIME (year, month, weekday, day, hour, minute, second, ms), taken from one host time sample.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS_GET_PHYSICAL_MEMORY,
@@ -14078,7 +14078,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: NO_PARAMETERS,
         returns: "two values: total physical bytes, then available physical bytes",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target 0x00487F20 calls GlobalMemoryStatus and clamps each physical-memory value independently to INT32_MAX before pushing it.",
+        notes: "BGI 1.622 sub_488A20: GlobalMemoryStatus total then available physical bytes, each capped at 0x7FFFFFFF; pushes total, then available.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS_QUERY_WINDOW_MINIMIZE_LATCH,
@@ -14086,7 +14086,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: NO_PARAMETERS,
         returns: "boolean minimize/restore latch",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target 0x00487FB0 returns dword_5666F4. CloseWindow sets it; WM_ACTIVATE clears it after restoration when the window is no longer iconic.",
+        notes: "BGI 1.622 sub_488AB0 -> sub_49ADB0 returns dword_566708: Sys80:65 sets it; WM_ACTIVATE clears it once the window is active and no longer iconic.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS_QUERY_WINDOW_ACTIVE,
@@ -14094,7 +14094,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: NO_PARAMETERS,
         returns: "boolean active-window state",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target 0x00487FD0 returns dword_5666E8, written from WM_ACTIVATE and WM_NCACTIVATE processing.",
+        notes: "BGI 1.622 sub_488AD0 -> sub_49ADA0: dword_5666FC, the last WM_ACTIVATE state.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS_RESET_INPUT_CONFIGURATION,
@@ -14102,7 +14102,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: INPUT_CONFIGURATION_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_487FF0 stores dword_506A44 (input enabled) and sub_46DA20 clears fields 0/1/2/4 of every six-DWORD input record; the +0x0C accumulator, Sys81:10 values and the Sys80:16 poll flag are kept.",
+        notes: "BGI 1.622 sub_488AF0: stores the input-configuration flag (dword_506A44) and clears fields 0/1/2/4 of every input record (sub_46DF80); the field-3 accumulator read by Sys80:12 and field 5 survive.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS_QUERY_KEY_DOWN,
@@ -14110,7 +14110,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: KEY_STATE_PARAMETERS,
         returns: "zero or one",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_488010 returns bit 15 of sub_46D560: the physical held state with Sys80:1E mapping mode 1 (left reads left or right, right reads nothing) and the active-window gate unless Sys81:14 enabled background polling. No input event is consumed.",
+        notes: "BGI 1.622 sub_488B10 -> sub_46DAC0: bit 15 of GetAsyncKeyState for the logical key; with mouse mapping mode 1 (dword_566930) left reads left|right and right reads nothing; the system button swap is compensated; reports 0 unless the window is active or background polling (dword_566800) is on.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS_SUM_INPUT_DESCRIPTOR_STATE,
@@ -14118,7 +14118,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: INPUT_DESCRIPTOR_LIST_PARAMETERS,
         returns: "sum of current descriptor count/state fields",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_488040 walks a zero-terminated DWORD array of descriptors and sums each record's non-consuming +0x0C accumulator (sub_46DC70).",
+        notes: "BGI 1.622 sub_488B40: sums the field-3 accumulator (dword_518CB4[6*d], sub_46E1D0) over a zero-terminated contiguous DWORD array of descriptors; nothing is consumed.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS_SET_MOUSE_BUTTON_MAPPING_MODE,
@@ -14126,7 +14126,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: MOUSE_BUTTON_MAPPING_PARAMETERS,
         returns: "boolean accepted",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_48EE50 stores modes 0 and 1 in dword_56691C and pushes 1, otherwise pushes 0; mode 1 makes the WndProc treat the right button as the left one and changes Sys80:11.",
+        notes: "BGI 1.622 sub_488DF0 -> sub_48F950: mode <= 1 (unsigned) is stored as the mouse mapping mode (dword_566930: 1 turns the right button into the left) and 1 is pushed; other values push 0.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS_ALLOC,
@@ -14150,7 +14150,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: COUNT_FILES_PARAMETERS,
         returns: "matched file count",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target 0x00488450 calls sub_466BB0 with no output buffer, unlimited count and the caller's recursive flag.",
+        notes: "BGI 1.622 sub_488F50 -> sub_467110(no buffer, no limit): counts files matching the FindFirstFileA pattern (DOS wildcard rewriting, case-insensitive), then with the recursive flag every subdirectory's matches; recursion builds patterns from strrchr(pattern, '\\\\'), so a pattern without a backslash finds nothing below.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS_ENUMERATE_FILES,
@@ -14158,7 +14158,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: ENUMERATE_FILES_PARAMETERS,
         returns: "entry count, required byte count when destination is null, or -1 on overflow",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target 0x00488490/sub_466BB0 emits packed NUL-terminated names, skips directories in the primary pass and optionally recurses.",
+        notes: "BGI 1.622 sub_488F90 (pops max count, recursive, pattern, capacity, buffer) -> sub_467110: matching files in NTFS order (upcased UTF-16), up to the count, packed as C strings, then each subdirectory recursively with prefix 'sub\\\\' and the remaining count (0 means unlimited, as the target's unsigned difference); a name that does not fit returns -1 after the earlier ones were copied; a null buffer returns the byte total, otherwise the count. No recursion without a backslash in the pattern.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS_ENUMERATE_DIRECTORIES,
@@ -14166,7 +14166,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: ENUMERATE_DIRECTORIES_PARAMETERS,
         returns: "directory count, required byte count when destination is null, or -1 on overflow",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target 0x00488510/sub_466F00 enumerates immediate directories, excluding dot and dot-dot.",
+        notes: "BGI 1.622 sub_489010 -> sub_467460: immediate subdirectories other than . and .. in NTFS order, up to the count, packed as C strings; overflow returns -1; a null buffer returns the byte total, otherwise the count.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS_MOVE_FILE,
@@ -14174,7 +14174,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: TWO_PATH_PARAMETERS,
         returns: "Win32 BOOL",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target 0x00488560 calls MoveFileA(first native pop, second native pop), which corresponds to the target's destination-first BP argument order documented here.",
+        notes: "BGI 1.622 sub_489060: MoveFileA(last argument, first argument) without flags: fails when the destination exists (except a case-only rename), does not create its directory, moves files across volumes by copy and delete, directories only within a volume.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS_CREATE_DIRECTORY,
@@ -14182,7 +14182,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: PATH_PARAMETER,
         returns: "Win32 BOOL",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target 0x00488590 calls CreateDirectoryA(path, NULL) once; it does not recursively create parent directories.",
+        notes: "BGI 1.622 sub_489090: CreateDirectoryA creates one level; an existing path or a missing parent fails.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS_REMOVE_DIRECTORY,
@@ -14190,7 +14190,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: PATH_PARAMETER,
         returns: "Win32 BOOL",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target 0x004885C0 calls RemoveDirectoryA directly.",
+        notes: "BGI 1.622 sub_4890C0: RemoveDirectoryA removes an empty directory only.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS_DIRECTORY_EXISTS,
@@ -14198,7 +14198,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: PATH_PARAMETER,
         returns: "zero or one",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target 0x004885F0 returns bit 4 of GetFileAttributesA when attributes are valid, otherwise zero.",
+        notes: "BGI 1.622 sub_4890F0: bit 4 (DIRECTORY) of GetFileAttributesA, 0 when the path does not exist.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS_SPLIT_PATH,
@@ -14206,7 +14206,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: SPLIT_PATH_PARAMETERS,
         returns: "zero or one",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target 0x00488630 converts the source through MultiByteToWideChar, calls _wsplitpath, and converts requested components back to multibyte buffers. The previous ConvertDebugRecord label was incorrect.",
+        notes: "BGI 1.622 sub_489130 pops the path, then the ext, name, dir and drive outputs; a non-null path is split as wide text (sub_42D7F0: MultiByteToWideChar(CP_ACP), _wsplitpath: drive 'X:', directory through the last '\\\\' or '/', name, extension from the last '.') and each non-null output receives its part; returns 1, or 0 without writes for a null path.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS_GET_FILE_ATTRIBUTES,
@@ -14214,7 +14214,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: PATH_PARAMETER,
         returns: "raw u32 Win32 attributes or 0xFFFFFFFF",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target 0x004886A0 forwards GetFileAttributesA unchanged.",
+        notes: "BGI 1.622 sub_4891A0: GetFileAttributesA unchanged (-1 when missing): READONLY from the host permission, DIRECTORY from the type, the other settable bits as stored by Sys80:2D (default ARCHIVE for files), NORMAL when nothing remains.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS_SET_FILE_ATTRIBUTES,
@@ -14222,7 +14222,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: SET_ATTRIBUTES_PARAMETERS,
         returns: "Win32 BOOL",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target 0x004886D0 passes the path and complete attribute mask to SetFileAttributesA.",
+        notes: "BGI 1.622 sub_4891D0 pops the attribute mask, then the path: SetFileAttributesA keeps READONLY/HIDDEN/SYSTEM/ARCHIVE/TEMPORARY/OFFLINE/NOT_CONTENT_INDEXED (NORMAL alone clears them); READONLY maps to the host permission, the rest persists in an extended attribute.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS_COPY_FILE,
@@ -14230,7 +14230,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: TWO_PATH_PARAMETERS,
         returns: "Win32 BOOL",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target 0x00488700 clears FILE_ATTRIBUTE_READONLY on an existing destination, then calls CopyFileA(source, destination, FALSE).",
+        notes: "BGI 1.622 sub_489200: clears READONLY on an existing destination (second-to-last argument), then CopyFileA(last argument, destination, FALSE): overwrite, data plus attributes (with ARCHIVE) and last-write time; a directory source fails.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS_READ_FILE_BYTES,
@@ -14238,7 +14238,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: READ_FILE_PARAMETERS,
         returns: "byte count, or zero after target retry/error handling",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target 0x00488750/sub_465AB0 resolves the file against configured roots, fills the destination record/buffer and returns the loaded size.",
+        notes: "BGI 1.622 sub_489250 -> sub_466010 (pops file, archive, destination): clears 16 bytes, reads the loose file below the primary root (then the Sys80:36/37 search directories), decoded by sub_465880 (DSC, CBG v1/v2, raw), else with a non-null archive the entry of primary_root+archive (composite archives search their members); a miss retries the media root and then goes to sub_465F80, which is a script error ('指定されたファイル [ a : f ] は存在しません') unless a media root exists (then the OK/Cancel media prompt loops); returns the decoded size, 0 for other archive errors. Without an archive the media root is tried for the loose file. See src/engine/resource_io.c.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS_READ_FILE_RANGE,
@@ -14246,7 +14246,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: READ_FILE_RANGE_PARAMETERS,
         returns: "status 0,1,2,3,5,or 6",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target 0x00488790 packs offset/length for sub_465C30. Zero/zero copies the whole file; 2 denotes range overflow, 3 invalid length, 5 read/decode failure, and 6 a source larger than 64 MiB.",
+        notes: "BGI 1.622 sub_489290 -> sub_466190 (pops length, offset, file, archive, destination): loose read under the primary root and search directories, then the media root (null archive) or primary_root+archive and media_root+archive; range per sub_465880 (both 0 = whole, count 0 or beyond the size 3, end beyond the size 2); returns 0, 1 missing, 2, 3, 5 read/decode failure, 6 over 64 MiB; never fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS_WRITE_FILE_BYTES,
@@ -14270,7 +14270,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: FILE_EXISTS_PARAMETERS,
         returns: "target search-root status",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_4888C0 pops file, then archive/root; sub_4665C0: without an archive an absolute path is tested directly, otherwise the file is looked up as a loose file under the primary and secondary roots (plus the Sys80 additional directories as root\\\\dir\\\\file); with an archive the loose file under the primary root, then the archive at the primary and the secondary root (entry names of 0x60+ bytes are fatal). Loose-file results are never cached.",
+        notes: "BGI 1.622 sub_4893C0 -> sub_466B20 (pops file, then archive): with an archive, a loose non-directory below the primary root or search directories, else (names of 0x60+ bytes are fatal) the entry in primary_root+archive or media_root+archive; without, an absolute name is tested directly, otherwise the loose file below the primary or media root.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS_FILE_SIZE,
@@ -14278,7 +14278,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: FILE_SIZE_PARAMETERS,
         returns: "byte count or zero",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target 0x00488900 pops file first and archive/root second, then calls sub_4662E0 with ECX=archive/root and file on the stack; the helper returns zero on failure.",
+        notes: "BGI 1.622 sub_489400 -> sub_466840 (pops file, then archive): decoded size of the loose file, else of the archive entry (media root only after ARCHIVE_NOT_FOUND), else 0; without an archive the media root's loose file.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS_SET_ADDITIONAL_RESOURCE_SEARCH,
@@ -14414,7 +14414,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: NO_PARAMETERS,
         returns: "monotonic input/window-message serial",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_488080 returns dword_56683C, which the WndProc increments (sub_46E5B0) for key press edges, mouse button presses, wheel and close messages; mouse moves and releases do not change it.",
+        notes: "BGI 1.622 sub_488B80 -> sub_46EB20: dword_566850, incremented (sub_46EB10) by WM_CLOSE, every left/right/middle/X button down (before Knob capture), mouse wheel and horizontal wheel, and the press edges of WM_KEYDOWN, F10 and Alt.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS_SET_INPUT_MASTER_GATE,
@@ -14422,7 +14422,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: INPUT_GATE_PARAMETER,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_4880A0 stores dword_506A48, the master gate sub_46DE30 requires.",
+        notes: "BGI 1.622 sub_488BA0 -> sub_46DEE0: stores the skip-gate master flag dword_506A48 read by Sys80:17.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS_SET_INPUT_LATCHED_STATE,
@@ -14430,7 +14430,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: INPUT_GATE_PARAMETER,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_4880C0 stores dword_566828, the latched result sub_46DE30 starts from.",
+        notes: "BGI 1.622 sub_488BC0 -> sub_46DEF0: stores the latched skip state dword_56683C read by Sys80:17.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS_SAMPLE_CONFIGURED_INPUT,
@@ -14438,7 +14438,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: NO_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_46D9A0 arms dword_56682C and drains every configured-gate descriptor once through sub_46DB40.",
+        notes: "BGI 1.622 sub_488BE0 -> sub_46DF00: sets the poll flag dword_566840 and drains (sub_46E0A0) every descriptor of the 0x80000000 list dword_5069F8 (default {17}).",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS_QUERY_CONFIGURED_INPUT_GATE,
@@ -14446,7 +14446,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: NO_PARAMETERS,
         returns: "configured input event/status",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_46DE30: inside an active window with input enabled, a held configured-gate descriptor (or, while the Sys80:16 poll is armed, a drained event) latches the gate; the poll disarms once nothing is held; the result needs the master gate.",
+        notes: "BGI 1.622 sub_488BF0 -> sub_46E390: starting from the latched state, while the window is active and input configuration is on, walks dword_5069F8: a physically held key (sub_46DAC0) marks any-down; with the poll flag a draining hit latches, otherwise a held key returns at once; hits count only while the window is not minimized (dword_566700). The poll flag drops once nothing is held. Returns 1 when latched and the master gate (dword_506A48) is set.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS_REGISTER_INPUT_SCOPE,
@@ -14454,7 +14454,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: INPUT_SCOPE_PARAMETER,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_488110 adds the packed scope to the keyboard and pointer chains (sub_46D6C0/sub_46D720) and performs one stateful sub_46DF00 query whose result is discarded.",
+        notes: "BGI 1.622 sub_488C10: packed = (scope<<16)|0xFFFF is inserted into the pointer chain as a whole-plane node (sub_46DC20, rect dword_506A4C) and into the keyboard chain (sub_46DC80), each before the first node whose scope is not greater, then one stateful sub_46E460 query whose result is discarded.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS_QUERY_AND_UNREGISTER_INPUT_SCOPE,
@@ -14462,7 +14462,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: INPUT_SCOPE_PARAMETER,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_488150 performs one stateful sub_46DF00 query, then removes one matching node from each chain (sub_46D7A0/sub_46D7B0).",
+        notes: "BGI 1.622 sub_488C50: one stateful sub_46E460 query, then removes the first pointer-chain node (sub_46DD00) and keyboard-chain node (sub_46DD10) with that packed scope.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS_QUERY_INPUT_EVENT_BITS,
@@ -14470,7 +14470,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: QUERY_INPUT_EVENT_BITS_PARAMETERS,
         returns: "current input-event bitmap",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_46DF00((scope<<16)|0xFFFF): keyboard classes when the scope passes sub_46D810, pointer descriptors 1/2/4/5/6 when sub_46D830's chain walk accepts it (plain scopes plus Knob and Sprite-target object nodes). Open: DCIPIcon item sprites and CProcSelect windows are not yet object nodes of the pointer chain.",
+        notes: "BGI 1.622 sub_488C90 -> sub_46E460((scope<<16)|0xFFFF): when the keyboard chain accepts the scope (sub_46DD70: input on and scope >= the top keyboard node), the nineteen class tables (sub_46E1E0; each drains descriptors until one hits) and then the skip gate (sub_46E390, bit 31); when the pointer chain accepts it (sub_46DD90), descriptors 1/2/4/5/6 drain into bits 1/2/4/0x10/0x20.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS_REGISTER_INPUT_CLASS_DESCRIPTORS,
@@ -14478,7 +14478,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: REGISTER_INPUT_CLASS_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_4881C0 replaces one mutable class list (0x40..0x8000, 0x40000000, 0x80000000) with a zero-terminated descriptor array of at most 15 entries; other masks or longer lists are script errors.",
+        notes: "BGI 1.622 sub_488CC0 -> sub_46E500: pops the descriptor pointer, then the class; a list of 16 or more entries, then a class other than 0x40/0x80/0x100/0x200/0x1000/0x2000/0x4000/0x8000/0x40000000/0x80000000, is a script error; the zero-terminated list is copied into that fixed table (classes 0x100/0x200 are also the child lists of aggregate descriptors 193/194).",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS_QUERY_INPUT_CLASS_LEVEL,
@@ -14486,7 +14486,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: QUERY_INPUT_CLASS_LEVEL_PARAMETERS,
         returns: "current input-class level/count",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_46E070 sums the non-consuming +0x0C accumulators of every descriptor in the selected class lists (pointer and keyboard classes up to 0x40000000).",
+        notes: "BGI 1.622 sub_488D60 -> sub_46E5D0: wrapping sum of the field-3 accumulators of every descriptor in the selected class tables (1/2/4/0x10/0x20 and the nineteen classes; the 0x80000000 list is excluded).",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS_QUERY_SCOPED_INPUT_EVENT,
@@ -14494,7 +14494,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: QUERY_SCOPED_INPUT_EVENT_PARAMETERS,
         returns: "drained event count with 0x80000000 first-down flag",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_488290 checks descriptors 1/2 against the pointer chain (sub_46D830) and others against sub_46D810, then drains sub_46DB40. Open: DCIPIcon item sprites are not yet pointer-chain object nodes.",
+        notes: "BGI 1.622 sub_488D90 pops the descriptor, then the scope; descriptors 1/2 test the pointer chain (sub_46DD90), others the keyboard chain (sub_46DD70), and an accepted scope drains the descriptor (sub_46E0A0: lazy release, count, first-held bit 31).",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS_CONFIGURE_CURSOR_MOTION,
@@ -14502,7 +14502,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: CONFIGURE_CURSOR_MOTION_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_488320 -> sub_48E780/sub_48E930: glides the cursor from its current point to (x, y) in max(ups*duration/1000, 1) timed steps, linear or integer-angle cosine (sub_48E8D0, 32-bit fixed point); optionally cancelled when the user moves the cursor away from the last generated point; ignored while minimised.",
+        notes: "BGI 1.622 sub_488E20 -> sub_48F280 (script order x, y, interpolation, duration, ups, cancel): ignored while iconic; steps = ups*duration/1000 (u32), at least 1; sub_48F430 then, each frame while the window is active, emits every step whose deadline start + duration*(step+1)/steps (u32) has passed, at start + sub_48F3D0(delta) (linear 16.16 or integer-angle cosine), the last step exactly at the target; with the cancel flag a cursor that moved more than ceil(presentation scale) from the last generated point stops it; an inactive window drops it.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS_SET_MESSAGE_AUXILIARY_INPUT_MASK,
@@ -14574,7 +14574,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: UNRECOVERED_SINGLE_PARAMETER,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target sub_489100 pops duration and sub_445290 writes CThread+0x84 = current_tick + duration.",
+        notes: "BGI 1.622 sub_489C00 -> sub_445660: CThread+0x84 = sub_499290() + duration with 32-bit wrap (negative durations are not clamped).",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS_SET_AND_QUERY_THREAD_TIMER,
@@ -14582,7 +14582,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: THREAD_TIMER_DURATION_PARAMETERS,
         returns: "zero or one",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target 0x00489120 calls sub_4452B0 to set the CThread deadline, then sub_445260 and pushes whether the remaining time is nonzero.",
+        notes: "BGI 1.622 sub_489C20: CThread+0x84 += duration (sub_445680), then pushes whether sub_445630 (signed deadline - now, 0 when not positive) is non-zero.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS_WAIT_THREAD_TIMER,
@@ -14590,7 +14590,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: NO_PARAMETERS,
         returns: "boolean: remaining thread timer was positive",
         scheduling: NativeSchedulingEffect::WaitProcedure,
-        notes: "Target sub_489160 obtains remaining time through sub_445260; only a positive value constructs CProcWaitTiming, while the Boolean result is pushed immediately on every path.",
+        notes: "BGI 1.622 sub_489C60: remaining = sub_445630 (signed CThread+0x84 - now, 0 when not positive); a positive value installs CProcWaitTiming with deadline now + remaining (unsigned completion test deadline <= now, sub_431E30); pushes remaining != 0 and returns status 2.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS_WAIT_TIMING_EX,
@@ -14686,7 +14686,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: NO_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target handler 0x004893E0 minimizes the parent window, clears transient input and sets the minimize latch.",
+        notes: "BGI 1.622 sub_489ED0: CloseWindow(hWndParent), clears the transient input records (sub_46DF80) and sets the minimize latch dword_566708.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS_SET_WINDOW_TITLE,
@@ -16726,7 +16726,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_MOVIE_VOLUME_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_48F6F0 accepts 0..=128; zero maps to -10000 dB and nonzero values use the recovered logarithmic-compatible target formula.",
+        notes: "BGI 1.622 sub_480DA0 -> sub_4901F0: volume <= 128 (unsigned) is stored and applied to the single global DirectShow movie unless the window is minimized (dword_566940); other values are ignored.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_LOAD_BURIKO_MOVIE_RESOURCE,
@@ -20016,6 +20016,28 @@ const PORTABLE_EQUIVALENT_OPCODES: &[NativeOpcode] = &[
     opcodes::SYS_CONFIGURE_CURSOR_MOTION,
     opcodes::SOUND_STOP_SE,
     opcodes::SOUND_RELEASE_SE,
+    opcodes::SYS_SET_PERFORMANCE_PROFILING,
+    opcodes::SYS_READ_PERFORMANCE_METRIC,
+    opcodes::SYS_QUERY_PRESENTATION_STATE,
+    opcodes::SYS_COPY_GRAPHICS_CAPABILITIES,
+    opcodes::SYS_QUERY_GRAPHICS_MEMORY_METRIC,
+    opcodes::SYS_QUERY_WINDOW_MINIMIZE_LATCH,
+    opcodes::SYS_MINIMIZE_WINDOW,
+    opcodes::SYS_SET_THREAD_TIMER,
+    opcodes::SYS_WAIT_THREAD_TIMER,
+    opcodes::SYS_QUERY_INPUT_EVENT_BITS,
+    opcodes::SYS_QUERY_SCOPED_INPUT_EVENT,
+    opcodes::SYS_COUNT_FILES,
+    opcodes::SYS_ENUMERATE_FILES,
+    opcodes::SYS_ENUMERATE_DIRECTORIES,
+    opcodes::SYS_DIRECTORY_EXISTS,
+    opcodes::SYS_SPLIT_PATH,
+    opcodes::SYS_GET_FILE_ATTRIBUTES,
+    opcodes::SYS_SET_FILE_ATTRIBUTES,
+    opcodes::SYS_COPY_FILE,
+    opcodes::SYS_READ_FILE_BYTES,
+    opcodes::SYS_READ_FILE_RANGE,
+    opcodes::SYS_FILE_SIZE,
 ];
 
 const PARTIAL_IMPLEMENTATION_OPCODES: &[NativeOpcode] = &[
@@ -20059,10 +20081,6 @@ const PARTIAL_IMPLEMENTATION_OPCODES: &[NativeOpcode] = &[
     opcodes::USER2_SET_RAIN_DIRECTION,
     opcodes::USER2_SET_RAIN_LENGTH,
     opcodes::USER2_SET_RAIN_STEP,
-    opcodes::SYS_READ_PERFORMANCE_METRIC,
-    opcodes::SYS_QUERY_PRESENTATION_STATE,
-    opcodes::SYS_COPY_GRAPHICS_CAPABILITIES,
-    opcodes::SYS_QUERY_GRAPHICS_MEMORY_METRIC,
     opcodes::SYS_GET_SPECIAL_FOLDER,
     opcodes::SYS_OPEN_FILE_DIALOG,
     opcodes::SYS81_SHOW_RESOURCE_FILE_DIALOG,
@@ -20221,30 +20239,13 @@ const PARTIAL_IMPLEMENTATION_OPCODES: &[NativeOpcode] = &[
     opcodes::SYS81_QUERY_DEVICE_POWER_STATE,
     opcodes::SYS81_SET_BICUBIC_SHADER,
     opcodes::SYS81_LAUNCH_PROCESS_WAIT,
-    opcodes::SYS_SET_PERFORMANCE_PROFILING,
     opcodes::SYS_LOAD_GLOBAL_USER_DATA,
     opcodes::SYS_SAVE_GLOBAL_USER_DATA,
     opcodes::SYS_WAIT_EXCLUSION_SECTION,
-    opcodes::SYS_QUERY_WINDOW_MINIMIZE_LATCH,
-    opcodes::SYS_COUNT_FILES,
-    opcodes::SYS_ENUMERATE_FILES,
-    opcodes::SYS_ENUMERATE_DIRECTORIES,
-    opcodes::SYS_DIRECTORY_EXISTS,
-    opcodes::SYS_SPLIT_PATH,
-    opcodes::SYS_GET_FILE_ATTRIBUTES,
-    opcodes::SYS_SET_FILE_ATTRIBUTES,
-    opcodes::SYS_COPY_FILE,
-    opcodes::SYS_READ_FILE_BYTES,
-    opcodes::SYS_READ_FILE_RANGE,
     opcodes::SYS_SET_VALIDATED_FILE_ROOT,
-    opcodes::SYS_FILE_SIZE,
     opcodes::SYS_GET_CONFIGURED_ROOT,
     opcodes::SYS_SET_PRIMARY_ROOT,
-    opcodes::SYS_QUERY_INPUT_EVENT_BITS,
-    opcodes::SYS_QUERY_SCOPED_INPUT_EVENT,
     opcodes::SYS_WAIT_WINDOW_MESSAGE,
-    opcodes::SYS_SET_THREAD_TIMER,
-    opcodes::SYS_WAIT_THREAD_TIMER,
     opcodes::SYS_SET_MAIN_LOOP_WAIT_OVERRIDE,
     opcodes::SYS_SET_EXCLUSIVE_THREAD,
     opcodes::SYS_CONFIGURE_DISPLAY_MODE,
@@ -20252,7 +20253,6 @@ const PARTIAL_IMPLEMENTATION_OPCODES: &[NativeOpcode] = &[
     opcodes::SYS_CONFIGURE_FULLSCREEN_HOTKEYS,
     opcodes::SYS_SET_ASPECT_PRESERVING_SCALING,
     opcodes::SYS_SET_WINDOW_VISIBLE,
-    opcodes::SYS_MINIMIZE_WINDOW,
     opcodes::SYS_SET_WINDOW_TITLE,
     opcodes::SYS_SET_CURSOR_INDEX,
     opcodes::SYS_SET_NATIVE_CLOSE_MODE,

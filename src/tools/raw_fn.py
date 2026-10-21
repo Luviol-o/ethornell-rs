@@ -19,8 +19,8 @@ target = args[0].upper()
 
 text = (ROOT / ("native_all.asm" if asm else "native_all.c")).read_text(errors="replace")
 funcs = {}
-for chunk in re.split(r"\n(?=//==== )", text):
-    m = re.match(r"//==== ([0-9A-F]+) ", chunk)
+for chunk in re.split(r"\n(?=(?://|;)==== )", text):
+    m = re.match(r"(?://|;)==== ([0-9A-F]+) ", chunk)
     if m:
         funcs[m.group(1)] = chunk.rstrip()
 

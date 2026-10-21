@@ -157,15 +157,16 @@ impl RuntimeTraceApi {
                 ethornell_vm::Value::Int(0)
             }
             (0x81, 0x61) => ethornell_vm::Value::Int(self.system_mode_flag),
+            // sub_48CCB0 -> sub_49ADC0 stores dword_566A74.
             (0x81, 0x65) => {
-                let moved = pop_int_value(stack).unwrap_or_default();
-                self.pending_window_minimize = moved != 0;
+                self.window_center_lock = pop_int_value(stack).unwrap_or_default();
                 ethornell_vm::Value::None
             }
+            // The VM owns dword_566A60 (sub_499370) and forwards the flag.
             (0x81, 0x68) => {
                 let value = pop_int_value(stack).unwrap_or_default();
-                let previous = self.window_mode;
-                self.window_mode = value;
+                let previous = i32::from(self.pause_on_deactivate);
+                self.pause_on_deactivate = value != 0;
                 ethornell_vm::Value::Int(previous)
             }
             (0x81, 0x69) => {

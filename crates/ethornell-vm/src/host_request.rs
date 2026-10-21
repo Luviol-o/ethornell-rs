@@ -492,18 +492,15 @@ mod tests {
     }
 
     #[test]
-    fn failed_void_save_is_fatal_instead_of_silently_successful() {
+    fn failed_save_is_ignored_like_the_target() {
+        // sub_48A140 discards sub_4664F0's result: Sys80:78 has no output
+        // and a failed write is not an error.
         let mut vm = Vm::new();
         vm.start(&program(0x80, "sys1", 0x78));
         vm.stack = vec![Value::Int(0), Value::Str("save".into())];
         let report = vm.run_loaded(&mut PolicyHost, &VmRunOptions::default());
-        assert_eq!(report.stop_reason, VmStopReason::Error);
-        assert!(
-            report
-                .recent_trace
-                .iter()
-                .any(|line| line.contains("save commit failed"))
-        );
+        assert_eq!(report.stop_reason, VmStopReason::Completed);
+        assert!(vm.stack.is_empty());
     }
 
     #[test]
@@ -787,10 +784,10 @@ mod tests {
         let mut vm = Vm::new();
         write_encoded(&mut vm, 0x3000, "選択", encoding_rs::SHIFT_JIS);
         let original = vec![
-            Value::Ptr(0x3000),
-            Value::Ptr(0x3000),
-            Value::Ptr(0x3000),
             Value::Ptr(0x4000),
+            Value::Ptr(0x3000),
+            Value::Ptr(0x3000),
+            Value::Ptr(0x3000),
             Value::Ptr(0x3000),
             Value::Int(1),
         ];
@@ -807,10 +804,10 @@ mod tests {
         assert_eq!(
             args,
             vec![
-                Value::Str("選択".into()),
-                Value::Str("選択".into()),
-                Value::Str("選択".into()),
                 Value::Ptr(0x4000),
+                Value::Str("選択".into()),
+                Value::Str("選択".into()),
+                Value::Str("選択".into()),
                 Value::Str("選択".into()),
                 Value::Int(1)
             ]
