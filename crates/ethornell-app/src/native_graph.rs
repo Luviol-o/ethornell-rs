@@ -161,13 +161,9 @@ impl RuntimeTraceApi {
         selector: u16,
         parameter: i32,
     ) -> ethornell_vm::VmResult<()> {
-        if (0..=256).contains(&parameter) {
-            Ok(())
-        } else {
-            Err(ethornell_vm::VmError::Runtime(format!(
-                "Graph90:{selector:02X} parameter {parameter} is outside 0..=256"
-            )))
-        }
+        // sub_498920.
+        let _ = selector;
+        target_checks::effect_level(parameter)
     }
 
     pub(super) fn graph90_require_registered_object(
@@ -201,19 +197,17 @@ impl RuntimeTraceApi {
             return Ok(());
         }
 
-        Err(ethornell_vm::VmError::Runtime(format!(
-            "Graph90:{selector:02X} object #{object} is not registered"
-        )))
+        // sub_443640 found nothing: dword_4E8C10.
+        let _ = selector;
+        Err(ethornell_vm::VmError::Runtime(
+            "無効なオブジェクトハンドルが指定されました".into(),
+        ))
     }
 
     fn graph90_require_priority(selector: u16, priority: i32) -> ethornell_vm::VmResult<()> {
-        if (0..0x1_0000).contains(&priority) {
-            Ok(())
-        } else {
-            Err(ethornell_vm::VmError::Runtime(format!(
-                "Graph90:{selector:02X} priority {priority} is outside 0..=65535"
-            )))
-        }
+        // sub_498720.
+        let _ = selector;
+        target_checks::priority(priority)
     }
 
     fn graph90_set_mask_alpha_recursive(&mut self, object: i32, mask_alpha: i32) {
@@ -2596,14 +2590,12 @@ impl RuntimeTraceApi {
                 // maps that to its target script error; a missing object uses
                 // the separate 255 path. Preserve the fact that this selector
                 // is not a handle-existence query or a successful no-op.
-                let reason = if self.graph_handle_exists(object) {
-                    "target object extension operation is unsupported"
+                let message = if self.graph_handle_exists(object) {
+                    "指定されたディスプレイオブジェクトはイメージキャッシュをサポートしていません"
                 } else {
-                    "target graph object does not exist"
+                    "無効なオブジェクトハンドルが指定されました"
                 };
-                return Some(Err(ethornell_vm::VmError::Runtime(format!(
-                    "Graph90:3F object #{object}: {reason}"
-                ))));
+                return Some(Err(ethornell_vm::VmError::Runtime(message.into())));
             }
             (0x90, 0x40) => {
                 let bitmap = pop_int_value(stack).unwrap_or_default();

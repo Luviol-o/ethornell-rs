@@ -3132,10 +3132,10 @@ impl RuntimeTraceApi {
     /// releasing or changing the source bitmap must not change existing hits.
     fn configure_graph_object_hit_mask(&mut self, object: i32, resource: i32) -> ethornell_vm::VmResult<()> {
         if !self.graph_handle_exists(object) {
-            return Err(ethornell_vm::VmError::Runtime(format!("90:3C: invalid display object {object}")));
+            return Err(ethornell_vm::VmError::Runtime("無効なオブジェクトハンドルが指定されました".into()));
         }
         if matches!(NativeDisplayKind::from_handle(object),NativeDisplayKind::Knob|NativeDisplayKind::Group) {
-            return Err(ethornell_vm::VmError::Runtime("90:3C: display class does not support a hit mask".into()));
+            return Err(ethornell_vm::VmError::Runtime("指定されたディスプレイオブジェクトは仮想オブジェクトです".into()));
         }
         let mask = if resource == -1 {
             None
@@ -3144,7 +3144,7 @@ impl RuntimeTraceApi {
             Some(graph::NativeHitMask { width: 0, height: 0, bits: Vec::new() })
         } else {
             let image = self.graph_bitmap_image(resource)
-                .ok_or_else(|| ethornell_vm::VmError::Runtime(format!("90:3C: unavailable bitmap {resource}")))?;
+                .ok_or_else(|| ethornell_vm::VmError::Runtime(format!("指定されたビットマップ [ {resource} ] は無効です")))?;
             let format = self.bitmap_formats.get(&resource).copied().unwrap_or(2);
             let stride = (image.width as usize + 7) / 8;
             let mut bits = vec![0u8; stride * image.height as usize];
@@ -4756,9 +4756,9 @@ impl RuntimeTraceApi {
         // -65535 (unsupported property) becomes 5 and any other failure 254.
         // sub_47B340 turns every non-zero status into a script error.
         if !self.graph_handle_exists(target) {
-            return Err(ethornell_vm::VmError::Runtime(format!(
-                "Graph90:38 object #{target} does not exist"
-            )));
+            return Err(ethornell_vm::VmError::Runtime(
+                "無効なオブジェクトハンドルが指定されました".into(),
+            ));
         }
         // It samples vtable+0x1C before and after the setter and re-sorts the
         // object (sub_443300) when the key changed (e.g. property 0x8100).
@@ -4768,12 +4768,13 @@ impl RuntimeTraceApi {
             Ok(()) => {}
             Err(5) => {
                 return Err(ethornell_vm::VmError::Runtime(format!(
-                    "Graph90:38 object #{target} does not support property {property:#x}"
+                    "サポートされていないパラメータ番号 [ 0x{property:08X} ] が設定されました"
                 )));
             }
-            Err(status) => {
+            Err(_) => {
                 return Err(ethornell_vm::VmError::Runtime(format!(
-                    "Graph90:38 object #{target} rejected property {property:#x} = ({value}, {extra}) (status {status})"
+                    "設定対象パラメータ [ 0x{property:08X} ] の引数 [ {value} ( 0x{:08X} ) , {extra} ( 0x{:08X} ) ] に誤りがあります",
+                    value as u32, extra as u32
                 )));
             }
         }
@@ -14324,7 +14325,7 @@ mod input_tests {
         for alpha in [-1, 257] {
             let mut args = vec![Value::Int(object), Value::Int(alpha)];
             let error = call_graph(&mut api, 0x90, 0x32, &mut args).unwrap_err();
-            assert!(error.to_string().contains("outside 0..=256"));
+            assert!(error.to_string().contains("無効なエフェクトレベル"));
             assert_eq!(
                 api.graph_object_properties
                     .get(&object)
@@ -14337,7 +14338,7 @@ mod input_tests {
         let missing = 0x7000_1234;
         let mut args = vec![Value::Int(missing), Value::Int(128)];
         let error = call_graph(&mut api, 0x90, 0x32, &mut args).unwrap_err();
-        assert!(error.to_string().contains("is not registered"));
+        assert!(error.to_string().contains("無効なオブジェクトハンドル"));
         assert!(!api.display_tree.contains(missing));
         assert!(!api.graph_object_properties.contains_key(&missing));
     }
@@ -14438,7 +14439,7 @@ mod input_tests {
         let missing = 0x7000_0033;
         let mut args = vec![Value::Int(missing), Value::Int(1), Value::Int(2)];
         let error = call_graph(&mut api, 0x90, 0x33, &mut args).unwrap_err();
-        assert!(error.to_string().contains("is not registered"));
+        assert!(error.to_string().contains("無効なオブジェクトハンドル"));
         assert!(!api.display_tree.contains(missing));
         assert!(!api.graph_object_properties.contains_key(&missing));
     }
@@ -14526,13 +14527,13 @@ mod input_tests {
             for invalid in [-1, 257] {
                 let mut args = vec![Value::Int(parent), Value::Int(invalid)];
                 let error = call_graph(&mut api, 0x90, selector, &mut args).unwrap_err();
-                assert!(error.to_string().contains("outside 0..=256"));
+                assert!(error.to_string().contains("無効なエフェクトレベル"));
             }
 
             let missing = 0x7000_0000 + i32::from(selector);
             let mut args = vec![Value::Int(missing), Value::Int(128)];
             let error = call_graph(&mut api, 0x90, selector, &mut args).unwrap_err();
-            assert!(error.to_string().contains("is not registered"));
+            assert!(error.to_string().contains("無効なオブジェクトハンドル"));
             assert!(!api.display_tree.contains(missing));
             assert!(!api.graph_object_properties.contains_key(&missing));
         }
@@ -14555,14 +14556,14 @@ mod input_tests {
         for invalid in [-1, 0x1_0000] {
             let mut args = vec![Value::Int(first), Value::Int(invalid)];
             let error = call_graph(&mut api, 0x90, 0x3a, &mut args).unwrap_err();
-            assert!(error.to_string().contains("outside 0..=65535"));
+            assert!(error.to_string().contains("無効なプライオリティ"));
         }
         assert_eq!(api.graph_object_properties[&first].native.priority, 5);
 
         let missing = 0x7000_003a;
         let mut args = vec![Value::Int(missing), Value::Int(7)];
         let error = call_graph(&mut api, 0x90, 0x3a, &mut args).unwrap_err();
-        assert!(error.to_string().contains("is not registered"));
+        assert!(error.to_string().contains("無効なオブジェクトハンドル"));
         assert!(!api.display_tree.contains(missing));
         assert!(!api.graph_object_properties.contains_key(&missing));
     }
@@ -14616,7 +14617,7 @@ mod input_tests {
             let missing = 0x7000_0000 + i32::from(selector);
             let mut args = vec![Value::Int(missing), Value::Int(1), Value::Int(2)];
             let error = call_graph(&mut api, 0x90, selector, &mut args).unwrap_err();
-            assert!(error.to_string().contains("is not registered"));
+            assert!(error.to_string().contains("無効なオブジェクトハンドル"));
             assert!(!api.display_tree.contains(missing));
             assert!(!api.graph_object_properties.contains_key(&missing));
         }
@@ -23310,11 +23311,7 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                 let alpha_parameter = call.pop_i32("alpha_parameter")?;
                 let object = call.pop_i32("object")?;
                 call.require_consumed()?;
-                if !(0..=256).contains(&alpha_parameter) {
-                    return Err(ethornell_vm::VmError::Runtime(format!(
-                        "Graph90:32 alpha parameter {alpha_parameter} is outside 0..=256"
-                    )));
-                }
+                target_checks::effect_level(alpha_parameter)?;
                 self.graph90_require_registered_object(0x32, object)?;
                 self.set_graph_object_alpha_recursive(object, alpha_parameter);
                 tracing::debug!(object, alpha_parameter, "GraphSetObjectAlpha");
@@ -24352,6 +24349,8 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                 // not the portable timeline subsystem used by later selectors.
                 let draw_enabled = pop_int_value(stack).unwrap_or_default() != 0;
                 let object = pop_int_value(stack).unwrap_or_default();
+                // sub_47BBE0: an unknown object is fatal.
+                self.graph90_require_registered_object(0x30, object)?;
                 self.set_graph_object_draw_enabled(object, draw_enabled);
                 tracing::info!(object, draw_enabled, "GraphSetObjectDrawEnabled");
             }
@@ -25486,6 +25485,8 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                 let args = pop_args(stack, 2);
                 let enabled = args.first().map(value_to_i32).unwrap_or_default() != 0;
                 let target = args.get(1).map(value_to_i32).unwrap_or_default();
+                // sub_47BC20: an unknown object is fatal.
+                self.graph90_require_registered_object(0x31, target)?;
                 self.set_graph_object_enabled(target, enabled);
                 tracing::debug!(target, enabled, "GraphSetObjectEnabled");
             }
@@ -25503,6 +25504,8 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
             }
             (0x90, 0x3d) => {
                 let object = pop_int_value(stack).unwrap_or_default();
+                // sub_47C040 -> sub_4625D0: an unknown object is fatal.
+                self.graph90_require_registered_object(0x3D, object)?;
                 let result = self.graph_object_pointer_hit(object).unwrap_or_default();
                 tracing::debug!(object, result, mouse = ?self.mouse_pos, "GraphHitTestObjectAtPointer");
                 return Ok(ethornell_vm::Value::Int(result));

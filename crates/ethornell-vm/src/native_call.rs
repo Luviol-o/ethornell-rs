@@ -15726,7 +15726,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_SET_OBJECT_DRAW_ENABLED_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target vtable+4 writes CDspObj+0x14 and propagates the independent draw gate through children.",
+        notes: "BGI 1.622 sub_47BBE0 -> sub_462470: draw enable through vtable+4; unknown object fatal (無効なオブジェクトハンドル).",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_SET_OBJECT_ENABLED,
@@ -15734,7 +15734,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_SET_OBJECT_ENABLED_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target writes CDspObj+0x04 and updates the inherited enabled gate.",
+        notes: "sub_47BC20 -> sub_462480: enable; unknown object fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_SET_OBJECT_POSITION,
@@ -15742,7 +15742,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_SET_OBJECT_POSITION_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_47B1B0 -> sub_4434C0: a missing object is fatal; vtable+44 (base sub_41B1B0 -> sub_41B1D0) stores +0x30/+0x34, rewrites the parent's member offset for the named object (sub_41C130) and moves every member to parent + offset with relink off. Back*/Landscape overrides are handled in graph90_set_specialized_position.",
+        notes: "sub_47BCB0 -> sub_4624B0: position; unknown object fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_SET_OBJECT_MASK_ALPHA,
@@ -15750,7 +15750,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_SET_OBJECT_MASK_ALPHA_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target sub_41B660 writes CDspObj+0xB0 and propagates the mask-alpha value.",
+        notes: "sub_47BD00 -> sub_4624E0: mask alpha; level check then object.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_SET_OBJECT_FIXED_PARAMETER,
@@ -15758,7 +15758,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_SET_OBJECT_FIXED_PARAMETER_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target invokes vtable+80 in mode zero and stores value<<16 at CDspObj+0xB8; it is not scale_x.",
+        notes: "sub_47BD50 -> sub_462500: fixed parameter; level check then object.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_SET_OBJECT_SECONDARY_OFFSET,
@@ -15766,7 +15766,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_SET_OBJECT_SECONDARY_OFFSET_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target sub_41B320 writes CDspObj+0x40/+0x44 and propagates the secondary offset.",
+        notes: "sub_47BDA0 -> sub_462520: secondary offset; unknown object fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_SET_OBJECT_PRIMARY_OFFSET,
@@ -15774,7 +15774,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_SET_OBJECT_PRIMARY_OFFSET_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target vtable+56 writes CDspObj+0x38/+0x3C and propagates the primary offset.",
+        notes: "sub_47BDF0 -> sub_462510: primary offset; unknown object fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_SET_OBJECT_PROPERTY,
@@ -15782,7 +15782,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_SET_OBJECT_PROPERTY_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_47B340 (BGI 1.622 sub_47BE40) pops extra, value, property, object; class SetProperty at vtable+0x5C re-sorts when the key changes; status 255/5/254 are fatal. Ported base CDspObj properties, Sprite mode gates and BackF 0x40000000. Sprite property 0x10 now rebuilds primary bitmap through the shared Graph90:57 path (1.622 sub_428940 -> sub_427670), preserves geometry/display state, clears mode-5/6 secondary transitions, and retains the new bitmap for later reprojection; modes 1/3/4 ignore it without bitmap validation. Open: Sprite 0x100 mode-4 rebuild, mode-6 consumers and stored BackML/BackRPL/BackRTT/BackSTR/Effector values still lack renderer consumers.",
+        notes: "sub_47BE40 -> sub_462570/sub_443C80: property setter; 5 unsupported and 254 bad arguments with the 1.622 texts, 255 unknown object; re-sorts on a key change.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_SET_OBJECT_ALPHA_MULTIPLIER,
@@ -15790,7 +15790,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_SET_OBJECT_ALPHA_MULTIPLIER_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target sub_41B6A0 writes CDspObj+0xB4 and propagates the alpha multiplier.",
+        notes: "sub_47BF10 -> sub_4624F0: alpha multiplier; level then object.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_SET_OBJECT_PRIORITY,
@@ -15798,7 +15798,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_SET_OBJECT_PRIORITY_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target vtable+84 writes CDspObj+0x1C; the object manager reinserts the object when its packed depth changes.",
+        notes: "sub_47BF60 -> sub_4625A0: priority check (sub_498720), 255 unknown object; re-inserted by priority.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_SET_OBJECT_HIT_MASK_BITMAP,
@@ -15806,7 +15806,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_SET_OBJECT_HIT_MASK_BITMAP_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "BGI 1.622 47BFB0 -> 443E10 -> 41BF70 copies a one-bit hit plane; -1 restores rectangle acceptance, -2 installs all-zero coverage. The source bitmap may subsequently be released.",
+        notes: "sub_47BFB0 -> sub_4625B0: hit mask; virtual object (1), invalid bitmap (2), unknown object (255).",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_HIT_TEST_OBJECT_AT_POINTER,
@@ -15814,7 +15814,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_HIT_TEST_OBJECT_AT_POINTER_PARAMETERS,
         returns: "hit-test value",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "BGI 1.622 47C040 -> 4625D0 -> 443F60 tests cursor-relative coordinates through vtable+100; copied masks return the actual 1<<(x&7) bit. Knobs forward to their controlled target.",
+        notes: "sub_47C040 -> sub_4625D0: pointer hit value; unknown object fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_INVOKE_UNSUPPORTED_OBJECT_EXTENSION,
@@ -15822,7 +15822,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_INVOKE_UNSUPPORTED_OBJECT_EXTENSION_PARAMETERS,
         returns: "target script error",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "All CDspObj-derived vtables in this target route slot +108 to sub_41BE90 (0x80000001), which the public handler maps to its target error path.",
+        notes: "sub_47C080 -> sub_462640: image cache extension unsupported by every class (3), unknown object (255).",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH_SET_OBJECT_ALPHA,
@@ -15830,7 +15830,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH_SET_OBJECT_ALPHA_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target sub_497DB0 rejects the alpha parameter as unsigned when it exceeds 256. sub_443460 requires a registered CDspObj, invokes vtable+0x48 to store the unconverted value at +0xAC and propagate it through the child chain, then requests an update when needed.",
+        notes: "sub_47BC60 -> sub_4624A0: transparency check (sub_498920), then object; recursive through members.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_SET_CURRENT_OBJECT_BITMAP,
@@ -20059,6 +20059,9 @@ const PORTABLE_EQUIVALENT_OPCODES: &[NativeOpcode] = &[
     opcodes::GRAPH90_START_SPECIAL_OBJECT_CONTROL,
     opcodes::GRAPH90_START_SPLINE_OBJECT_CONTROL,
     opcodes::GRAPH90_START_SHAKE_OBJECT_CONTROL,
+    opcodes::GRAPH90_SET_OBJECT_PROPERTY,
+    opcodes::GRAPH90_SET_OBJECT_HIT_MASK_BITMAP,
+    opcodes::GRAPH90_HIT_TEST_OBJECT_AT_POINTER,
 ];
 
 const PARTIAL_IMPLEMENTATION_OPCODES: &[NativeOpcode] = &[
@@ -20165,9 +20168,6 @@ const PARTIAL_IMPLEMENTATION_OPCODES: &[NativeOpcode] = &[
     opcodes::GRAPH91_SET_MULTILAYER_LAYER_SOURCE_VELOCITY,
     opcodes::GRAPH91_SET_MULTILAYER_LAYER_TRANSFORM_VELOCITY,
     opcodes::GRAPH90_SET_DISPLAY_OPTIONS,
-    opcodes::GRAPH90_SET_OBJECT_PROPERTY,
-    opcodes::GRAPH90_SET_OBJECT_HIT_MASK_BITMAP,
-    opcodes::GRAPH90_HIT_TEST_OBJECT_AT_POINTER,
     opcodes::GRAPH90_SET_CURRENT_OBJECT_BITMAP,
     opcodes::GRAPH90_CONFIGURE_CURRENT_OBJECT_DUAL_BITMAP,
     opcodes::GRAPH90_CONFIGURE_CURRENT_OBJECT_QUAD_BITMAP,
