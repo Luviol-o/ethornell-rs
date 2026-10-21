@@ -16046,7 +16046,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_CREATE_FILTER_OBJECT_PARAMETERS,
         returns: "0x90000000-tagged filter handle",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target sub_462560 allocates one of eight CDspObjFilter slots and encodes the reusable slot as 0x90000000 | index. The concrete constructor uses CDspObj sort_class=7 and a separate per-registry monotonic construction counter for CDspObj+0x20, so release/recreate does not reuse the native sort index.",
+        notes: "BGI 1.622 sub_47DDF0 -> sub_462AC0: first of 8 filter slots; none left is fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_RELEASE_FILTER_OBJECT,
@@ -16054,7 +16054,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_RELEASE_FILTER_OBJECT_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target sub_47D320/sub_462570 releases a CDspObjFilter. The prior GraphObjectUpdate interpretation was incorrect.",
+        notes: "sub_47DE20 -> sub_462AD0: release; unknown filter fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_SET_FILTER_ENABLED,
@@ -16062,7 +16062,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_SET_FILTER_ENABLED_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target sub_47D350/sub_4625A0 writes the filter enabled gate.",
+        notes: "sub_47DE50 -> sub_462B00: enable; unknown filter fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_CONFIGURE_FILTER,
@@ -16070,7 +16070,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_CONFIGURE_FILTER_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "47DE90 ->43F4D0 ->420F90: mode0 color filter at its display-chain position, native alpha/mask/multiplier applied exactly once.",
+        notes: "sub_47DE90 -> sub_462AE0(mask -1): priority and transparency checks, unknown filter fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_CONFIGURE_FILTER_WITH_MASK,
@@ -16078,7 +16078,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_CONFIGURE_FILTER_WITH_MASK_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "47DF00 ->43F4D0 ->420E40: second operand selects one of four color filters, not reserved. Optional screen-sized format3 mask overrides mode; generation is retained.",
+        notes: "sub_47DF00 -> sub_462AE0: masked filter; mask missing (1), not grey-scale (2), not screen size (3), unknown filter (255).",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_CREATE_MAP_OBJECT,
@@ -16086,7 +16086,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_CREATE_MAP_OBJECT_PARAMETERS,
         returns: "0xA0000000-tagged map handle",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target sub_462680 allocates one of eight CDspObjMap slots and encodes the reusable slot as 0xA0000000 | index. sub_423920 constructs the object with CDspObj sort_class=1 and the manager supplies a separate per-registry monotonic construction counter for CDspObj+0x20; that native sort index is not the reusable handle slot.",
+        notes: "sub_47E170 -> sub_462BC0: first of 8 map slots; none left is fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_RELEASE_MAP_OBJECT,
@@ -16094,7 +16094,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_RELEASE_MAP_OBJECT_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target sub_47D6A0/sub_462690 releases a CDspObjMap slot.",
+        notes: "sub_47E1A0: release; unknown map fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_SET_MAP_ENABLED,
@@ -16102,7 +16102,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_SET_MAP_ENABLED_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target sub_47D6D0/sub_4626A0 writes the map enabled gate.",
+        notes: "sub_47E1D0: enable; unknown map fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_CONFIGURE_MAP_OBJECT,
@@ -16110,7 +16110,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_CONFIGURE_MAP_OBJECT_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "47E210 ->423E20 ->424470: live atlas descriptors and generation, private retained tile bitmap, position/blend/alpha/priority.",
+        notes: "sub_47E210 -> sub_462C10: priority, transparency, mode, bitmap checks; unknown map, atlas unfit (1).",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_INITIALIZE_MAP_GRID,
@@ -16118,7 +16118,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_INITIALIZE_MAP_GRID_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "47E320 ->423E70: tile width/height1..256, total visible extent<=1024x768; allocates two u16 grids including extra row/column, retains uploaded source.",
+        notes: "sub_47E320 -> sub_43FE30/sub_423E70: chip size 1..=256 (3) before view size within 1024x768 (2).",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_UPLOAD_MAP_TILE_DATA,
@@ -16134,7 +16134,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_SET_MAP_VIEWPORT_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "47E4A0 ->4240A0: copied/wrapped visible source tile grid and sub-tile pixel offsets; wrap-only changes do not rebuild.",
+        notes: "sub_47E4A0 -> sub_43FF10: viewport (map, x, y, sub-x, sub-y, wrap); invalid coordinates (5), unknown map (255).",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_REPLACE_MAP_TILE_ID,
@@ -16142,7 +16142,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_REPLACE_MAP_TILE_ID_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "47E570 ->424240: invalidates matching cache IDs using complemented desired IDs; preserves extra desired cursor advance on matches. Native overread is safely zero in the port.",
+        notes: "sub_47E570 -> sub_462C90: uninitialised map is fatal, unknown map fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_CREATE_WINDOW_OBJECT,
@@ -20078,6 +20078,12 @@ const PORTABLE_EQUIVALENT_OPCODES: &[NativeOpcode] = &[
     opcodes::GRAPH90_CONFIGURE_SPRITE_VM_EFFECT,
     opcodes::GRAPH90_CONFIGURE_SPRITE_TRANSFORM_MODE5,
     opcodes::GRAPH90_CONFIGURE_SPRITE_TRANSFORM_MODE6,
+    opcodes::GRAPH90_CONFIGURE_FILTER,
+    opcodes::GRAPH90_CONFIGURE_FILTER_WITH_MASK,
+    opcodes::GRAPH90_CONFIGURE_MAP_OBJECT,
+    opcodes::GRAPH90_INITIALIZE_MAP_GRID,
+    opcodes::GRAPH90_SET_MAP_VIEWPORT,
+    opcodes::GRAPH90_REPLACE_MAP_TILE_ID,
 ];
 
 const PARTIAL_IMPLEMENTATION_OPCODES: &[NativeOpcode] = &[
@@ -20184,13 +20190,7 @@ const PARTIAL_IMPLEMENTATION_OPCODES: &[NativeOpcode] = &[
     opcodes::GRAPH91_SET_MULTILAYER_LAYER_SOURCE_VELOCITY,
     opcodes::GRAPH91_SET_MULTILAYER_LAYER_TRANSFORM_VELOCITY,
     opcodes::GRAPH90_SET_DISPLAY_OPTIONS,
-    opcodes::GRAPH90_CONFIGURE_FILTER,
-    opcodes::GRAPH90_CONFIGURE_FILTER_WITH_MASK,
-    opcodes::GRAPH90_CONFIGURE_MAP_OBJECT,
-    opcodes::GRAPH90_INITIALIZE_MAP_GRID,
     opcodes::GRAPH90_UPLOAD_MAP_TILE_DATA,
-    opcodes::GRAPH90_SET_MAP_VIEWPORT,
-    opcodes::GRAPH90_REPLACE_MAP_TILE_ID,
     opcodes::GRAPH90_START_WINDOW_MESSAGE_PROCEDURE,
     opcodes::GRAPH90_CONFIGURE_MESSAGE_CARET_FRAMES,
     opcodes::GRAPH_SET_MESSAGE_START_DELAY,

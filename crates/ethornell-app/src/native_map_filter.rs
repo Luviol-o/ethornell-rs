@@ -36,34 +36,30 @@ impl RuntimeTraceApi {
         id: u16,
         a: &[i32],
     ) -> ethornell_vm::VmResult<()> {
-        let fail =
-            |message: &str| ethornell_vm::VmError::Runtime(format!("90:{id:02X}: {message}"));
+        let err = |message: String| ethornell_vm::VmError::Runtime(message);
         let object = a[0];
-        if self.display_tree.kind(object) != Some(NativeDisplayKind::Map) {
-            return Err(fail("invalid map object"));
+        // sub_47E210: priority, transparency, blend mode, bitmap checks
+        // come before the map lookup.
+        if id == 0x75 {
+            target_checks::priority(a[6])?;
+            target_checks::effect_level(a[5])?;
+            target_checks::effect_mode(a[4])?;
+            target_checks::bitmap(a[3])?;
         }
+        if self.display_tree.kind(object) != Some(NativeDisplayKind::Map) {
+            return Err(err("無効なマップハンドルが指定されました".into()));
+        }
+        let unfit = || err(format!("ビットマップ [ {} ] は指定されたマップオブジェクトに適合しません", a[3]));
         match id {
             0x75 => {
-                if a[5] as u32 > 256
-                    || a[6] as u32 >= 65536
-                    || !matches!(a[4],0..=9|0x20..=0x27|0x40|0x41|0x80|0xc0|0xc1|0xf0|0xff)
-                {
-                    return Err(fail("invalid alpha, priority or blend mode"));
-                }
-                let info = self
-                    .query_bitmap_info(a[3])
-                    .ok_or_else(|| fail("missing tile atlas"))?;
-                let generation = self
-                    .graph_resources
-                    .get(&a[3])
-                    .ok_or_else(|| fail("missing tile atlas"))?
-                    .generation;
+                let info = self.query_bitmap_info(a[3]).ok_or_else(unfit)?;
+                let generation = self.graph_resources.get(&a[3]).ok_or_else(unfit)?.generation;
                 let map = self.native_maps.entry(object).or_default();
                 let Some([_, _, cw, ch]) = map.grid else {
-                    return Err(fail("map grid is not initialized"));
+                    return Err(unfit());
                 };
                 if info.width / cw == 0 || info.height / ch == 0 {
-                    return Err(fail("atlas contains no whole tiles"));
+                    return Err(unfit());
                 }
                 // 409200 allocates a new private bitmap with the atlas format.
                 let [cols, rows, _, _] = map.grid.unwrap();
@@ -86,10 +82,10 @@ impl RuntimeTraceApi {
             0x76 => {
                 let (cols, rows, cw, ch) = (a[1] as u32, a[2] as u32, a[3] as u32, a[4] as u32);
                 if cw.wrapping_sub(1) > 255 || ch.wrapping_sub(1) > 255 {
-                    return Err(fail("tile dimensions must be 1..256"));
+                    return Err(err(format!("無効なチップサイズ [ {} , {} ] が指定されました", a[3], a[4])));
                 }
                 if cols == 0 || rows == 0 || cols > 1024 / cw || rows > 768 / ch {
-                    return Err(fail("grid exceeds native 1024x768 limit"));
+                    return Err(err(format!("無効なビューサイズ [ {} , {} ] が指定されました", a[1], a[2])));
                 }
                 let map = self.native_maps.entry(object).or_default();
                 map.grid = Some([cols, rows, cw, ch]);
@@ -103,15 +99,16 @@ impl RuntimeTraceApi {
             }
             0x79 => {
                 let map = self.native_maps.entry(object).or_default();
+                let invalid = || err("無効なマップ表示座標が指定されました".into());
                 let Some([cols, rows, cw, ch]) = map.grid else {
-                    return Err(fail("map grid is not initialized"));
+                    return Err(invalid());
                 };
                 let Some(([sw, sh], data)) = &map.source else {
-                    return Err(fail("map data has not been uploaded"));
+                    return Err(invalid());
                 };
                 let [sx, sy, ox, oy] = [a[1] as u32, a[2] as u32, a[3] as u32, a[4] as u32];
                 if sx >= *sw || sy >= *sh || ox >= cw || oy >= ch {
-                    return Err(fail("viewport origin or sub-tile offset is out of range"));
+                    return Err(invalid());
                 }
                 // Wrap is consulted only when the source cell changes. Changing
                 // it alone preserves the old cached secondary grid (4240A0).
@@ -146,7 +143,7 @@ impl RuntimeTraceApi {
             0x7a => {
                 let map = self.native_maps.entry(object).or_default();
                 if map.grid.is_none() {
-                    return Err(fail("map grid is not initialized"));
+                    return Err(err("指定されたオブジェクトは初期化が完了していません".into()));
                 }
                 // 424278..424288 advances ESI twice on a match. The
                 // native overread past the allocation is defined as zero here.
@@ -311,37 +308,34 @@ impl RuntimeTraceApi {
         id: u16,
         a: &[i32],
     ) -> ethornell_vm::VmResult<()> {
-        let fail =
-            |message: &str| ethornell_vm::VmError::Runtime(format!("90:{id:02X}: {message}"));
+        // sub_47DE90 / sub_47DF00: priority and transparency checks, then
+        // sub_462AE0: unknown filter (255), mask missing (1), not grey-scale
+        // (2), not screen-sized (3).
+        let err = |message: String| ethornell_vm::VmError::Runtime(message);
         let object = a[0];
-        if self.display_tree.kind(object) != Some(NativeDisplayKind::Filter) {
-            return Err(fail("invalid filter object"));
-        }
         let (mode, color, mask, shift, alpha, priority) = if id == 0x65 {
             (0, a[1], -1, 0, a[2], a[3])
         } else {
             (a[1], a[2], a[3], a[4], a[5], a[6])
         };
-        if alpha as u32 > 256 || priority as u32 >= 65536 {
-            return Err(fail("invalid alpha or priority"));
+        target_checks::priority(priority)?;
+        target_checks::effect_level(alpha)?;
+        if self.display_tree.kind(object) != Some(NativeDisplayKind::Filter) {
+            return Err(err("無効なフィルターハンドルが指定されました".into()));
         }
         let (w, h) = snapshot::runtime_frame_size(self);
+        let missing = || err(format!("無効なビットマップ番号 [ {mask} ] が指定されました"));
         let mask = if mask == -1 {
             None
         } else {
-            let info = self
-                .query_bitmap_info(mask)
-                .ok_or_else(|| fail("mask bitmap does not exist"))?;
-            if info.format != 3 || info.width != w || info.height != h {
-                return Err(fail("mask must be a screen-sized gray bitmap"));
+            let info = self.query_bitmap_info(mask).ok_or_else(missing)?;
+            if info.format != 3 {
+                return Err(err(format!("指定されたビットマップ [ {mask} ] はグレイスケールではありません")));
             }
-            Some((
-                mask,
-                self.graph_resources
-                    .get(&mask)
-                    .ok_or_else(|| fail("mask bitmap does not exist"))?
-                    .generation,
-            ))
+            if info.width != w || info.height != h {
+                return Err(err(format!("指定されたビットマップ [ {mask} ] はスクリーンサイズではありません")));
+            }
+            Some((mask, self.graph_resources.get(&mask).ok_or_else(missing)?.generation))
         };
         self.graph90_set_common_state(object, None, None, Some(alpha), Some(priority));
         self.native_filters.insert(

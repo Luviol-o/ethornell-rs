@@ -3971,12 +3971,15 @@ impl RuntimeTraceApi {
                     NativeDisplayKind::Filter,
                     7,
                 );
-                if handle != 0 {
-                    self.graph_object_properties
-                        .entry(handle)
-                        .or_default()
-                        .blend_mode = 192;
+                if handle == 0 {
+                    return Some(Err(ethornell_vm::VmError::Runtime(
+                        "これ以上、フィルターオブジェクトを生成する事は出来ません".into(),
+                    )));
                 }
+                self.graph_object_properties
+                    .entry(handle)
+                    .or_default()
+                    .blend_mode = 192;
                 ethornell_vm::Value::Int(handle)
             }
             (0x90, 0x61) => {
@@ -3987,11 +3990,22 @@ impl RuntimeTraceApi {
                     8,
                     GRAPH90_CLASS_FILTER,
                 );
-                tracing::info!(handle, released, "GraphReleaseFilterObject");
+                if !released {
+                    return Some(Err(ethornell_vm::VmError::Runtime(
+                        "無効なフィルターハンドルが指定されました".into(),
+                    )));
+                }
                 ethornell_vm::Value::None
             }
             (0x90, 0x64) => {
                 let args = Self::graph90_source_args(stack, 2);
+                if let [handle, _] = args.as_slice()
+                    && !self.graph90_object_matches(*handle, GRAPH90_FILTER_TAG, 8, GRAPH90_CLASS_FILTER)
+                {
+                    return Some(Err(ethornell_vm::VmError::Runtime(
+                        "無効なフィルターハンドルが指定されました".into(),
+                    )));
+                }
                 if let [handle, enabled] = args.as_slice()
                     && self.graph90_object_matches(
                         *handle,
@@ -4019,17 +4033,33 @@ impl RuntimeTraceApi {
                     NativeDisplayKind::Map,
                     1,
                 );
+                if handle == 0 {
+                    return Some(Err(ethornell_vm::VmError::Runtime(
+                        "これ以上、マップオブジェクトを生成する事は出来ません".into(),
+                    )));
+                }
                 ethornell_vm::Value::Int(handle)
             }
             (0x90, 0x71) => {
                 let handle = pop_int_value(stack).unwrap_or_default();
                 let released =
                     self.graph90_release_object(handle, GRAPH90_MAP_TAG, 8, GRAPH90_CLASS_MAP);
-                tracing::info!(handle, released, "GraphReleaseMapObject");
+                if !released {
+                    return Some(Err(ethornell_vm::VmError::Runtime(
+                        "無効なマップハンドルが指定されました".into(),
+                    )));
+                }
                 ethornell_vm::Value::None
             }
             (0x90, 0x74) => {
                 let args = Self::graph90_source_args(stack, 2);
+                if let [handle, _] = args.as_slice()
+                    && !self.graph90_object_matches(*handle, GRAPH90_MAP_TAG, 8, GRAPH90_CLASS_MAP)
+                {
+                    return Some(Err(ethornell_vm::VmError::Runtime(
+                        "無効なマップハンドルが指定されました".into(),
+                    )));
+                }
                 if let [handle, enabled] = args.as_slice()
                     && self.graph90_object_matches(*handle, GRAPH90_MAP_TAG, 8, GRAPH90_CLASS_MAP)
                 {
