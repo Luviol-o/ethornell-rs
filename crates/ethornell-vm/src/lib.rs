@@ -3427,6 +3427,21 @@ impl Vm {
             } => {
                 self.execute_qword_arithmetic(code)?;
             }
+            BpOpcode::Known {
+                name: "fixed_mul" | "fixed_div",
+                ..
+            } => {
+                let value = self.execute_fixed_arithmetic(code)?;
+                self.push_value(Value::Int(value));
+            }
+            BpOpcode::Known {
+                name:
+                    "vec4_add" | "vec4_sub" | "vec4_mul" | "vec4_div" | "vec3_normalize"
+                    | "vec4_scale" | "vec4_div_scalar",
+                ..
+            } => {
+                self.execute_fixed_vector(code)?;
+            }
             BpOpcode::Known { name: "memcpy", .. } => {
                 let size = self.pop_int()?.max(0) as usize;
                 let src = self.pop_ptr()?;

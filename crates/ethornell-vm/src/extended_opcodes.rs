@@ -35,6 +35,85 @@ impl Vm {
         self.write_i64(destination, result)
     }
 
+    /// 0x56/0x57 (sub_4747C0, sub_4747F0): the first value popped is the
+    /// right operand.
+    pub(super) fn execute_fixed_arithmetic(&mut self, opcode: u8) -> VmResult<i32> {
+        let right = self.pop_int()?;
+        let left = self.pop_int()?;
+        Ok(match opcode {
+            0x56 => fixed_mul(left, right),
+            0x57 if right == 0 => 0,
+            0x57 => float_to_fixed(fixed_to_float(left) / fixed_to_float(right)),
+            _ => return Err(VmError::UnsupportedInstruction(opcode)),
+        })
+    }
+
+    /// 0x58..=0x5F (sub_474890..sub_474B40): SSE helpers over four 16.16
+    /// lanes. Pointers pop right operand first and the destination last.
+    pub(super) fn execute_fixed_vector(&mut self, opcode: u8) -> VmResult<()> {
+        let result = match opcode {
+            0x58..=0x5b => {
+                let right = self.pop_ptr()?;
+                let left = self.pop_ptr()?;
+                let destination = self.pop_ptr()?;
+                let (left, right) = (self.read_fixed4(left)?, self.read_fixed4(right)?);
+                let lanes = std::array::from_fn(|lane| {
+                    let (left, right) = (left[lane], right[lane]);
+                    match opcode {
+                        0x58 => left.wrapping_add(right),
+                        0x59 => left.wrapping_sub(right),
+                        0x5a => fixed_mul(left, right),
+                        _ if right == 0 => 0,
+                        _ => float_to_fixed(fixed_to_float(left) / fixed_to_float(right)),
+                    }
+                });
+                (destination, lanes)
+            }
+            0x5d => {
+                let source = self.pop_ptr()?;
+                let destination = self.pop_ptr()?;
+                let [x, y, z, _] = self.read_fixed4(source)?.map(fixed_to_float);
+                // sub_4558C0 sums z² + y² + x² and returns zero for a zero
+                // vector; w becomes the length.
+                let squared = z * z + y * y + x * x;
+                let lanes = if squared > 0.0 {
+                    let inverse = 1.0 / squared.sqrt();
+                    [x * inverse, y * inverse, z * inverse, squared * inverse].map(float_to_fixed)
+                } else {
+                    [0; 4]
+                };
+                (destination, lanes)
+            }
+            0x5e | 0x5f => {
+                let scalar = self.pop_int()?;
+                let source = self.pop_ptr()?;
+                let destination = self.pop_ptr()?;
+                let source = self.read_fixed4(source)?;
+                let lanes = match opcode {
+                    0x5e => source.map(|lane| fixed_mul(lane, scalar)),
+                    _ if scalar == 0 => [0; 4],
+                    _ => source
+                        .map(|lane| float_to_fixed(fixed_to_float(lane) / fixed_to_float(scalar))),
+                };
+                (destination, lanes)
+            }
+            _ => return Err(VmError::UnsupportedInstruction(opcode)),
+        };
+        let (destination, lanes) = result;
+        for (index, lane) in lanes.into_iter().enumerate() {
+            self.write_int(destination.wrapping_add(index as u32 * 4), 2, lane as u32)?;
+        }
+        Ok(())
+    }
+
+    fn read_fixed4(&self, pointer: u32) -> VmResult<[i32; 4]> {
+        let mut lanes = [0; 4];
+        for (index, lane) in lanes.iter_mut().enumerate() {
+            *lane = self.read_int(pointer.wrapping_add(index as u32 * 4), 2)? as i32;
+        }
+        Ok(lanes)
+    }
+
     pub(super) fn execute_quote_string(&mut self) -> VmResult<()> {
         let delimiter = char::from(self.pop_int()? as u8);
         let source = self.pop_string_lossy()?;
@@ -196,6 +275,35 @@ impl Vm {
     }
 }
 
+fn fixed_mul(left: i32, right: i32) -> i32 {
+    ((i64::from(left) * i64::from(right)) >> 16) as i32
+}
+
+fn fixed_to_float(value: i32) -> f32 {
+    value as f32 * (1.0 / 65_536.0)
+}
+
+/// sub_455940: round to the nearest 16.16 value (ties to even, MXCSR
+/// rounding cleared) and snap a fraction within 0x40 of an integer to it.
+/// Out-of-range and NaN lanes become the cvtps2dq indefinite value.
+fn float_to_fixed(value: f32) -> i32 {
+    let scaled = (value * 65_536.0).round_ties_even();
+    let raw = if scaled >= -2_147_483_648.0 && scaled < 2_147_483_648.0 {
+        scaled as i32
+    } else {
+        i32::MIN
+    };
+    let whole = raw & !0xffff;
+    let fraction = raw.wrapping_sub(whole);
+    if fraction > 0xffc0 {
+        whole.wrapping_add(0x10000)
+    } else if fraction < 0x40 {
+        whole
+    } else {
+        raw
+    }
+}
+
 fn legacy_3d_abi(id: u8) -> Option<(usize, bool)> {
     Some(match id {
         0x00 => (3, true),
@@ -225,6 +333,8 @@ fn legacy_3d_abi(id: u8) -> Option<(usize, bool)> {
         0x75 => (7, true),
         0x78 => (5, true),
         0x79 => (4, true),
+        // sub_4787C0 pops five integers and one pointer.
+        0x7a => (6, true),
         0x80 => (1, false),
         0x81 => (1, true),
         0x84 | 0x87 | 0x8c => (2, true),
@@ -237,6 +347,87 @@ fn legacy_3d_abi(id: u8) -> Option<(usize, bool)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn write_fixed4(vm: &mut Vm, pointer: u32, lanes: [i32; 4]) {
+        for (index, lane) in lanes.into_iter().enumerate() {
+            vm.write_int(pointer + index as u32 * 4, 2, lane as u32)
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn fixed_arithmetic_pops_the_right_operand_first() {
+        let mut vm = Vm::new();
+        vm.stack.extend([Value::Int(3 << 16), Value::Int(0x8000)]);
+        assert_eq!(vm.execute_fixed_arithmetic(0x56).unwrap(), 0x18000);
+        vm.stack.extend([Value::Int(3 << 16), Value::Int(2 << 16)]);
+        assert_eq!(vm.execute_fixed_arithmetic(0x57).unwrap(), 0x18000);
+        vm.stack.extend([Value::Int(3 << 16), Value::Int(0)]);
+        assert_eq!(vm.execute_fixed_arithmetic(0x57).unwrap(), 0);
+    }
+
+    #[test]
+    fn fixed_vectors_follow_the_target_lane_rules() {
+        let mut vm = Vm::new();
+        let (dst, left, right) = (0x1200_0100, 0x1200_0110, 0x1200_0120);
+        write_fixed4(&mut vm, left, [6 << 16, 1 << 16, -(4 << 16), 5]);
+        write_fixed4(&mut vm, right, [2 << 16, 0, 2 << 16, 7]);
+
+        vm.stack
+            .extend([Value::Ptr(dst), Value::Ptr(left), Value::Ptr(right)]);
+        vm.execute_fixed_vector(0x59).unwrap();
+        assert_eq!(
+            vm.read_fixed4(dst).unwrap(),
+            [4 << 16, 1 << 16, -(6 << 16), -2]
+        );
+
+        vm.stack
+            .extend([Value::Ptr(dst), Value::Ptr(left), Value::Ptr(right)]);
+        vm.execute_fixed_vector(0x5b).unwrap();
+        assert_eq!(
+            vm.read_fixed4(dst).unwrap(),
+            [3 << 16, 0, -(2 << 16), float_to_fixed(5.0 / 7.0)]
+        );
+
+        vm.stack
+            .extend([Value::Ptr(dst), Value::Ptr(left), Value::Int(0x8000)]);
+        vm.execute_fixed_vector(0x5e).unwrap();
+        assert_eq!(
+            vm.read_fixed4(dst).unwrap(),
+            [3 << 16, 0x8000, -(2 << 16), 2]
+        );
+
+        vm.stack
+            .extend([Value::Ptr(dst), Value::Ptr(left), Value::Int(0)]);
+        vm.execute_fixed_vector(0x5f).unwrap();
+        assert_eq!(vm.read_fixed4(dst).unwrap(), [0; 4]);
+    }
+
+    #[test]
+    fn vec3_normalize_stores_the_length_in_w() {
+        let mut vm = Vm::new();
+        let (dst, source) = (0x1200_0100, 0x1200_0110);
+        write_fixed4(&mut vm, source, [3 << 16, 0, 4 << 16, 9 << 16]);
+        vm.stack.extend([Value::Ptr(dst), Value::Ptr(source)]);
+        vm.execute_fixed_vector(0x5d).unwrap();
+        assert_eq!(
+            vm.read_fixed4(dst).unwrap(),
+            [float_to_fixed(0.6), 0, float_to_fixed(0.8), 5 << 16]
+        );
+
+        write_fixed4(&mut vm, source, [0, 0, 0, 1 << 16]);
+        vm.stack.extend([Value::Ptr(dst), Value::Ptr(source)]);
+        vm.execute_fixed_vector(0x5d).unwrap();
+        assert_eq!(vm.read_fixed4(dst).unwrap(), [0; 4]);
+    }
+
+    #[test]
+    fn float_to_fixed_snaps_near_integers() {
+        assert_eq!(float_to_fixed(1.0 + 0x3f as f32 / 65_536.0), 1 << 16);
+        assert_eq!(float_to_fixed(2.0 - 0x3f as f32 / 65_536.0), 2 << 16);
+        assert_eq!(float_to_fixed(1.5), 0x18000);
+        assert_eq!(float_to_fixed(f32::NAN), i32::MIN);
+    }
 
     #[test]
     fn qword_arithmetic_uses_native_pointer_operands() {
