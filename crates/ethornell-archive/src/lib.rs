@@ -181,6 +181,17 @@ fn zeroed_buffer(size: usize) -> Result<Vec<u8>> {
     Ok(data)
 }
 
+/// An open archive: seekable bytes of a known length.
+pub trait ArchiveSource: Read + Seek + Send + std::fmt::Debug {
+    fn byte_len(&mut self) -> std::io::Result<u64>;
+}
+
+impl ArchiveSource for fs::File {
+    fn byte_len(&mut self) -> std::io::Result<u64> {
+        Ok(self.metadata()?.len())
+    }
+}
+
 #[derive(Debug)]
 struct ResourceManagerInner {
     limits: ResourceBudget,
@@ -197,7 +208,7 @@ struct ResourceManagerInner {
     /// Runtime archive handles. Resource reads are overwhelmingly random seeks
     /// into a small, stable set of ARC files; reopening the archive for every
     /// BP/image/audio entry is substantially more expensive than the seek/read.
-    archive_files: Vec<Mutex<fs::File>>,
+    archive_files: Vec<Mutex<Box<dyn ArchiveSource>>>,
     /// Search state the scripts configure at run time (Sys80:36/37/38).
     search: RwLock<RuntimeSearch>,
 }
@@ -234,6 +245,20 @@ impl ResourceManager {
         files: Vec<(PathBuf, fs::File)>,
         limits: ResourceBudget,
     ) -> Result<Self> {
+        let sources = files
+            .into_iter()
+            .map(|(path, file)| (path, Box::new(file) as Box<dyn ArchiveSource>))
+            .collect();
+        Self::from_authorized_sources_with_limits(root, sources, limits)
+    }
+
+    /// Like `from_authorized_files_with_limits`, for archives that are not
+    /// host files (the web build reads the picked folder through JavaScript).
+    pub fn from_authorized_sources_with_limits(
+        root: PathBuf,
+        files: Vec<(PathBuf, Box<dyn ArchiveSource>)>,
+        limits: ResourceBudget,
+    ) -> Result<Self> {
         check_limit(
             files.len() as u64,
             limits.max_archives as u64,
@@ -245,7 +270,7 @@ impl ResourceManager {
         for (path, mut file) in files {
             file.seek(SeekFrom::Start(0))?;
             let mut magic = [0u8; 12];
-            if file.metadata()?.len() < magic.len() as u64 {
+            if file.byte_len()? < magic.len() as u64 {
                 continue;
             }
             file.read_exact(&mut magic)?;
@@ -253,7 +278,7 @@ impl ResourceManager {
             if format == ArchiveFormat::Unknown {
                 continue;
             }
-            let index = read_index_from_file(&path, &mut file, format, &limits, &mut usage)?;
+            let index = read_index_from_file(&path, file.as_mut(), format, &limits, &mut usage)?;
             archives.push(index);
             archive_files.push(Mutex::new(file));
         }
@@ -509,7 +534,7 @@ impl ResourceManager {
         let actual=archive.entries.iter().find(|e|e.name==entry.entry_name && e.packed_size==entry.packed_size).ok_or_else(||EthornellError::Parse("entry not indexed".into()))?;
         checked_buffer_size(actual.packed_size,self.inner.limits.max_packed_bytes,"packed bytes")?;
         let mut file=self.inner.archive_files[index].lock().map_err(|_|EthornellError::Other("archive handle poisoned".into()))?;
-        if actual.offset.checked_add(actual.packed_size).is_none_or(|end|end>file.metadata().map(|m|m.len()).unwrap_or(0)) {return Err(EthornellError::Parse("entry range invalid".into()));}
+        if actual.offset.checked_add(actual.packed_size).is_none_or(|end|end>file.byte_len().unwrap_or(0)) {return Err(EthornellError::Parse("entry range invalid".into()));}
         file.seek(SeekFrom::Start(actual.offset))?;let mut header=[0u8;32];let count=actual.packed_size.min(32)as usize;file.read_exact(&mut header[..count])?;
         Ok(check_decoded_size(&header[..count],actual.packed_size,&self.inner.limits)? as u64)
     }
@@ -580,7 +605,7 @@ impl ResourceManager {
                 archive.path.display()
             ))
         })?;
-        read_entry_from_file(&mut file, entry, &self.inner.limits, decoded)
+        read_entry_from_file(&mut **file, entry, &self.inner.limits, decoded)
     }
 
     fn read_locator_decoded(&self, archive_index: usize, entry_index: usize) -> Result<Vec<u8>> {
@@ -751,9 +776,9 @@ pub fn read_archive_index_with_limits(path: &Path, limits: ResourceBudget) -> Re
     read_index_from_file(path, &mut file, format, &limits, &mut IndexUsage::default())
 }
 
-fn read_index_from_file(
+fn read_index_from_file<R: ArchiveSource + ?Sized>(
     path: &Path,
-    file: &mut fs::File,
+    file: &mut R,
     format: ArchiveFormat,
     limits: &ResourceBudget,
     usage: &mut IndexUsage,
@@ -775,7 +800,7 @@ fn read_index_from_file(
         .checked_mul(record_size)
         .ok_or_else(overflow)?;
     let base_offset = 0x10u64.checked_add(disk_bytes).ok_or_else(overflow)?;
-    let file_len = file.metadata()?.len();
+    let file_len = file.byte_len()?;
     // Reject bogus counts in a short file before reserving the entry vector.
     if base_offset > file_len {
         return Err(EthornellError::Parse(
@@ -847,7 +872,7 @@ fn read_index_from_file(
     })
 }
 
-fn read_name(file: &mut fs::File, len: usize) -> Result<String> {
+fn read_name<R: ArchiveSource + ?Sized>(file: &mut R, len: usize) -> Result<String> {
     let mut bytes = vec![0u8; len];
     file.read_exact(&mut bytes)?;
     let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
@@ -963,8 +988,8 @@ fn check_decoded_size(header: &[u8], packed_size: u64, limits: &ResourceBudget) 
     checked_buffer_size(decoded_size, limit, "decoded bytes")
 }
 
-fn read_entry_from_file(
-    file: &mut fs::File,
+fn read_entry_from_file<R: ArchiveSource + ?Sized>(
+    file: &mut R,
     entry: &ArchiveEntry,
     limits: &ResourceBudget,
     decoded: bool,
@@ -974,7 +999,7 @@ fn read_entry_from_file(
         .offset
         .checked_add(entry.packed_size)
         .ok_or_else(|| EthornellError::Parse("entry range overflows".into()))?;
-    if end > file.metadata()?.len() {
+    if end > file.byte_len()? {
         return Err(EthornellError::Parse(
             "entry extends past archive end".into(),
         ));

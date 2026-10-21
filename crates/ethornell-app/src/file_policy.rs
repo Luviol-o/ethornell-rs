@@ -12,6 +12,31 @@ fn policy_error(code: u32, error: io::Error) -> io::Error {
     io::Error::new(error.kind(), format!("host_policy:{code}:{}", error.raw_os_error().unwrap_or(0)))
 }
 
+/// What the policy reports about a name (std::fs::Metadata has no portable
+/// constructor, and the web build has no host files).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PolicyMetadata {
+    is_dir: bool,
+    len: u64,
+    readonly: bool,
+}
+impl PolicyMetadata {
+    pub fn is_file(&self) -> bool { !self.is_dir }
+    pub fn is_dir(&self) -> bool { self.is_dir }
+    pub fn len(&self) -> u64 { self.len }
+    pub fn readonly(&self) -> bool { self.readonly }
+}
+impl From<std::fs::Metadata> for PolicyMetadata {
+    fn from(m: std::fs::Metadata) -> Self {
+        Self { is_dir: m.is_dir(), len: m.len(), readonly: m.permissions().readonly() }
+    }
+}
+/// Held for the session: the host's exclusive claim on the user root.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) type WriterLock = std::fs::File;
+#[cfg(target_arch = "wasm32")]
+pub(crate) type WriterLock = ();
+
 #[derive(Clone, Debug)]
 pub(crate) struct FilePolicy {
     pub resource: PathBuf,
@@ -20,7 +45,11 @@ pub(crate) struct FilePolicy {
     resource_dir: std::sync::Arc<std::fs::File>,
     #[cfg(unix)]
     user_dir: std::sync::Arc<std::fs::File>,
+    #[cfg(target_arch = "wasm32")]
+    web: std::sync::Arc<web::WebRoots>,
 }
+#[cfg(target_arch = "wasm32")]
+pub mod web;
 thread_local! { static ACTIVE: RefCell<Option<FilePolicy>> = const { RefCell::new(None) }; }
 pub(crate) fn active() -> Option<FilePolicy> {
     ACTIVE.with(|p| p.borrow().clone())
@@ -270,7 +299,7 @@ fn case_component(
 #[cfg(unix)]
 impl FilePolicy {
     #[cfg(unix)]
-    pub fn lock_writer(&self) -> io::Result<std::fs::File> {
+    pub fn lock_writer(&self) -> io::Result<WriterLock> {
         use std::os::{fd::AsRawFd, unix::fs::OpenOptionsExt};
         use std::{ffi::CString, os::fd::FromRawFd};
         let name = CString::new(".ethornell-session.lock").unwrap();
@@ -304,6 +333,21 @@ impl FilePolicy {
                 .unwrap_or(&normalized),
             false,
         )
+    }
+    /// A resource-root file of at most `limit` bytes.
+    pub fn read_resource(&self, name: &str, limit: u64) -> io::Result<Vec<u8>> {
+        use std::io::Read;
+        let file = self.open_resource(name)?;
+        let budget = || io::Error::new(io::ErrorKind::InvalidData, "resource file budget exceeded");
+        if file.metadata()?.len() > limit {
+            return Err(budget());
+        }
+        let mut bytes = Vec::new();
+        file.take(limit + 1).read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > limit {
+            return Err(budget());
+        }
+        Ok(bytes)
     }
     fn open_relative(
         &self,
@@ -486,7 +530,7 @@ impl FilePolicy {
             &mut |_, _| Ok(()),
         )
     }
-    pub fn metadata(&self, name: &str) -> Option<std::fs::Metadata> {
+    pub fn metadata(&self, name: &str) -> Option<PolicyMetadata> {
         let normalized = name.replace('\\', "/");
         let (root, name, explicit) = if let Some(name) = normalized.strip_prefix("bgi-user/") {
             (&self.user_dir, name, true)
@@ -497,7 +541,7 @@ impl FilePolicy {
         };
         for directory in [false, true] {
             if let Ok(file) = self.open_relative(root, name, directory) {
-                return file.metadata().ok();
+                return file.metadata().ok().map(PolicyMetadata::from);
             }
         }
         if !explicit
@@ -507,13 +551,13 @@ impl FilePolicy {
         {
             for directory in [false, true] {
                 if let Ok(file) = self.open_relative(&self.resource_dir, name, directory) {
-                    return file.metadata().ok();
+                    return file.metadata().ok().map(PolicyMetadata::from);
                 }
             }
         }
         None
     }
-    pub fn user_metadata(&self,name:&str)->Option<std::fs::Metadata> {self.metadata(&user_data_alias(name))}
+    pub fn user_metadata(&self,name:&str)->Option<PolicyMetadata> {self.metadata(&user_data_alias(name))}
     pub fn enumerate_user(&self,pattern:&str,recursive:bool,max_count:usize,directories:bool)->io::Result<Vec<String>> {self.enumerate(&user_data_alias(pattern),recursive,max_count,directories)}
     pub fn read_loose(&self, name: &str) -> io::Result<Vec<u8>> {
         use std::io::Read;
@@ -821,7 +865,7 @@ impl FilePolicy {
 // Host-driven IO is currently available on Unix (Android/macOS/Linux). Keep
 // Windows desktop compiling without accidentally selecting a permissive host
 // implementation. Desktop paths never install this policy.
-#[cfg(not(unix))]
+#[cfg(not(any(unix, target_arch = "wasm32")))]
 impl FilePolicy {
     fn unavailable<T>() -> io::Result<T> {
         Err(io::Error::new(
@@ -832,10 +876,10 @@ impl FilePolicy {
     pub fn new(_: &Path, _: &Path) -> io::Result<Self> {
         Self::unavailable()
     }
-    pub fn lock_writer(&self) -> io::Result<std::fs::File> {
+    pub fn lock_writer(&self) -> io::Result<WriterLock> {
         Self::unavailable()
     }
-    pub fn open_resource(&self, _: &str) -> io::Result<std::fs::File> {
+    pub fn read_resource(&self, _: &str, _: u64) -> io::Result<Vec<u8>> {
         Self::unavailable()
     }
     pub fn open_manager(&self) -> ethornell_core::Result<ethornell_archive::ResourceManager> {
@@ -847,10 +891,10 @@ impl FilePolicy {
     pub fn validate_resource_tree(&self) -> io::Result<()> {
         Self::unavailable()
     }
-    pub fn metadata(&self, _: &str) -> Option<std::fs::Metadata> {
+    pub fn metadata(&self, _: &str) -> Option<PolicyMetadata> {
         None
     }
-    pub fn user_metadata(&self,_:&str)->Option<std::fs::Metadata> {None}
+    pub fn user_metadata(&self,_:&str)->Option<PolicyMetadata> {None}
     pub fn enumerate_user(&self,_:&str,_:bool,_:usize,_:bool)->io::Result<Vec<String>> {Self::unavailable()}
     pub fn read_loose(&self, _: &str) -> io::Result<Vec<u8>> {
         Self::unavailable()

@@ -1,12 +1,30 @@
 use ethornell_core::{EthornellError, Result};
 use kira::dsp::Frame;
-use kira::manager::backend::{Backend, DefaultBackend};
+use kira::manager::backend::Backend;
+#[cfg(not(target_arch = "wasm32"))]
+use kira::manager::backend::DefaultBackend;
+
+#[cfg(target_arch = "wasm32")]
+pub mod pump;
+/// The device backend: cpal natively, frames pulled by the page on the web.
+#[cfg(not(target_arch = "wasm32"))]
+pub type PlatformBackend = DefaultBackend;
+#[cfg(target_arch = "wasm32")]
+pub type PlatformBackend = pump::PumpBackend;
 use kira::manager::{AudioManager, AudioManagerSettings};
 use kira::sound::{
     FromFileError, PlaybackPosition, PlaybackState,
     static_sound::{StaticSoundData, StaticSoundHandle, StaticSoundSettings},
-    streaming::{StreamingSoundData, StreamingSoundHandle, StreamingSoundSettings},
 };
+#[cfg(not(target_arch = "wasm32"))]
+use kira::sound::streaming::{StreamingSoundData, StreamingSoundHandle, StreamingSoundSettings};
+
+/// A sound decoded while it plays. kira streams on a decoder thread, which
+/// the web lacks; there the sound is decoded up front instead.
+#[cfg(not(target_arch = "wasm32"))]
+type StreamHandle = StreamingSoundHandle<FromFileError>;
+#[cfg(target_arch = "wasm32")]
+type StreamHandle = StaticSoundHandle;
 use kira::tween::Tween;
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -111,13 +129,13 @@ fn read_u32(data: &[u8], offset: usize) -> Option<u32> {
     Some(u32::from_le_bytes(bytes))
 }
 
-pub struct AudioSystem<B: Backend = DefaultBackend> {
+pub struct AudioSystem<B: Backend = PlatformBackend> {
     manager: AudioManager<B>,
     volume: f64,
     channels: BTreeMap<i32, StaticSoundHandle>,
     /// Channels playing a sound that is decoded while it plays (movie
     /// soundtracks). A channel is in at most one of the two maps.
-    streams: BTreeMap<i32, StreamingSoundHandle<FromFileError>>,
+    streams: BTreeMap<i32, StreamHandle>,
     next_unmanaged_channel: i32,
     host_suspended: bool,
 }
@@ -337,13 +355,17 @@ impl<B: Backend> AudioSystem<B> {
         volume: f64,
         start_ms: u64,
     ) -> Result<()> {
-        let mut settings = StreamingSoundSettings::default()
+        #[cfg(not(target_arch = "wasm32"))]
+        let (settings, load) = (StreamingSoundSettings::default(), StreamingSoundData::from_cursor);
+        #[cfg(target_arch = "wasm32")]
+        let (settings, load) = (StaticSoundSettings::default(), StaticSoundData::from_cursor);
+        let mut settings = settings
             .volume(volume.clamp(0.0, 1.0))
             .playback_region(Duration::from_millis(start_ms).as_secs_f64()..);
         if looped {
             settings = settings.loop_region(..);
         }
-        let data = StreamingSoundData::from_cursor(Cursor::new(bytes), settings)
+        let data = load(Cursor::new(bytes), settings)
             .map_err(|err| EthornellError::Other(format!("load audio stream failed: {err}")))?;
         let handle = self
             .manager

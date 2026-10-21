@@ -18,6 +18,9 @@ mod display_tree;
 mod effects;
 mod frame_presenter;
 mod file_policy;
+/// The web build's file roots (see `file_policy::web`).
+#[cfg(target_arch = "wasm32")]
+pub use file_policy::web as web_files;
 pub mod host_runtime;
 mod graph;
 mod graph_bitmap_nodes;
@@ -19120,7 +19123,7 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
                     if self.host.pending.len()>=16 {return Err(VmError::Runtime("host request queue limit".into()));}
                     return Ok(Some(self.host.request_retry(text(2), file)));
                 }
-                if (g == 0x80 && matches!(id, 0x3B | 0x3F | 0xE0..=0xE3 | 0xF0..=0xFC)) || (g == 0x81 && matches!(id, 0x20 | 0x22..=0x26 | 0x38 | 0x3A | 0x3B)) || (g == 0xB0 && id == 0xF0) {
+                if (g == 0x80 && matches!(id, 0x3B | 0x3F | 0xE1 | 0xF0..=0xFC)) || (g == 0x81 && matches!(id, 0x20 | 0x22..=0x26 | 0x38 | 0x3A | 0x3B)) || (g == 0xB0 && id == 0xF0) {
                     self.last_native_call=Some(*opcode);
                     return Err(VmError::Runtime("unsupported filesystem/platform/installer host capability".into()));
                 }
@@ -19978,7 +19981,10 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
         restore_parent_window: bool,
         wait_for_uninstaller: bool,
     ) -> bool {
-        if file_policy::restricted() { self.host.unsupported("process execution"); return false; }
+        // A host app cannot run the game's Windows helpers (senmomo starts
+        // ISESUforSHTK.exe at boot): report the launch as failed, as desktop
+        // does when the program cannot start, instead of ending the session.
+        if file_policy::restricted() { tracing::info!(command_line, "LaunchProcess unavailable in host mode"); return false; }
         let mut arguments = native_system::split_native_command_line(command_line);
         if arguments.is_empty() {
             tracing::warn!(
@@ -20051,7 +20057,7 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
     }
 
     fn shell_open(&mut self, target: &str) -> bool {
-        if file_policy::restricted() { self.host.unsupported("shell/open URL"); return false; }
+        if file_policy::restricted() { tracing::info!(target, "ShellOpen unavailable in host mode"); return false; }
         #[cfg(target_os = "windows")]
         let result = std::process::Command::new("cmd")
             .args(["/C", "start", "", target])
@@ -26032,7 +26038,7 @@ fn windows_wildcard_matches(pattern: &str, value: &str) -> bool {
 
 fn runtime_file_attributes(manager: &ResourceManager, file: &str) -> i32 {
     if let Some(policy) = file_policy::active() {
-        return policy.metadata(file).map(|m| (if m.permissions().readonly() { 1 } else { 0 }) | if m.is_dir() { 0x10 } else { 0x80 }).unwrap_or(-1);
+        return policy.metadata(file).map(|m| (if m.readonly() { 1 } else { 0 }) | if m.is_dir() { 0x10 } else { 0x80 }).unwrap_or(-1);
     }
     let Some(path) = runtime_file_path(manager, file) else {
         return -1;
@@ -26186,7 +26192,13 @@ fn run_headless(
 ) -> Result<()> {
     tracing::info!(title, "GUI headless runtime started");
     let mut audio = match AudioSystem::new() {
-        Ok(audio) => Some(audio),
+        Ok(mut audio) => {
+            // Sound still plays (scripts poll channel state), only inaudibly.
+            if std::env::var_os("ETHORNELL_HEADLESS_MUTE").is_some() {
+                audio.set_volume(0.0);
+            }
+            Some(audio)
+        }
         Err(err) => {
             tracing::warn!(%err, "headless audio init failed");
             None

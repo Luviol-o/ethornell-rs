@@ -1909,6 +1909,23 @@ fn portable_physical_memory_mb() -> (u32, u32) {
 }
 
 fn portable_local_system_time() -> [u16; 8] {
+    // An installed clock (the web build) carries its own zone offset.
+    if let Some(time) = ethornell_core::clock::installed() {
+        let seconds = time.since_epoch.as_secs() as i64 + i64::from(time.utc_offset_minutes) * 60;
+        let days = seconds.div_euclid(86_400);
+        let second_of_day = seconds.rem_euclid(86_400);
+        let (year, month, day) = user_data::civil_from_days_for_save(days);
+        return [
+            year.clamp(0, u16::MAX as i32) as u16,
+            month as u16,
+            (days + 4).rem_euclid(7) as u16,
+            day as u16,
+            (second_of_day / 3_600) as u16,
+            (second_of_day / 60 % 60) as u16,
+            (second_of_day % 60) as u16,
+            time.since_epoch.subsec_millis() as u16,
+        ];
+    }
     #[cfg(target_os = "windows")]
     {
         #[repr(C)]

@@ -338,13 +338,7 @@ pub(crate) fn read_runtime_bytes(
             return None;
         }
         if let Some(container) = authorized_container_name(manager, file) {
-            let f = policy.open_resource(&container).ok()?;
-            if f.metadata().ok()?.len() > 256 * 1024 * 1024 {
-                return None;
-            }
-            let mut bytes = Vec::new();
-            f.take(256 * 1024 * 1024 + 1).read_to_end(&mut bytes).ok()?;
-            return (bytes.len() <= 256 * 1024 * 1024).then_some(bytes);
+            return policy.read_resource(&container, 256 * 1024 * 1024).ok();
         }
         let entry = find_runtime_resource(manager, archive, file)?;
         if entry.packed_size > 256 * 1024 * 1024

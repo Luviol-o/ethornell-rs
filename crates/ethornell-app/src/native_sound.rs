@@ -1063,13 +1063,8 @@ fn discover_native_cd_audio_tracks(
                 continue;
             };
             let bytes = if let Some(policy)=file_policy::active() {
-                use std::io::Read;
                 let Some(rel)=path.strip_prefix(&policy.resource).ok() else {continue;};
-                let Ok(file)=policy.open_resource(&rel.to_string_lossy()) else {continue;};
-                if file.metadata().map(|m|m.len()>128*1024*1024).unwrap_or(true) {continue;}
-                let mut bytes=Vec::new();
-                if file.take(128*1024*1024+1).read_to_end(&mut bytes).is_err() || bytes.len()>128*1024*1024 {continue;}
-                Ok(bytes)
+                policy.read_resource(&rel.to_string_lossy(), 128*1024*1024)
             } else {std::fs::read(&path)};
             let Ok(bytes) = bytes else {
                 continue;

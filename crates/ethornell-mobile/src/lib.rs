@@ -360,6 +360,7 @@ pub unsafe extern "C" fn ethornell_android_create(config: *const ConfigV1, out: 
             } else {
                 Some(font.into())
             },
+            font_data: None,
             font_face_index: config.font_face_index,
             gbk: config.text_encoding == 1,
             backend: config.backend,

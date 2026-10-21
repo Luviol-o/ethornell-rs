@@ -1260,6 +1260,7 @@ dependencies = [
  "ethornell-image",
  "raw-window-handle 0.6.2",
  "tracing",
+ "web-sys",
  "wgpu 0.19.4",
  "winit 0.31.0-beta.3",
 ]
@@ -1283,6 +1284,23 @@ dependencies = [
  "ethornell-script",
  "thiserror 1.0.69",
  "tracing",
+]
+
+[[package]]
+name = "ethornell-web"
+version = "0.1.0"
+dependencies = [
+ "ab_glyph",
+ "ethornell-app",
+ "ethornell-archive",
+ "ethornell-audio",
+ "ethornell-core",
+ "ethornell-render",
+ "getrandom",
+ "js-sys",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
 ]
 
 [[package]]
@@ -1635,9 +1653,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "899def5c37c4fd7b2664648c28120ecec138e4d395b459e5ca34f9cce2dd77fd"
 dependencies = [
  "cfg-if",
+ "js-sys",
  "libc",
  "r-efi",
  "wasip2",
+ "wasm-bindgen",
 ]
 
 [[package]]

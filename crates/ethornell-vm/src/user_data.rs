@@ -327,9 +327,7 @@ fn config_slot_name(slot: i32) -> String {
 }
 
 fn write_native_system_time(destination: &mut [u8]) {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
+    let now = ethornell_core::clock::since_epoch();
     let seconds = now.as_secs();
     let days = (seconds / 86_400) as i64;
     let (year, month, day) = civil_from_days_for_save(days);
@@ -348,7 +346,7 @@ fn write_native_system_time(destination: &mut [u8]) {
     }
 }
 
-fn civil_from_days_for_save(days: i64) -> (i32, u32, u32) {
+pub(crate) fn civil_from_days_for_save(days: i64) -> (i32, u32, u32) {
     let z = days + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
     let doe = z - era * 146_097;

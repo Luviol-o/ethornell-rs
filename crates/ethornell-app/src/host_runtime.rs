@@ -50,6 +50,9 @@ pub struct HostConfig {
     pub resource_root: PathBuf,
     pub user_root: PathBuf,
     pub font_path: Option<PathBuf>,
+    /// Font file bytes, for hosts without font files (the web); takes
+    /// precedence over `font_path`.
+    pub font_data: Option<Vec<u8>>,
     pub font_face_index: u32,
     pub gbk: bool,
     pub backend: u32,
@@ -141,7 +144,7 @@ impl HostServices {
 pub struct HostRuntime {
     runtime: RuntimeEngine,
     policy: file_policy::FilePolicy,
-    _writer_lock: std::fs::File,
+    _writer_lock: file_policy::WriterLock,
     renderer: Option<Renderer<'static>>,
     textures: BTreeMap<String, CachedGraphTexture>,
     font: FontArc,
@@ -164,9 +167,10 @@ impl HostRuntime {
         let policy = file_policy::FilePolicy::new(&config.resource_root, &config.user_root)?;
         let writer_lock = policy.lock_writer()?;
         policy.validate_resource_tree().map_err(|e| EthornellError::Other(format!("host_policy:301:{}",e.raw_os_error().unwrap_or(0))))?;
-        let font = match config.font_path.as_deref() {
-            Some(path) => ethornell_render::FontProvider::load_file(path, config.font_face_index)?,
-            None => ethornell_render::FontProvider::load_system_for_text(if config.gbk {"A日本語中文简体繁體"} else {"A日本語中文"})?,
+        let font = match (config.font_data, config.font_path.as_deref()) {
+            (Some(bytes), _) => ethornell_render::FontProvider::load_bytes(bytes, config.font_face_index)?,
+            (None, Some(path)) => ethornell_render::FontProvider::load_file(path, config.font_face_index)?,
+            (None, None) => ethornell_render::FontProvider::load_system_for_text(if config.gbk {"A日本語中文简体繁體"} else {"A日本語中文"})?,
         };
         let manager = policy.open_manager()?;
         let bytes = manager.read_decoded_from_archive("system.arc", "ipl._bp")?;
@@ -281,7 +285,7 @@ impl HostRuntime {
         self.last_tick = None;
         self.tick_remainder_ns = 0;
         #[cfg(target_os = "android")]
-        let mut renderer = {
+        let renderer = {
             let backend = match self.backend {
                 1 => wgpu::Backends::VULKAN,
                 2 => wgpu::Backends::GL,
@@ -292,8 +296,80 @@ impl HostRuntime {
             })?
         };
         #[cfg(target_os = "ios")]
-        let mut renderer =
+        let renderer =
             pollster::block_on(unsafe { Renderer::new_ios(ptr, w, h, self.font.clone()) })?;
+        self.install_renderer(renderer, w, h, generation)
+    }
+    #[cfg(not(any(target_os = "android", target_os = "ios", target_arch = "wasm32")))]
+    pub unsafe fn set_surface(
+        &mut self,
+        _: *mut std::ffi::c_void,
+        _: u32,
+        _: u32,
+        _: u64,
+    ) -> Result<()> {
+        Err(EthornellError::Other(
+            "no host surface on this target".into(),
+        ))
+    }
+    /// The web host creates its renderer asynchronously (see
+    /// `Renderer::new_web`, with `HostRuntime::font`) and hands it over here.
+    #[cfg(target_arch = "wasm32")]
+    pub fn attach_renderer(
+        &mut self,
+        renderer: Renderer<'static>,
+        w: u32,
+        h: u32,
+        generation: u64,
+    ) -> Result<()> {
+        if generation <= self.generation || w == 0 || h == 0 {
+            return Err(EthornellError::Other("invalid/stale surface".into()));
+        }
+        self.renderer = None;
+        self.textures.clear();
+        self.last_tick = None;
+        self.tick_remainder_ns = 0;
+        self.install_renderer(renderer, w, h, generation)
+    }
+    /// The attached surface changed size (the web canvas follows the page).
+    pub fn resize_surface(&mut self, w: u32, h: u32) -> Result<()> {
+        if let Some(renderer) = self.renderer.as_mut() {
+            renderer.try_resize(w, h)?;
+            self.runtime.api.window_surface_width = w.min(i32::MAX as u32) as i32;
+            self.runtime.api.window_surface_height = h.min(i32::MAX as u32) as i32;
+        }
+        Ok(())
+    }
+    /// One line of state for host-side debugging: the last VM stop, the
+    /// engine clock and what the presenter has to draw.
+    pub fn diagnostics(&self) -> String {
+        let report = self.runtime.last_report.as_ref();
+        format!(
+            "stop={:?} pc={} steps={} time_ms={} screen={}x{} surfaces={} textures={} renderer={} pending={}",
+            report.map(|r| r.stop_reason),
+            report.map_or(0, |r| r.pc),
+            report.map_or(0, |r| r.steps),
+            self.runtime.api.engine_time_ms,
+            self.runtime.api.screen_width,
+            self.runtime.api.screen_height,
+            self.runtime.api.graph_surfaces.len(),
+            self.textures.len(),
+            self.renderer.is_some(),
+            self.runtime.api.host.pending.len(),
+        )
+    }
+    /// The game text font, for renderers the host builds itself.
+    pub fn font(&self) -> FontArc {
+        self.font.clone()
+    }
+    #[cfg(any(target_os = "android", target_os = "ios", target_arch = "wasm32"))]
+    fn install_renderer(
+        &mut self,
+        mut renderer: Renderer<'static>,
+        w: u32,
+        h: u32,
+        generation: u64,
+    ) -> Result<()> {
         renderer.set_virtual_size(
             self.runtime.api.screen_width.max(1) as f32,
             self.runtime.api.screen_height.max(1) as f32,
@@ -320,18 +396,6 @@ impl HostRuntime {
         })?;
         self.generation = generation;
         Ok(())
-    }
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    pub unsafe fn set_surface(
-        &mut self,
-        _: *mut std::ffi::c_void,
-        _: u32,
-        _: u32,
-        _: u64,
-    ) -> Result<()> {
-        Err(EthornellError::Other(
-            "no host surface on this target".into(),
-        ))
     }
     pub fn detach_surface(&mut self, generation: u64) -> Result<()> {
         if generation == self.generation {
@@ -760,7 +824,7 @@ mod tests {
         let user = std::env::temp_dir().join(format!("ethornell-restricted-repro-user-{}", std::process::id()));
         std::fs::create_dir(&user).unwrap();
         let outcome = (|| -> Result<()> {
-            let mut host = HostRuntime::create(HostConfig {resource_root:resource,user_root:user.clone(),font_path:None,font_face_index:0,gbk:true,backend:0,strict:false,trace:false,silent:true})?;
+            let mut host = HostRuntime::create(HostConfig {resource_root:resource,user_root:user.clone(),font_path:None,font_data:None,font_face_index:0,gbk:true,backend:0,strict:false,trace:false,silent:true})?;
             // CPU-only VM/host-policy reproduction, not a Surface/GPU test.
             // It invokes the exact shared checked frontend under the same
             // scoped policy/font, with an explicit silent audio-free backend.
@@ -867,7 +931,7 @@ mod tests {
         }
         for (group, id) in [
             (0x80, 0x3B),
-            (0x80, 0xE3),
+            (0x80, 0xE1),
             (0x80, 0xF2),
             (0x81, 0x38),
             (0xB0, 0xF0),
@@ -959,6 +1023,7 @@ mod tests {
             resource_root: resource,
             user_root: user,
             font_path: None,
+            font_data: None,
             font_face_index: 0,
             gbk: true,
             backend: 0,

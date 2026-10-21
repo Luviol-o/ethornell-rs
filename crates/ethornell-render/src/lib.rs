@@ -539,6 +539,26 @@ impl<'w> Renderer<'w> {
         Self::from_surface(&instance, surface, width, height, font).await
     }
 
+    /// A renderer on a canvas the page transferred to the engine's worker,
+    /// drawn with WebGL2.
+    #[cfg(target_arch = "wasm32")]
+    pub async fn new_web(
+        canvas: web_sys::OffscreenCanvas,
+        width: u32,
+        height: u32,
+        font: FontArc,
+    ) -> Result<Self> {
+        validate_surface_size(width, height, u32::MAX)?;
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::GL,
+            ..Default::default()
+        });
+        let surface = instance
+            .create_surface(wgpu::SurfaceTarget::OffscreenCanvas(canvas))
+            .map_err(|err| EthornellError::Other(format!("create canvas surface failed: {err}")))?;
+        Self::from_surface(&instance, surface, width, height, font).await
+    }
+
     /// A renderer on a UIKit view. wgpu draws through the view's
     /// `CAMetalLayer` (adding one when its layer is not).
     ///
