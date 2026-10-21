@@ -1280,7 +1280,9 @@ name = "ethornell-vm"
 version = "0.1.0"
 dependencies = [
  "encoding_rs",
+ "ethornell-archive",
  "ethornell-core",
+ "ethornell-image",
  "ethornell-script",
  "thiserror 1.0.69",
  "tracing",

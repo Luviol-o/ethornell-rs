@@ -5,6 +5,7 @@ use std::io::Cursor;
 use std::path::Path;
 
 mod cbg;
+pub use cbg::decode_native_buffer as decode_cbg_native_buffer;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum ImageFormat {

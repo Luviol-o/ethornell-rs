@@ -24,6 +24,7 @@ pub mod native_call;
 pub mod native_input;
 pub mod native_motion;
 pub mod native_ownership;
+pub mod native_selection;
 pub mod native_thread;
 mod procedure_class_map;
 mod profile;
@@ -444,9 +445,9 @@ pub trait SysApi {
         false
     }
 
-    /// Enable or disable the target render-performance accumulator. Enabling
-    /// also resets every counter, matching sub_401600.
-    fn set_performance_profiling(&mut self, _enabled: bool) {}
+    /// Store the raw Sys80:06 flag of the target frame-time accumulator; a
+    /// non-zero flag also resets every counter, matching sub_401600.
+    fn set_performance_profiling(&mut self, _enabled: i32) {}
 
     /// Read one target performance metric selected by Sys80:0x07.
     fn read_performance_metric(&mut self, _selector: i32) -> i32 {
@@ -1027,6 +1028,9 @@ pub struct GraphIconRecord {
 }
 
 pub trait GraphApi {
+    /// 90:78 / 424010 copies width*height native little-endian u16 tiles.
+    fn upload_map_tile_data(&mut self,_object:i32,_width:u32,_height:u32,_tiles:&[u16])->bool {false}
+
     fn call_graph(&mut self, call: &mut NativeCallFrame) -> VmResult<Value>;
 
     /// Graph90:A1 (sub_492090 -> sub_43BA30): clear a Window's text layer
@@ -1162,6 +1166,19 @@ pub trait GraphApi {
     /// target publishes the selected index twice on ordinary completion; a
     /// cancelled base procedure publishes -1 as its second value.
     fn poll_native_graph_selection(&mut self) -> Option<i32> {
+        None
+    }
+
+    fn configure_background_frames(&mut self,_frames:&[i32],_alpha:i32)->VmResult<()> {
+        Err(VmError::Runtime("BackD backend unavailable".into()))
+    }
+
+    fn start_native_selection(&mut self, _request: native_selection::NativeSelectionRequest) -> VmResult<u64> {
+        Err(VmError::Runtime("CProcSelect backend unavailable".into()))
+    }
+
+    fn poll_native_selection(&mut self, _selection_id: u64, _callbacks: &[[i32; 2]], _cancelled: bool)
+        -> Option<native_selection::NativeSelectionCompletion> {
         None
     }
 
@@ -1556,6 +1573,8 @@ impl Default for GraphInputDescriptor {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GraphInputGroup {
+    /// Grid columns: compact count high word, extended group+4; zero uses item count.
+    pub navigation_columns: i32,
     pub index: i32,
     /// Configure-time current item: compact group+0x08, extended group+0x0C.
     /// -1 means no current item.
@@ -2594,7 +2613,12 @@ impl Vm {
             }
         }
         let response_error = self.settle_ready_host_response().err();
-        let procedure_wait = if let Some(error) = response_error {
+        // 48D860 skips every non-owner before polling its CProcedure or
+        // executing BP instructions. Child pumping above still reaches the
+        // owner when the root itself is excluded.
+        let procedure_wait = if self.exclusive_thread_id.is_some_and(|owner| owner != self.thread.thread_id()) {
+            Some(VmStopReason::WaitingForProcedure)
+        } else if let Some(error) = response_error {
             self.push_trace(format!("host response failed: {error}"));
             self.halted = true;
             Some(VmStopReason::Error)
@@ -4203,6 +4227,45 @@ impl Vm {
                         )));
                     }
                     Value::None
+                } else if (code,id)==(0x90,0x78) {
+                    let pointer=self.pop_ptr()?;
+                    let height=self.pop_int()? as u32;
+                    let width=self.pop_int()? as u32;
+                    let object=self.pop_int()?;
+                    let count=width.checked_mul(height).filter(|n|*n!=0).ok_or_else(||VmError::Runtime("90:78: invalid tile table dimensions".into()))?;
+                    let bytes=count.checked_mul(2).ok_or_else(||VmError::Runtime("90:78: tile table size overflow".into()))?;
+                    // Validate the entire range before allocating a host vector.
+                    self.resolve_range(pointer,bytes as usize)?;
+                    let mut tiles=Vec::with_capacity(count as usize);
+                    for i in 0..count {tiles.push(self.read_int(pointer.wrapping_add(i*2),1)? as u16);}
+                    if !api.upload_map_tile_data(object,width,height,&tiles){return Err(VmError::Runtime("90:78: invalid map or tile dimensions".into()));}
+                    Value::None
+                } else if (code,id)==(0x90,0x44) {
+                    let alpha=self.pop_int()?;
+                    let table=self.pop_ptr()?;
+                    let count=self.pop_int()?;
+                    if !(2..=32).contains(&count) {return Err(VmError::Runtime(format!("Graph90:44 invalid frame count {count}")));}
+                    let mut frames=Vec::with_capacity(count as usize);
+                    for index in 0..count {frames.push(self.read_int(table.wrapping_add(index as u32*4),2)? as i32);}
+                    api.configure_background_frames(&frames,alpha)?;
+                    Value::None
+                } else if code == 0x90 && matches!(id, 0xA0 | 0xA2 | 0xA3 | 0xB0 | 0xB1) {
+                    let opcode = NativeOpcode { group: code, id };
+                    let args = self.take_dispatch_call_frame(code, id)?;
+                    let request = self.decode_native_selection(api, opcode, &args)?;
+                    let window = request.window;
+                    let selection_id = api.start_native_selection(request)?;
+                    let class_name = match id {
+                        0xA0 => "CProcSelectItem", 0xA2 => "CProcSelectItemEx",
+                        0xA3 => "CProcSelectItemExBlink", 0xB0 => "CProcSelectIcon",
+                        _ => "CProcSelectIconEx",
+                    };
+                    self.install_cprocedure(InstalledCProcedure::graph(
+                        self.thread.thread_id(), opcode, class_name,
+                        native_thread::NativeGraphProcedureMode::Select,
+                        Some(window), Some(selection_id),
+                    ), trace_events);
+                    Value::None
                 } else if (code, id) == (0x90, 0xbc) {
                     let object = self.pop_value()?;
                     let state_buffer = self.pop_ptr()?;
@@ -4429,6 +4492,8 @@ impl Vm {
                     let part_count = self.pop_int()?.max(0);
                     let bitmap = self.pop_int()?;
                     let landscape = self.pop_int()?;
+                    self.resolve_range(parts_ptr,part_count as usize*20)?;
+                    self.resolve_range(columns_ptr,column_count as usize*136)?;
                     let mut part_words = Vec::with_capacity(part_count as usize * 5);
                     for index in 0..part_count as usize * 5 {
                         part_words.push(
@@ -4441,7 +4506,7 @@ impl Vm {
                             self.read_int(columns_ptr.wrapping_add((index * 4) as u32), 2)? as i32,
                         );
                     }
-                    let _ = api.configure_graph91_landscape_parts(
+                    let valid = api.configure_graph91_landscape_parts(
                         landscape,
                         bitmap,
                         part_count,
@@ -4450,36 +4515,41 @@ impl Vm {
                         column_count,
                         &column_words,
                     );
+                    if !valid{return Err(VmError::Runtime("91:78: invalid landscape part or column definitions".into()));}
                     Value::None
                 } else if (code, id) == (0x91, 0x79) {
                     let map_ptr = self.pop_ptr()?;
                     let height = self.pop_int()?;
                     let width = self.pop_int()?;
                     let landscape = self.pop_int()?;
-                    let count = width.max(0) as usize * height.max(0) as usize;
+                    if !(1..=256).contains(&width)||!(1..=256).contains(&height){return Err(VmError::Runtime("91:79: map dimensions must be1..256".into()));}
+                    let count=width as usize*height as usize;
+                    self.resolve_range(map_ptr,count*4)?;
                     let mut map = Vec::with_capacity(count);
                     for index in 0..count {
                         map.push(self.read_int(map_ptr.wrapping_add((index * 4) as u32), 2)? as i32);
                     }
-                    let _ = api.configure_graph91_landscape_map(landscape, width, height, &map);
+                    if !api.configure_graph91_landscape_map(landscape, width, height, &map){return Err(VmError::Runtime("91:79: invalid landscape map".into()));}
                     Value::None
                 } else if (code, id) == (0x91, 0x7A) {
                     let guides_ptr = self.pop_ptr()?;
                     let guide_count = self.pop_int()?.max(0);
                     let bitmap = self.pop_int()?;
                     let landscape = self.pop_int()?;
+                    self.resolve_range(guides_ptr,guide_count as usize*20)?;
                     let mut words = Vec::with_capacity(guide_count as usize * 5);
                     for index in 0..guide_count as usize * 5 {
                         words.push(
                             self.read_int(guides_ptr.wrapping_add((index * 4) as u32), 2)? as i32,
                         );
                     }
-                    let _ = api.configure_graph91_landscape_guides(
+                    let valid = api.configure_graph91_landscape_guides(
                         landscape,
                         bitmap,
                         guide_count,
                         &words,
                     );
+                    if !valid{return Err(VmError::Runtime("91:7A: invalid landscape guide definitions".into()));}
                     Value::None
                 } else if (code, id) == (0x91, 0x7B) {
                     let value = self.pop_int()?;
@@ -4488,14 +4558,14 @@ impl Vm {
                     let pairs_ptr = self.pop_ptr()?;
                     let point_count = self.pop_int()?.max(0);
                     let landscape = self.pop_int()?;
+                    self.resolve_range(pairs_ptr,point_count as usize*8)?;
                     let mut pairs = Vec::with_capacity(point_count as usize * 2);
                     for index in 0..point_count as usize * 2 {
                         pairs.push(
                             self.read_int(pairs_ptr.wrapping_add((index * 4) as u32), 2)? as i32,
                         );
                     }
-                    let _ = api
-                        .set_graph91_landscape_cell_guides(landscape, &pairs, layer, guide, value);
+                    if !api.set_graph91_landscape_cell_guides(landscape,&pairs,layer,guide,value){return Err(VmError::Runtime("91:7B: invalid landscape cell-guide assignment".into()));}
                     Value::None
                 } else if (code, id) == (0x91, 0x7E) {
                     let column = self.pop_int()?;
@@ -5027,22 +5097,6 @@ impl Vm {
                         self.clear_shadow_values(destination, byte_len);
                     }
                     Value::Int(count as i32)
-                } else if (code, id) == (0xa0, 0x86) {
-                    // sub_48D910 writes the translated MCI mode through the
-                    // converted destination pointer and returns one when the
-                    // status query ran. A closed/not-ready portable device
-                    // preserves the target failure path: return zero and do
-                    // not manufacture a successful mode value.
-                    let destination = self.pop_ptr()?;
-                    if let Some(mode) = api.query_cd_audio_mode() {
-                        self.write_int(destination, 2, mode as u32)?;
-                        self.clear_shadow_values(destination, 4);
-                        Value::Int(1)
-                    } else {
-                        self.write_int(destination, 2, u32::MAX)?;
-                        self.clear_shadow_values(destination, 4);
-                        Value::Int(0)
-                    }
                 } else if (code, id) == (0x90, 0xb7) {
                     let descriptor_ptr = self.pop_ptr()?;
                     let window = self.pop_int()?;
@@ -5267,6 +5321,20 @@ impl Vm {
                         self.push_value(Value::Ptr(destination));
                         None
                     }
+                } else if (code, id) == (0xa0, 0x86) {
+                    // sub_487C50 -> sub_48D910 writes the translated MCI mode
+                    // and returns one when the status query ran; a closed
+                    // device or a failed query writes nothing and returns 0.
+                    let destination = self.pop_ptr()?;
+                    if let Some(mode) = api.query_cd_audio_mode() {
+                        if destination != 0 {
+                            self.write_int(destination, 2, mode as u32)?;
+                            self.clear_shadow_values(destination, 4);
+                        }
+                        Some(Value::Int(1))
+                    } else {
+                        Some(Value::Int(0))
+                    }
                 } else if (code, id) == (0xa0, 0x28) {
                     // sub_487A70 resolves the second source argument to a BP
                     // pointer. DCProcRgstrSound later copies descriptor[0] +
@@ -5469,9 +5537,8 @@ impl Vm {
                     let first_source = self.pop_ptr()?;
                     let count = self.pop_int()?;
                     let handle = self.pop_int()?;
-                    let count = usize::try_from(count.max(0))
-                        .unwrap_or(usize::MAX)
-                        .min(4096);
+                    if !(1..=16).contains(&count) {return Err(VmError::Runtime("C0:06: depth plane count must be 1..16".into()));}
+                    let count=count as usize;
                     let (first, second) = if count == 1 && first_source == 0 {
                         (vec![0x7fff], vec![0])
                     } else {
@@ -5484,7 +5551,7 @@ impl Vm {
                             } else {
                                 self.read_int(first_source.wrapping_add(offset), 2)? as i32
                             });
-                            second.push(if second_source == 0 {
+                            second.push(if count==1 || second_source == 0 {
                                 0
                             } else {
                                 self.read_int(second_source.wrapping_add(offset), 2)? as i32
@@ -5492,8 +5559,23 @@ impl Vm {
                         }
                         (first, second)
                     };
-                    let _ = api.configure_particle_frame_tables(handle, &first, &second);
+                    if !api.configure_particle_frame_tables(handle, &first, &second) {
+                        return Err(VmError::Runtime("C0:06: invalid particle frame table configuration".into()));
+                    }
                     Some(Value::None)
+                } else if code == 0xc0 && matches!(id, 0x25 | 0x2d) {
+                    // 476A80 dereferences the final source operand; 476ED0
+                    // dereferences source operand 14. Preserve the positional
+                    // frame, replacing only this raw DWORD pointer with its value.
+                    let count = if id == 0x25 { 11 } else { 18 };
+                    let pointer_index = if id == 0x25 { 10 } else { 14 };
+                    let mut args = Vec::with_capacity(count);
+                    for _ in 0..count { args.push(self.pop_value()?); }
+                    args.reverse();
+                    let pointer = Self::translate_system_descriptor(args[pointer_index].as_i32() as u32);
+                    args[pointer_index] = Value::Int(self.read_int(pointer, 2)? as i32);
+                    let mut call = NativeCallFrame::new(NativeOpcode {group: code, id}, args);
+                    Some(api.call_user(&mut call)?.unwrap_or(Value::None))
                 } else if (code, id) == (0xc0, 0xc2) {
                     // sub_476E40 / sub_494A60: [handle, duration,
                     // point_record_ptr, point_count]. Every point occupies
@@ -6241,6 +6323,16 @@ impl Vm {
                     });
                 match procedure.mode {
                     native_thread::NativeGraphProcedureMode::Select => {
+                        if let Some(selection_id) = procedure.control_id {
+                            let callbacks = callbacks.iter().map(|v| [v[0].as_i32(), v[1].as_i32()]).collect::<Vec<_>>();
+                            // 512 is an Icon-only forced-selection callback,
+                            // not a base cancellation. Item procedures ignore it.
+                            let completion = api.poll_native_selection(selection_id, &callbacks, !self.procedure_alive(terminal));
+                            let Some(completion) = completion else { return Some(VmStopReason::WaitingForProcedure); };
+                            for value in &completion.values[..completion.count] { self.push_value(Value::Int(*value)); }
+                            self.thread.clear_current_procedure();
+                            return None;
+                        }
                         let selected = if cancelled {
                             None
                         } else {
@@ -7214,7 +7306,7 @@ impl Vm {
             // sub_44A900 projects the 64-byte extended source group into the
             // common 52-byte runtime group: source +0x14/+0x18/+0x1C/+0x20
             // become internal +0x0C/+0x10/+0x14/+0x18 respectively.
-            descriptor.groups.push(GraphInputGroup {
+            descriptor.groups.push(GraphInputGroup { navigation_columns: self.read_int(group_ptr.wrapping_add(4),2)? as i32,
                 index: group as i32,
                 initial_current_item: selected_index,
                 selection_enabled: self.read_int(group_ptr.wrapping_add(20), 2)? != 0,
@@ -7372,7 +7464,7 @@ impl Vm {
                 (self.read_int(group_ptr, 2)? & 0xffff).min(MAX_REGIONS_PER_GROUP as u32) as usize;
             let regions_ptr = self.read_pointer_field(group_ptr.wrapping_add(4))?;
             let selected_index = self.read_int(group_ptr.wrapping_add(8), 2)? as i32;
-            descriptor.groups.push(GraphInputGroup {
+            descriptor.groups.push(GraphInputGroup { navigation_columns: (self.read_int(group_ptr,2)?>>16) as i32,
                 index: group as i32,
                 initial_current_item: selected_index,
                 selection_enabled: self.read_int(group_ptr.wrapping_add(12), 2)? != 0,
@@ -9968,7 +10060,7 @@ impl Vm {
                 )))
             }
             (0x80, 0x06) => {
-                let enabled = self.pop_int()? != 0;
+                let enabled = self.pop_int()?;
                 api.set_performance_profiling(enabled);
                 Value::None
             }
@@ -10182,21 +10274,23 @@ impl Vm {
                 let output = if has_sdc_header {
                     self.decode_sdc_records(source, destination)?
                 } else {
-                    // Target sub_465320 is the engine-wide resource/data
-                    // decoder. Until every wrapped resource format is ported,
-                    // preserve the destination/length contract with a bounded
-                    // raw copy rather than inventing a successful decode size.
-                    let start = source as usize;
-                    if start >= self.memory.len() {
-                        0
-                    } else {
-                        let count = requested.min(self.memory.len() - start);
-                        let bytes = self.memory[start..start + count].to_vec();
-                        let range = self.resolve_write_range(destination, count)?;
-                        self.memory[range].copy_from_slice(&bytes);
-                        self.clear_shadow_values(destination, count);
-                        count.min(i32::MAX as usize) as i32
-                    }
+                    // 499120 -> 465880 dispatches DSC, both CBG decoders,
+                    // or an unwrapped payload. Length describes the input,
+                    // not the capacity of the decoded destination.
+                    let range = self.resolve_range(source, requested)?;
+                    let input = &self.memory[range];
+                    let decoded = if input.starts_with(b"DSC FORMAT 1.00") {
+                        if input.get(20..24).is_some_and(|v| u32::from_le_bytes(v.try_into().unwrap()) <= 0x400_0000) {
+                            ethornell_archive::dsc_decode(input).unwrap_or_default()
+                        } else { Vec::new() }
+                    } else if input.starts_with(b"CompressedBG___") {
+                        ethornell_image::decode_cbg_native_buffer(input).unwrap_or_default()
+                    } else { input.to_vec() };
+                    let count = decoded.len();
+                    let range = self.resolve_write_range(destination, count)?;
+                    self.memory[range].copy_from_slice(&decoded);
+                    self.clear_shadow_values(destination, count);
+                    count as i32
                 };
                 self.install_host_completed_procedure(
                     NativeOpcode { group, id },
@@ -18255,6 +18349,34 @@ mod tests {
             &vm.memory[destination as usize..destination as usize + 16],
             &[0; 16]
         );
+    }
+
+    #[test]
+    fn exclusive_child_owner_suspends_the_root_interpreter() {
+        let mut vm=Vm::new();
+        vm.start(&empty_loaded_program("exclusive-root._bp".into()));
+        vm.exclusive_thread_id=Some(vm.thread.thread_id()+1);
+        let report=vm.run_loaded(&mut TraceApi,&VmRunOptions::default());
+        assert_eq!(report.stop_reason,VmStopReason::WaitingForProcedure);
+        assert!(!vm.halted);
+        vm.exclusive_thread_id=None;
+        let report=vm.run_loaded(&mut TraceApi,&VmRunOptions::default());
+        assert_eq!(report.stop_reason,VmStopReason::Completed);
+    }
+
+    #[test]
+    fn sys80_cf_resolves_tagged_raw_input_and_returns_decoded_length() {
+        let mut vm=Vm::new();
+        let source=0x1000_1000u32;
+        let destination=0x2000u32;
+        vm.memory[Vm::memory_addr(source) as usize..Vm::memory_addr(source) as usize+4].copy_from_slice(b"data");
+        vm.stack.extend([Value::Ptr(destination),Value::Ptr(source),Value::Int(4)]);
+        let instruction=test_instruction(0,0x80,"sys1",vec![0x80,0xcf],Vec::new());
+        vm.dispatch(&instruction,&mut TraceApi).unwrap();
+        assert!(vm.stack.is_empty());
+        assert_eq!(&vm.memory[destination as usize..destination as usize+4],b"data");
+        assert_eq!(vm.poll_current_procedure(&mut TraceApi,false),None);
+        assert_eq!(vm.stack,[Value::Int(4)]);
     }
 
     #[test]

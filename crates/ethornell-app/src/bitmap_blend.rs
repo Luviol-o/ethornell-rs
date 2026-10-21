@@ -882,34 +882,17 @@ pub(crate) fn crossfade_cache(
     }
     let width = primary.width.min(secondary.width);
     let height = primary.height.min(secondary.height);
-    let t = transition;
     let mut rgba = vec![0u8; width as usize * height as usize * 4];
     for y in 0..height as usize {
         for x in 0..width as usize {
-            let p = &primary.rgba[(y * primary.width as usize + x) * 4..][..4];
-            let s = &secondary.rgba[(y * secondary.width as usize + x) * 4..][..4];
-            let out = &mut rgba[(y * width as usize + x) * 4..][..4];
-            if format == 1 {
-                for lane in 0..4 {
-                    // pmulhw((s - p) << 4, t << 4): an arithmetic >> 16.
-                    let delta = ((i32::from(s[lane]) - i32::from(p[lane])) << 4) as i16;
-                    let product = (i32::from(delta) * i32::from((t << 4) as i16)) >> 16;
-                    out[lane] = (i32::from(p[lane]) + product).clamp(0, 255) as u8;
-                }
-            } else {
-                let weighted_primary = (256 - t) * i32::from(p[3]);
-                let total = (weighted_primary + t * i32::from(s[3])) as u32;
-                if total == 0 {
-                    continue;
-                }
-                let weight = ((weighted_primary << 7) as u32 / total) as i32;
-                for lane in 0..3 {
-                    let delta = i32::from(p[lane]) - i32::from(s[lane]);
-                    let mixed = ((delta * weight) as i16 >> 7) as i32 + i32::from(s[lane]);
-                    out[lane] = mixed.clamp(0, 255) as u8;
-                }
-                out[3] = (total >> 8).min(255) as u8;
-            }
+            let p = primary.rgba[(y * primary.width as usize + x) * 4..][..4]
+                .try_into()
+                .unwrap();
+            let s = secondary.rgba[(y * secondary.width as usize + x) * 4..][..4]
+                .try_into()
+                .unwrap();
+            rgba[(y * width as usize + x) * 4..][..4]
+                .copy_from_slice(&crossfade_pixel(p, s, format, transition));
         }
     }
     Some(DecodedImage {
@@ -917,6 +900,31 @@ pub(crate) fn crossfade_cache(
         height,
         rgba,
     })
+}
+
+pub(crate) fn crossfade_pixel(p: [u8; 4], s: [u8; 4], format: i32, t: i32) -> [u8; 4] {
+    let mut out = [0; 4];
+    if format == 1 {
+        for lane in 0..4 {
+            let delta = ((i32::from(s[lane]) - i32::from(p[lane])) << 4) as i16;
+            let product = (i32::from(delta) * i32::from((t << 4) as i16)) >> 16;
+            out[lane] = (i32::from(p[lane]) + product).clamp(0, 255) as u8;
+        }
+    } else {
+        let weighted_primary = (256 - t) * i32::from(p[3]);
+        let total = (weighted_primary + t * i32::from(s[3])) as u32;
+        if total == 0 {
+            return out;
+        }
+        let weight = ((weighted_primary << 7) as u32 / total) as i32;
+        for lane in 0..3 {
+            let delta = i32::from(p[lane]) - i32::from(s[lane]);
+            out[lane] =
+                (((delta * weight) as i16 >> 7) as i32 + i32::from(s[lane])).clamp(0, 255) as u8;
+        }
+        out[3] = (total >> 8).min(255) as u8;
+    }
+    out
 }
 
 #[cfg(test)]

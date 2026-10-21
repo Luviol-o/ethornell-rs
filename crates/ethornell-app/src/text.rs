@@ -831,12 +831,7 @@ impl RuntimeTraceApi {
         let state = self.window_text_state(Some(window));
         let glyph = state.font_size.round().max(1.0) as i32;
         let pitch = glyph + glyph * spacing_percent / 100;
-        let color = [
-            ((color >> 16) & 0xff) as f32 / 255.0,
-            ((color >> 8) & 0xff) as f32 / 255.0,
-            (color & 0xff) as f32 / 255.0,
-            1.0,
-        ];
+
 
         for node in self.item_grid_nodes.remove(&window).unwrap_or_default() {
             self.text_nodes.remove(&node);
@@ -845,6 +840,8 @@ impl RuntimeTraceApi {
 
         let mut nodes = Vec::with_capacity(items.len());
         for (index, item) in items.iter().enumerate() {
+            let item_color = self.graph_item_selection_column_layouts.get(&window).map_or(color, |colors| colors[index]);
+            let color = [((item_color >> 16) & 255) as f32 / 255.0, ((item_color >> 8) & 255) as f32 / 255.0, (item_color & 255) as f32 / 255.0, 1.0];
             let index = index as i32;
             let column = index % columns;
             let column_left = left + column * area_width / columns;

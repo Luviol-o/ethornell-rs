@@ -24,6 +24,39 @@ pub fn decode_cbg(data: &[u8]) -> Result<DecodedImage> {
     decoder.unpack()
 }
 
+/// sub_465880's decoded CBG buffer: the original 16-byte image descriptor
+/// followed by native BGR/word/gray bytes. This deliberately avoids a display
+/// RGBA round-trip for 16-bit data.
+pub fn decode_native_buffer(data: &[u8]) -> Result<Vec<u8>> {
+    let meta = parse_cbg_metadata(data)?;
+    let mut decoder = CbgV2Decoder::new(data)?;
+    let pixels = if meta.version.unwrap_or(0) < 2 {
+        let raw = decoder.unpack_v1_pixels()?;
+        if meta.bpp == 24 {
+            raw.chunks_exact(3).flat_map(|p| [p[0],p[1],p[2],0]).collect()
+        } else { raw }
+    } else {
+        let image = decode_cbg(data)?;
+        match meta.bpp {
+            8 => image.rgba.chunks_exact(4).map(|p| p[0]).collect(),
+            24 => image.rgba.chunks_exact(4).flat_map(|p| [p[2],p[1],p[0]]).collect(),
+            32 => image.rgba.chunks_exact(4).flat_map(|p| [p[2],p[1],p[0],p[3]]).collect(),
+            _ => unreachable!("decode_cbg validates bit depth"),
+        }
+    };
+    let mut output = data[16..32].to_vec();
+    if meta.version.unwrap_or(0) < 2 && meta.bpp == 24 {
+        output[4..6].copy_from_slice(&32u16.to_le_bytes());
+        output[8..10].copy_from_slice(&7u16.to_le_bytes());
+    }
+    output.extend_from_slice(&pixels);
+    // The v2 24-bit target reports a four-byte allocation even though its
+    // decoder writes packed BGR. Its uninitialized tail is zero-filled here.
+    let bytes_per_pixel = if meta.bpp == 24 { 4 } else { meta.bpp / 8 };
+    output.resize(16 + meta.width as usize * meta.height as usize * bytes_per_pixel as usize, 0);
+    Ok(output)
+}
+
 #[derive(Debug, Clone)]
 struct CbgHeader {
     width: u32,
@@ -74,7 +107,7 @@ impl<'a> CbgV2Decoder<'a> {
         self.unpack_v2()
     }
 
-    fn unpack_v1(&mut self) -> Result<DecodedImage> {
+    fn unpack_v1_pixels(&mut self) -> Result<Vec<u8>> {
         let encoded = self.read_encoded()?;
         let mut encoded_reader = Reader::new(&encoded);
         let weights = Self::read_weight_table(&mut encoded_reader, 0x100)?;
@@ -99,6 +132,11 @@ impl<'a> CbgV2Decoder<'a> {
             stride,
             pixel_size,
         );
+        Ok(sampled)
+    }
+
+    fn unpack_v1(&mut self) -> Result<DecodedImage> {
+        let sampled = self.unpack_v1_pixels()?;
         let mut rgba = vec![0u8; self.header.width as usize * self.header.height as usize * 4];
         match self.header.bpp {
             32 => {

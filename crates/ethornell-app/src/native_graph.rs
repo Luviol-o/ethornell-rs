@@ -146,6 +146,14 @@ impl RuntimeTraceApi {
     /// title images.
     fn graph90_begin_sprite_configuration(&mut self, object: i32, mode: i32) {
         self.graph_transition_nodes.remove(&object);
+        self.native_sprite_masks.remove(&object);
+        self.native_mode6_rasters.remove(&object);
+        self.native_projection_mips.remove(&object);
+        if matches!(mode,5|6) {
+            let p=self.graph_object_properties.entry(object).or_default();
+            p.properties.retain(|key,_|!matches!(*key,0x40|0x41|0x42|0x43|0x80|0x81|0x82|0x83|0x8f));
+            p.named_properties.remove("mode6-transition-current");
+        }
         self.graph90_set_mode(object, mode);
     }
 
@@ -280,10 +288,14 @@ impl RuntimeTraceApi {
         }
         for object in objects {
             let _ = self.graph90_refresh_backf_primary(object);
+            self.refresh_sprite_mask(object);
+            self.sync_native_effector_parameters(object);
+            if self.graph90_background_class(object)==Some(NativeBackgroundClass::BackMl){self.refresh_native_backml();}
         }
         for object in geometry_refresh {
             let _ = self.graph90_resync_fixed_sprite_geometry(object);
         }
+
     }
 
     fn graph90_set_alpha_multiplier_recursive(&mut self, object: i32, multiplier: i32) {
@@ -449,16 +461,24 @@ impl RuntimeTraceApi {
                         }
                         let _ = self.graph90_refresh_backf_primary(object);
                     }
+                    NativeBackgroundClass::BackRpl => {
+                        let _ = self.graph90_refresh_vm_effect(object);
+                        self.refresh_background_effect(object);
+                    }
                     NativeBackgroundClass::BackMl => {
                         let properties = self.graph_object_properties.entry(object).or_default();
                         properties.native.fixed_position_x_16_16 = x;
                         properties.native.fixed_position_y_16_16 = y;
                         self.graph91_multilayer_background.object_x_16_16 = x;
                         self.graph91_multilayer_background.object_y_16_16 = y;
+                        let index=self.graph91_multilayer_background.selected_layer;
+                        self.graph91_multilayer_background.layers[index].x_16_16=x;
+                        self.graph91_multilayer_background.layers[index].y_16_16=y;
                         self.graph91_sync_all_multilayer_render_layers();
                     }
                     _ => {}
                 }
+                self.refresh_background_effect(object);
             }
             return true;
         }
@@ -1395,6 +1415,97 @@ impl RuntimeTraceApi {
         }
     }
 
+    /// Shared Sprite rebuild (old sub_4272F0; BGI 1.622 sub_427670).
+    /// Both Graph90:57 and property 0x10 use this path. Inert modes succeed
+    /// without looking up the bitmap. A rebuild must update the stored mode
+    /// arguments too, since later vtable setters rebuild from that state.
+    pub(super) fn graph90_replace_sprite_primary(
+        &mut self,
+        object: i32,
+        bitmap: i32,
+    ) -> std::result::Result<bool, ()> {
+        let mode = self.graph90_sprite_mode(object).ok_or(())?;
+        if !matches!(mode, 0 | 2 | 5 | 6) {
+            return Ok(false);
+        }
+        if self.query_bitmap_info(bitmap).is_none() {
+            return Err(());
+        }
+        if mode == 0 {
+            let position = self
+                .graph_native_base_position(object)
+                .map(|(x, y)| (x as f32, y as f32));
+            self.graph_object_properties
+                .entry(object)
+                .or_default()
+                .format_resource = Some(bitmap);
+            self.graph_transition_nodes.remove(&object);
+            return self
+                .graph90_sync_sprite_primary_layer(object, bitmap, position)
+                .then_some(true)
+                .ok_or(());
+        }
+        let (selector, argc) = match mode {
+            2 => (0x59, 13),
+            5 => (0x5C, 17),
+            _ => (0x5D, 20),
+        };
+        let mut args = self
+            .graph90_recorded_source_args(object, selector, argc)
+            .ok_or(())?;
+        if mode == 2 {
+            if let Some((x, y)) = self.graph_native_base_position(object) {
+                args[1] = x;
+                args[2] = y;
+            }
+            args[3] = bitmap;
+            if let Some(properties) = self.graph_object_properties.get(&object) {
+                if let Some(&(x, y)) = properties.properties.get(&0x40) {
+                    args[4] = x;
+                    args[5] = y;
+                }
+                if let Some(&(rotation, _)) = properties.properties.get(&0x41) {
+                    args[6] = rotation;
+                }
+            }
+        } else {
+            let properties = self.graph_object_properties.get(&object).ok_or(())?;
+            args[1] = properties.native.fixed_position_x_16_16;
+            args[2] = properties.native.fixed_position_y_16_16;
+            args[3] = properties.native.fixed_position_z_16_16;
+            args[4] = bitmap;
+            args[5] = -1;
+            args[6] = 0;
+            args[7] = -1;
+        }
+        let properties = self.graph_object_properties.entry(object).or_default();
+        properties.format_resource = Some(bitmap);
+        if matches!(mode, 5 | 6) {
+            for (suffix, value) in [
+                ("secondary-bitmap", -1),
+                ("transition-value", 0),
+                ("transition-current", 0),
+                ("secondary-parameter", -1),
+            ] {
+                properties
+                    .named_properties
+                    .insert(format!("mode{mode}-{suffix}"), value);
+            }
+        }
+        self.graph_transition_nodes.remove(&object);
+        // Persist before reprojecting: geometry queries and later moves use
+        // the same primary and cleared secondary as the native sprite.
+        self.graph90_record_call(object, selector, &args);
+        self.native_projection_mips.remove(&object);
+        if mode==6 {self.native_mode6_rasters.remove(&object);}
+        let rebuilt = match mode {
+            2 => self.graph90_sync_mode2_primary_layer(&args),
+            5 => self.graph90_sync_mode5_primary_layer(&args),
+            _ => self.graph90_sync_mode6_primary_layer(&args),
+        };
+        rebuilt.then_some(true).ok_or(())
+    }
+
     fn graph90_sync_sprite_primary_layer(
         &mut self,
         object: i32,
@@ -1579,6 +1690,66 @@ impl RuntimeTraceApi {
         )
     }
 
+    fn graph90_bind_vm_effect(&mut self,object:i32,primary:i32,vector:i32) {
+        let bindings=[primary,vector].map(|bitmap|(bitmap,self.graph_resources.get(&bitmap).map_or(0,|r|r.generation)));
+        self.native_vm_effect_bindings.insert(object,bindings);
+    }
+
+    pub(super) fn graph90_set_vm_wave_window(&mut self, object: i32, alpha: i32, offset: i32) -> std::result::Result<(), i32> {
+        let properties = self.graph_object_properties.get(&object).ok_or(254)?;
+        let back = self.graph90_background_class(object) == Some(NativeBackgroundClass::BackRpl);
+        if !back && properties.named_properties.get("target-object-mode") != Some(&4) { return Ok(()); }
+        let get = |name: &str| properties.named_properties.get(name).copied().unwrap_or(0);
+        let slot = get(if back { "target-record-pointer" } else { "mode4-record-pointer" });
+        let count = get(if back { "target-record-count" } else { "mode4-record-count" });
+        let alpha = if alpha as u32 <= 256 { alpha } else { properties.alpha_parameter() };
+        if self.effects.vm_wave_samples(slot,count,offset,alpha).is_none() { return Err(254); }
+        let properties = self.graph_object_properties.get_mut(&object).unwrap();
+        properties.properties.insert(0x100,(alpha,offset));
+        properties.set_alpha_parameter(alpha);
+        self.graph90_refresh_vm_effect(object).map_err(|_| 254)?;
+        Ok(())
+    }
+
+    pub(super) fn graph90_refresh_vm_effect(&mut self, object: i32) -> std::result::Result<bool, String> {
+        let Some(properties) = self.graph_object_properties.get(&object) else { return Ok(false); };
+        let background = self.graph90_background_class(object) == Some(NativeBackgroundClass::BackRpl);
+        let sprite = !background && properties.named_properties.get("target-object-mode") == Some(&4);
+        if !background && !sprite { return Ok(false); }
+        let get = |name: &str| properties.named_properties.get(name).copied().unwrap_or(0);
+        let primary = properties.format_resource.ok_or("missing VM primary bitmap")?;
+        let vector = get(if background { "target-auxiliary-resource" } else { "mode4-effect-resource" });
+        let count = get(if background { "target-record-count" } else { "mode4-record-count" });
+        let slot = get(if background { "target-record-pointer" } else { "mode4-record-pointer" });
+        let alpha = properties.alpha_parameter();
+        let offset = properties.properties.get(&0x100).map_or(0, |v| v.1);
+        let filter = background && properties.properties.get(&255).is_some_and(|v| v.0 != 0);
+        let origin = if background { properties.background.and_then(|b| b.integer_position()).map(|(x,y)| [x,y]).unwrap_or([0,0]) } else { [0,0] };
+        let source_info = self.query_bitmap_info(primary).ok_or("missing VM primary bitmap")?;
+        let vector_info = self.query_bitmap_info(vector).ok_or("missing VM vector bitmap")?;
+        if vector_info.format != 6 { return Err("VM auxiliary bitmap must have format 6".into()); }
+        let size = if background { [self.screen_width.max(1) as u32, self.screen_height.max(1) as u32] } else { [source_info.width,source_info.height] };
+        if (background && (vector_info.width < size[0] || vector_info.height < size[1])) || (!background && (vector_info.width != size[0] || vector_info.height != size[1])) { return Err("VM vector bitmap dimensions do not match the drawable".into()); }
+        let waves = self.effects.vm_wave_samples(slot,count,offset,alpha).ok_or("VM wave slot is absent or too short")?;
+        let source = self.graph_bitmap_image(primary).ok_or("missing VM primary pixels")?;
+        let image = self.effects.warp_vector_map(vector,&source,&waves,origin,size,!background,filter).ok_or("missing VM vector pixels")?;
+        let key = format!("runtime:vm-effect:{object}");
+        if self.graph_images.get(&key) == Some(&image) && self.graph_layers.get(&object).is_some_and(|l| l.key == key) { return Ok(true); }
+        let width = image.width as f32;
+        let height = image.height as f32;
+        self.store_graph_image(key.clone(),image);
+        if background {
+            let saved = self.graph_object_properties[&object].background;
+            self.graph90_sync_primary_layer(object,primary,0,0);
+            self.graph_object_properties.get_mut(&object).unwrap().background = saved;
+        }
+        if let Some(layer) = self.graph_layers.get_mut(&object) {
+            layer.key=key; layer.src_x=0.0; layer.src_y=0.0; layer.width=width; layer.height=height;
+        }
+        self.graph_redraw_requested=Some(false);
+        Ok(true)
+    }
+
     fn graph90_sync_mode4_primary_layer(&mut self, args: &[i32]) -> bool {
         if args.len() != 10 {
             return false;
@@ -1595,7 +1766,7 @@ impl RuntimeTraceApi {
     /// +0x6C/+0x70/+0x74.  The latter two banks are Graph91:37 and 91:36;
     /// they participate before perspective projection and must not be applied
     /// later as an ordinary renderer translation.
-    fn graph90_resolve_projected_sprite_vector(
+    pub(super) fn graph90_resolve_projected_sprite_vector(
         &self,
         mut args: NativeMode5NodeArgs,
     ) -> NativeMode5NodeArgs {
@@ -1616,61 +1787,9 @@ impl RuntimeTraceApi {
         args
     }
 
-    fn graph90_sync_mode6_primary_layer(&mut self, args: &[i32]) -> bool {
-        if args.len() != 20 {
-            return false;
-        }
-        // Mode 6 shares the leading projection state with mode 5.  Target
-        // sub_427D90 stores the primary at +0x150 and fixed-point position /
-        // projection fields at +0x248..+0x280 before sub_42A650/sub_42A100
-        // build the projected geometry.  Preserve the additional mode-6
-        // fields separately below while materialising the same leading
-        // projection so the object remains drawable.
-        let Some(projected) = NativeMode5NodeArgs::from_source_args(args) else {
-            return false;
-        };
-        let projected = self.graph90_resolve_projected_sprite_vector(projected);
-        let Some((_, source)) = self.resource_image_region(projected.resource_id) else {
-            return false;
-        };
-        let (screen_width, screen_height) = if self.screen_width > 0 && self.screen_height > 0 {
-            (self.screen_width, self.screen_height)
-        } else {
-            (1280, 720)
-        };
-        let use_graph_center = self
-            .graph_object_properties
-            .get(&projected.node_id)
-            .is_none_or(|properties| properties.native.use_graph_center != 0);
-        let geometry = projected.screen_geometry(
-            source.width,
-            source.height,
-            screen_width as f32,
-            screen_height as f32,
-            self.graph_config.center,
-            use_graph_center,
-        );
-        if !self.graph90_sync_sprite_primary_layer(
-            projected.node_id,
-            projected.resource_id,
-            Some((geometry.x, geometry.y)),
-        ) {
-            return false;
-        }
-        if let Some(layer) = self.graph_layers.get_mut(&projected.node_id) {
-            layer.scale_x = geometry.width / source.width.max(1.0);
-            layer.scale_y = geometry.height / source.height.max(1.0);
-            layer.rotation_degrees = geometry.rotation_degrees;
-            // sub_41B4C0 already folded the Graph91 vector banks into the
-            // projected coordinates above.
-            layer.transform_x = 0.0;
-            layer.transform_y = 0.0;
-            layer.transform_z = 0;
-        }
-        true
-    }
+    fn graph90_sync_mode6_primary_layer(&mut self,args:&[i32])->bool {self.sync_mode6_raster(args)}
 
-    fn graph90_mode5_dynamic_state(&self, object: i32) -> NativeMode5DynamicState {
+    pub(super) fn graph90_mode5_dynamic_state(&self, object: i32) -> NativeMode5DynamicState {
         let Some(properties) = self.graph_object_properties.get(&object) else {
             return NativeMode5DynamicState::default();
         };
@@ -1856,6 +1975,37 @@ impl RuntimeTraceApi {
             None
         };
 
+        let [anchor_x,anchor_y,angle,scale_x,scale_y]=mode5.mode5_transform_parameters(dynamic);
+        let Some(prepared)=self.prepare_projected_source(mode5.node_id,mode5.resource_id,secondary,transition_value,scale_x as u32) else {
+            self.graph_layers.remove(&mode5.node_id);
+            return false;
+        };
+        let rasterized=if prepared.level>0 || prepared.deformed {
+            let width=geometry.width as u32;
+            let height=geometry.height as u32;
+            if width==0 || height==0 || u64::from(width)*u64::from(height)>16*1024*1024 {return false;}
+            let mut ax=(anchor_x >> prepared.level).wrapping_add(prepared.anchor_shift);
+            let mut ay=anchor_y >> prepared.level;
+            let sx=scale_x.wrapping_shl(prepared.level);
+            let sy=scale_y.wrapping_shl(prepared.level);
+            let mut temp=sx as u32;
+            let mut n=1;
+            while temp<65536 && temp!=0 && n<32 {
+                let delta=if temp>=32768 {(65536-temp)>>n} else {32768>>n};
+                ax=ax.wrapping_add(delta as i32);ay=ay.wrapping_add(delta as i32);
+                temp=temp.wrapping_mul(2);n+=1;
+            }
+            let project=|p:i32| if mode5.project_position {((i64::from(p)*i64::from(mode5.perspective_scale_fixed()))>>16) as i32} else {p};
+            let destination=[
+                (geometry.origin_offset_x as i32).wrapping_shl(16).wrapping_add(project(mode5.position_x)&65535),
+                (geometry.origin_offset_y as i32).wrapping_shl(16).wrapping_add(project(mode5.position_y)&65535),
+            ];
+            let raster=crate::native_effector::native_inverse_affine(&prepared.image,[width,height],destination,[ax,ay,angle,sx,sy],mode5.interpolation);
+            let key=format!("runtime:sprite-mode5-raster:{}",mode5.node_id);
+            self.store_graph_image(key.clone(),raster);
+            Some(key)
+        }else{None};
+
         let synced = self.graph90_sync_sprite_primary_layer(
             mode5.node_id,
             mode5.resource_id,
@@ -1878,6 +2028,14 @@ impl RuntimeTraceApi {
                 layer.scale_x = geometry.width / source.width.max(1.0);
                 layer.scale_y = geometry.height / source.height.max(1.0);
                 layer.rotation_degrees = geometry.rotation_degrees;
+                if let Some(key)=rasterized {
+                    layer.key=key;
+                    layer.width=geometry.width;
+                    layer.height=geometry.height;
+                    layer.src_x=0.;layer.src_y=0.;
+                    layer.scale_x=1.;layer.scale_y=1.;
+                    layer.rotation_degrees=0.;
+                }
                 // Graph91:37/36 (+0x5C..+0x64 / +0x6C..+0x74) were
                 // consumed by sub_41B4C0 before projection. Graph90:37/36 are
                 // different fields: integer CDspObj offset banks at
@@ -2010,18 +2168,27 @@ impl RuntimeTraceApi {
     /// Sprite [148] / [151]: the base rotation that Graph91:38 parameter
     /// 0x41 reports when property 0x41 never replaced it.
     pub(crate) fn graph90_sprite_base_rotation(&self, object: i32) -> Option<i32> {
-        let args = self.graph90_recorded_source_args(object, 0x5C, 17)?;
-        NativeMode5NodeArgs::from_source_args(&args).map(|args| args.rotation)
+        let (selector,count,index)=match self.graph90_sprite_mode(object)? {2=>(0x59,13,6),5=>(0x5C,17,10),6=>(0x5D,20,12),_=>return None};
+        self.graph90_recorded_source_args(object,selector,count)?.get(index).copied()
     }
 
     /// Graph91:38 parameter 0x10000000 for a mode-5 sprite (sub_4296C0).
     pub(crate) fn graph90_sprite_transform_parameters(&self, object: i32) -> Option<Vec<i32>> {
+        if self.graph90_sprite_mode(object)==Some(6) {
+            let args=self.graph90_recorded_source_args(object,0x5D,20)?;
+            let p=self.mode6_transform_parameters(&args)?;
+            return Some(vec![p[0],p[1],p[4],p[5],p[6]]);
+        }
         let (mode5, dynamic, _) = self.graph90_mode5_projection(object)?;
         Some(mode5.mode5_transform_parameters(dynamic).to_vec())
     }
 
     /// Sprite [181]/[182]: the projected raster size from sub_4291E0.
     pub(crate) fn graph90_sprite_projected_extent(&self, object: i32) -> Option<(i32, i32)> {
+        if self.graph90_sprite_mode(object)==Some(6) {
+            let p=&self.graph_object_properties.get(&object)?.named_properties;
+            return Some((*p.get("mode6-projected-width")?,*p.get("mode6-projected-height")?));
+        }
         let (_, _, geometry) = self.graph90_mode5_projection(object)?;
         Some((geometry.width as i32, geometry.height as i32))
     }
@@ -2178,24 +2345,10 @@ impl RuntimeTraceApi {
                 self.graph_bitmap_unblend_color = color;
                 ethornell_vm::Value::None
             }
-            (0x90, 0x1A) => {
-                let args = pop_args(stack, 6);
-                self.apply_native_bitmap_operation(&args, NativeBitmapOperation::Composite);
-                ethornell_vm::Value::None
-            }
-            (0x90, 0x1B) => {
-                let args = pop_args(stack, 4);
-                self.apply_native_bitmap_operation(&args, NativeBitmapOperation::Copy);
-                ethornell_vm::Value::None
-            }
-            (0x90, 0x1C) => {
-                let args = pop_args(stack, 10);
-                self.apply_native_bitmap_operation(&args, NativeBitmapOperation::Scale);
-                ethornell_vm::Value::None
-            }
-            (0x90, 0x1D) => {
-                let args = pop_args(stack, 4);
-                self.apply_native_bitmap_operation(&args, NativeBitmapOperation::Copy);
+            (0x90, 0x19..=0x1D) => {
+                let count=match id {0x19=>7,0x1A=>6,0x1B|0x1D=>4,0x1C=>10,_=>unreachable!()};
+                let args=Self::graph90_source_args(stack,count);
+                if let Err(error)=self.execute_bitmap_transform(0x90,id,&args) {return Some(Err(error));}
                 ethornell_vm::Value::None
             }
             (0x90, 0x21) => {
@@ -2583,20 +2736,7 @@ impl RuntimeTraceApi {
                 ethornell_vm::Value::None
             }
             (0x90, 0x44) => {
-                let args = Self::graph90_source_args(stack, 3);
-                let object = self.graph90_prepare_current_background(NativeBackgroundClass::BackD);
-                if args.len() == 3 {
-                    self.graph90_set_common_state(object, None, None, Some(args[2]), None);
-                    let properties = self.graph_object_properties.entry(object).or_default();
-                    properties
-                        .named_properties
-                        .insert("target-frame-count".to_string(), args[0]);
-                    properties
-                        .named_properties
-                        .insert("target-frame-table-pointer".to_string(), args[1]);
-                }
-                self.graph90_record_call(object, id, &args);
-                ethornell_vm::Value::None
+                unreachable!("BackD frame table is decoded by the VM pointer bridge")
             }
             (0x90, 0x45) => {
                 let args = Self::graph90_source_args(stack, 5);
@@ -2616,6 +2756,7 @@ impl RuntimeTraceApi {
                         .named_properties
                         .insert("target-extension-0x154".to_string(), args[4]);
                 }
+                if let Err(error)=self.configure_background_effect(id,&args,&[]) {return Some(Err(error));}
                 self.graph90_record_call(object, id, &args);
                 ethornell_vm::Value::None
             }
@@ -2631,6 +2772,7 @@ impl RuntimeTraceApi {
                         .or_default()
                         .format_resource = Some(args[0]);
                 }
+                if let Err(error)=self.configure_background_effect(id,&args,&[]) {return Some(Err(error));}
                 self.graph90_record_call(object, id, &args);
                 ethornell_vm::Value::None
             }
@@ -2651,6 +2793,10 @@ impl RuntimeTraceApi {
                     properties
                         .named_properties
                         .insert("target-record-pointer".to_string(), args[3]);
+                }
+                self.graph90_bind_vm_effect(object,args[0],args[1]);
+                if let Err(reason) = self.graph90_refresh_vm_effect(object) {
+                    return Some(Err(ethornell_vm::VmError::Runtime(format!("Graph90:47 {reason}"))));
                 }
                 self.graph90_record_call(object, id, &args);
                 ethornell_vm::Value::None
@@ -2676,6 +2822,7 @@ impl RuntimeTraceApi {
                         .named_properties
                         .insert("target-height".to_string(), args[4]);
                 }
+                if let Err(error)=self.configure_background_effect(id,&args,&[]) {return Some(Err(error));}
                 self.graph90_record_call(object, id, &args);
                 ethornell_vm::Value::None
             }
@@ -2693,6 +2840,7 @@ impl RuntimeTraceApi {
                         .named_properties
                         .insert("target-height".to_string(), args[2]);
                 }
+                if let Err(error)=self.configure_background_effect(id,&args,&[]) {return Some(Err(error));}
                 self.graph90_record_call(object, id, &args);
                 ethornell_vm::Value::None
             }
@@ -2714,6 +2862,7 @@ impl RuntimeTraceApi {
                         .named_properties
                         .insert("target-source-flag".to_string(), args[4]);
                 }
+                if let Err(error)=self.configure_background_effect(id,&args,&[]) {return Some(Err(error));}
                 self.graph90_record_call(object, id, &args);
                 ethornell_vm::Value::None
             }
@@ -2835,6 +2984,7 @@ impl RuntimeTraceApi {
                     ))));
                 }
                 if matches!(mode, 5 | 6) {
+                    self.invalidate_projected_mips(handle, [_x,_y,width,height]);
                     let _ = self.graph90_resync_fixed_sprite_geometry(handle);
                 }
                 self.graph_redraw_requested = Some(false);
@@ -3051,122 +3201,13 @@ impl RuntimeTraceApi {
                             "Graph90:57 bitmap {primary_bitmap} does not exist"
                         ))));
                     }
-                    let replaced = if !bitmap_valid {
-                        false
-                    } else {
-                        match mode {
-                            0 => {
-                                let position = self
-                                    .graph_native_base_position(*object)
-                                    .map(|(x, y)| (x as f32, y as f32))
-                                    .or_else(|| {
-                                        self.graph_layers
-                                            .get(object)
-                                            .map(|layer| (layer.x, layer.y))
-                                    });
-                                self.graph_object_properties
-                                    .entry(*object)
-                                    .or_default()
-                                    .format_resource = Some(*primary_bitmap);
-                                self.graph_transition_nodes.remove(object);
-                                self.graph90_sync_sprite_primary_layer(
-                                    *object,
-                                    *primary_bitmap,
-                                    position,
-                                )
-                            }
-                            2 => self
-                                .graph90_recorded_source_args(*object, 0x59, 13)
-                                .is_some_and(|mut mode_args| {
-                                    if let Some((x, y)) = self.graph_native_base_position(*object) {
-                                        mode_args[1] = x;
-                                        mode_args[2] = y;
-                                    }
-                                    mode_args[3] = *primary_bitmap;
-                                    self.graph_object_properties
-                                        .entry(*object)
-                                        .or_default()
-                                        .format_resource = Some(*primary_bitmap);
-                                    self.graph_transition_nodes.remove(object);
-                                    self.graph90_sync_mode2_primary_layer(&mode_args)
-                                }),
-                            5 => self
-                                .graph90_recorded_source_args(*object, 0x5C, 17)
-                                .is_some_and(|mut mode_args| {
-                                    let base = self
-                                        .graph_object_properties
-                                        .get(object)
-                                        .map(|properties| {
-                                            [
-                                                properties.native.fixed_position_x_16_16,
-                                                properties.native.fixed_position_y_16_16,
-                                                properties.native.fixed_position_z_16_16,
-                                            ]
-                                        })
-                                        .unwrap_or([0; 3]);
-                                    mode_args[1] = base[0];
-                                    mode_args[2] = base[1];
-                                    mode_args[3] = base[2];
-                                    mode_args[4] = *primary_bitmap;
-                                    mode_args[5] = -1;
-                                    mode_args[6] = 0;
-                                    mode_args[7] = -1;
-                                    let properties =
-                                        self.graph_object_properties.entry(*object).or_default();
-                                    properties.format_resource = Some(*primary_bitmap);
-                                    properties
-                                        .named_properties
-                                        .insert("mode5-secondary-bitmap".to_string(), -1);
-                                    properties
-                                        .named_properties
-                                        .insert("mode5-transition-value".to_string(), 0);
-                                    properties
-                                        .named_properties
-                                        .insert("mode5-transition-current".to_string(), 0);
-                                    properties
-                                        .named_properties
-                                        .insert("mode5-secondary-parameter".to_string(), -1);
-                                    self.graph_transition_nodes.remove(object);
-                                    self.graph90_sync_mode5_primary_layer(&mode_args)
-                                }),
-                            6 => self
-                                .graph90_recorded_source_args(*object, 0x5D, 20)
-                                .is_some_and(|mut mode_args| {
-                                    let base = self
-                                        .graph_object_properties
-                                        .get(object)
-                                        .map(|properties| {
-                                            [
-                                                properties.native.fixed_position_x_16_16,
-                                                properties.native.fixed_position_y_16_16,
-                                                properties.native.fixed_position_z_16_16,
-                                            ]
-                                        })
-                                        .unwrap_or([0; 3]);
-                                    mode_args[1] = base[0];
-                                    mode_args[2] = base[1];
-                                    mode_args[3] = base[2];
-                                    mode_args[4] = *primary_bitmap;
-                                    mode_args[5] = -1;
-                                    mode_args[6] = 0;
-                                    mode_args[7] = -1;
-                                    let properties =
-                                        self.graph_object_properties.entry(*object).or_default();
-                                    properties.format_resource = Some(*primary_bitmap);
-                                    properties
-                                        .named_properties
-                                        .insert("mode6-secondary-bitmap".to_string(), -1);
-                                    properties
-                                        .named_properties
-                                        .insert("mode6-transition-value".to_string(), 0);
-                                    properties
-                                        .named_properties
-                                        .insert("mode6-secondary-parameter".to_string(), -1);
-                                    self.graph_transition_nodes.remove(object);
-                                    self.graph90_sync_mode6_primary_layer(&mode_args)
-                                }),
-                            _ => false,
-                        }
+                    let replaced = self.graph90_replace_sprite_primary(*object, *primary_bitmap)
+                        .map_err(|_| ethornell_vm::VmError::Runtime(format!(
+                            "Graph90:57 sprite #{object} could not rebuild bitmap {primary_bitmap}"
+                        )));
+                    let replaced = match replaced {
+                        Ok(replaced) => replaced,
+                        Err(error) => return Some(Err(error)),
                     };
                     let layer_state = self.graph_layers.get(object).map(|layer| {
                         (
@@ -3424,7 +3465,7 @@ impl RuntimeTraceApi {
                     );
                     let properties = self.graph_object_properties.entry(args[0]).or_default();
                     properties.format_resource = Some(args[3]);
-                    properties.native.fixed_parameter_16_16 = args[6].saturating_mul(0x1_0000);
+                    properties.native.fixed_parameter_16_16 = args[6].wrapping_shl(16);
                     properties
                         .named_properties
                         .insert("mode3-mask-resource".to_string(), args[4]);
@@ -3435,6 +3476,7 @@ impl RuntimeTraceApi {
                         .named_properties
                         .insert("mode3-fixed-parameter".to_string(), args[6]);
                     self.graph90_sync_mode3_primary_layer(&args);
+                    if let Err(error)=self.configure_sprite_mask(&args) {return Some(Err(error));}
                     self.graph90_record_call(args[0], id, &args);
                 }
                 ethornell_vm::Value::None
@@ -3471,6 +3513,10 @@ impl RuntimeTraceApi {
                         .named_properties
                         .insert("mode4-record-pointer".to_string(), args[6]);
                     self.graph90_sync_mode4_primary_layer(&args);
+                    self.graph90_bind_vm_effect(args[0],args[3],args[4]);
+                    if let Err(reason) = self.graph90_refresh_vm_effect(args[0]) {
+                        return Some(Err(ethornell_vm::VmError::Runtime(format!("Graph90:5B {reason}"))));
+                    }
                     self.graph90_record_call(args[0], id, &args);
                 }
                 ethornell_vm::Value::None
@@ -3705,6 +3751,8 @@ impl RuntimeTraceApi {
             }
             (0x90, 0x5D) => {
                 let args = Self::graph90_source_args(stack, 20);
+                if args.len()!=20 {return Some(Err(ethornell_vm::VmError::Runtime("90:5D expected twenty arguments".into())));}
+                if args[4] as u32>=0x4000 || args[6] as u32>256 || args[18] as u32>256 || args[19] as u32>=65536 || !crate::native_effect::is_native_blend_mode(args[17]) {return Some(Err(ethornell_vm::VmError::Runtime("90:5D invalid bitmap, transition, alpha, priority or blend".into())));}
                 if args.len() == 20
                     && self.graph90_object_matches(
                         args[0],
@@ -3713,7 +3761,6 @@ impl RuntimeTraceApi {
                         GRAPH90_CLASS_SPRITE,
                     )
                 {
-                    self.graph90_begin_sprite_configuration(args[0], 6);
                     self.graph90_set_fixed_common_state(
                         args[0],
                         args[1],
@@ -3723,6 +3770,13 @@ impl RuntimeTraceApi {
                         Some(args[18]),
                         Some(args[19]),
                     );
+                    let primary_info=self.query_bitmap_info(args[4]);
+                    let secondary_info=if args[5]==-1 {None}else{self.query_bitmap_info(args[5])};
+                    if primary_info.is_none() || args[5]!=-1 && secondary_info.is_none() {return Some(Err(ethornell_vm::VmError::Runtime("90:5D missing primary or secondary bitmap".into())));}
+                    if let (Some(primary),Some(secondary))=(primary_info,secondary_info) {
+                        if primary.width!=secondary.width || primary.height!=secondary.height || primary.format!=secondary.format {return Some(Ok(ethornell_vm::Value::None));}
+                    }
+                    self.graph90_begin_sprite_configuration(args[0], 6);
                     let properties = self.graph_object_properties.entry(args[0]).or_default();
                     properties.format_resource = Some(args[4]);
                     properties
@@ -3748,6 +3802,7 @@ impl RuntimeTraceApi {
                             .named_properties
                             .insert(format!("mode6-transform-parameter-{index}"), value);
                     }
+                    self.native_mode6_rasters.remove(&args[0]);
                     let configured = self.graph90_sync_mode6_primary_layer(&args);
                     let primary_size = self
                         .resource_image_region(args[4])
@@ -3799,7 +3854,7 @@ impl RuntimeTraceApi {
                         "GraphConfigureSpriteMode6"
                     );
                     self.graph90_record_call(args[0], id, &args);
-                }
+                } else {return Some(Err(ethornell_vm::VmError::Runtime("90:5D invalid sprite object".into())));}
                 ethornell_vm::Value::None
             }
             (0x90, 0x60) => {
@@ -3844,62 +3899,10 @@ impl RuntimeTraceApi {
                 }
                 ethornell_vm::Value::None
             }
-            (0x90, 0x65) => {
-                let args = Self::graph90_source_args(stack, 4);
-                if args.len() == 4
-                    && self.graph90_object_matches(
-                        args[0],
-                        GRAPH90_FILTER_TAG,
-                        8,
-                        GRAPH90_CLASS_FILTER,
-                    )
-                {
-                    self.graph90_set_common_state(
-                        args[0],
-                        None,
-                        None,
-                        Some(args[2]),
-                        Some(args[3]),
-                    );
-                    self.graph_object_properties
-                        .entry(args[0])
-                        .or_default()
-                        .named_properties
-                        .insert("target-filter-parameter".to_string(), args[1]);
-                    self.graph90_record_call(args[0], id, &args);
-                }
-                ethornell_vm::Value::None
-            }
-            (0x90, 0x66) => {
-                let args = Self::graph90_source_args(stack, 7);
-                if args.len() == 7
-                    && self.graph90_object_matches(
-                        args[0],
-                        GRAPH90_FILTER_TAG,
-                        8,
-                        GRAPH90_CLASS_FILTER,
-                    )
-                {
-                    self.graph90_set_common_state(
-                        args[0],
-                        None,
-                        None,
-                        Some(args[5]),
-                        Some(args[6]),
-                    );
-                    let properties = self.graph_object_properties.entry(args[0]).or_default();
-                    properties.format_resource = (args[3] != -1).then_some(args[3]);
-                    properties
-                        .named_properties
-                        .insert("target-filter-reserved".to_string(), args[1]);
-                    properties
-                        .named_properties
-                        .insert("target-filter-parameter".to_string(), args[2]);
-                    properties
-                        .named_properties
-                        .insert("target-mask-parameter".to_string(), args[4]);
-                    self.graph90_record_call(args[0], id, &args);
-                }
+            (0x90, 0x65 | 0x66) => {
+                let args=Self::graph90_source_args(stack,if id==0x65{4}else{7});
+                if let Err(error)=self.configure_native_filter(id,&args){return Some(Err(error));}
+                self.graph90_record_call(args[0],id,&args);
                 ethornell_vm::Value::None
             }
             (0x90, 0x70) => {
@@ -3929,106 +3932,14 @@ impl RuntimeTraceApi {
                 }
                 ethornell_vm::Value::None
             }
-            (0x90, 0x75) => {
-                let args = Self::graph90_source_args(stack, 7);
-                if args.len() == 7
-                    && self.graph90_object_matches(args[0], GRAPH90_MAP_TAG, 8, GRAPH90_CLASS_MAP)
-                {
-                    self.graph90_set_common_state(
-                        args[0],
-                        Some((args[1], args[2])),
-                        Some(args[4]),
-                        Some(args[5]),
-                        Some(args[6]),
-                    );
-                    self.graph_object_properties
-                        .entry(args[0])
-                        .or_default()
-                        .format_resource = Some(args[3]);
-                    self.graph90_record_call(args[0], id, &args);
-                }
+            (0x90, 0x75 | 0x76 | 0x79 | 0x7A) => {
+                let count=match id{0x75=>7,0x76=>5,0x79=>6,_=>2};
+                let args=Self::graph90_source_args(stack,count);
+                if let Err(error)=self.configure_native_map(id,&args){return Some(Err(error));}
+                self.graph90_record_call(args[0],id,&args);
                 ethornell_vm::Value::None
             }
-            (0x90, 0x76) => {
-                let args = Self::graph90_source_args(stack, 5);
-                if args.len() == 5
-                    && self.graph90_object_matches(args[0], GRAPH90_MAP_TAG, 8, GRAPH90_CLASS_MAP)
-                {
-                    let properties = self.graph_object_properties.entry(args[0]).or_default();
-                    properties
-                        .named_properties
-                        .insert("map-columns".to_string(), args[1]);
-                    properties
-                        .named_properties
-                        .insert("map-rows".to_string(), args[2]);
-                    properties
-                        .named_properties
-                        .insert("map-cell-width".to_string(), args[3]);
-                    properties
-                        .named_properties
-                        .insert("map-cell-height".to_string(), args[4]);
-                    self.graph90_record_call(args[0], id, &args);
-                }
-                ethornell_vm::Value::None
-            }
-            (0x90, 0x78) => {
-                let args = Self::graph90_source_args(stack, 4);
-                if args.len() == 4
-                    && self.graph90_object_matches(args[0], GRAPH90_MAP_TAG, 8, GRAPH90_CLASS_MAP)
-                {
-                    let properties = self.graph_object_properties.entry(args[0]).or_default();
-                    properties
-                        .named_properties
-                        .insert("map-source-width".to_string(), args[1]);
-                    properties
-                        .named_properties
-                        .insert("map-source-height".to_string(), args[2]);
-                    properties
-                        .named_properties
-                        .insert("map-source-pointer".to_string(), args[3]);
-                    self.graph90_record_call(args[0], id, &args);
-                }
-                ethornell_vm::Value::None
-            }
-            (0x90, 0x79) => {
-                let args = Self::graph90_source_args(stack, 6);
-                if args.len() == 6
-                    && self.graph90_object_matches(args[0], GRAPH90_MAP_TAG, 8, GRAPH90_CLASS_MAP)
-                {
-                    let properties = self.graph_object_properties.entry(args[0]).or_default();
-                    properties
-                        .named_properties
-                        .insert("map-source-x".to_string(), args[1]);
-                    properties
-                        .named_properties
-                        .insert("map-source-y".to_string(), args[2]);
-                    properties
-                        .named_properties
-                        .insert("map-cell-offset-x".to_string(), args[3]);
-                    properties
-                        .named_properties
-                        .insert("map-cell-offset-y".to_string(), args[4]);
-                    properties
-                        .named_properties
-                        .insert("map-wrap".to_string(), args[5]);
-                    self.graph90_record_call(args[0], id, &args);
-                }
-                ethornell_vm::Value::None
-            }
-            (0x90, 0x7A) => {
-                let args = Self::graph90_source_args(stack, 2);
-                if args.len() == 2
-                    && self.graph90_object_matches(args[0], GRAPH90_MAP_TAG, 8, GRAPH90_CLASS_MAP)
-                {
-                    self.graph_object_properties
-                        .entry(args[0])
-                        .or_default()
-                        .named_properties
-                        .insert("map-replace-tile-id".to_string(), args[1]);
-                    self.graph90_record_call(args[0], id, &args);
-                }
-                ethornell_vm::Value::None
-            }
+            (0x90, 0x78) => unreachable!("90:78 uses the VM u16 tile-table bridge"),
             (0x90, 0x91) => {
                 let scope_value = pop_int_value(stack).unwrap_or_default();
                 let mode = pop_int_value(stack).unwrap_or_default();
@@ -4073,27 +3984,7 @@ impl RuntimeTraceApi {
                 ethornell_vm::Value::None
             }
             (0x90, 0xA0) | (0x90, 0xA2) | (0x90, 0xA3) => {
-                // The VM installs the selector-specific CProcSelectItem
-                // subclass after this host call. Keep the host side limited
-                // to target-shaped validation and state capture; these
-                // selectors are not generic text draws.
-                let count = if id == 0xA0 { 8 } else { 14 };
-                let args = pop_args(stack, count);
-                let values = args.iter().map(value_to_i32).collect::<Vec<_>>();
-                let item_count = values.get(count - 2).copied().unwrap_or_default();
-                let column_count = values.get(count - 4).copied().unwrap_or_default();
-                let initial_selection = values.get(count - 7).copied().unwrap_or_default();
-                tracing::info!(
-                    selector = format_args!("0x{id:02X}"),
-                    item_count,
-                    column_count,
-                    initial_selection,
-                    valid = (1..=16).contains(&item_count)
-                        && (1..=16).contains(&column_count)
-                        && (0..item_count).contains(&initial_selection),
-                    "start target item-selection procedure"
-                );
-                ethornell_vm::Value::None
+                unreachable!("CProcSelect parameters are decoded by the VM pointer bridge")
             }
             (0x90, 0xA4) => {
                 let style_b = pop_int_value(stack).unwrap_or_default();
@@ -4141,22 +4032,8 @@ impl RuntimeTraceApi {
                 ethornell_vm::Value::None
             }
             (0x90, 0xB0) | (0x90, 0xB1) => {
-                // These selectors install CProcSelectIcon/CProcSelectIconEx;
-                // they are not display-object transition or shake handlers.
-                let args = pop_args(stack, 7);
-                let values = args.iter().map(value_to_i32).collect::<Vec<_>>();
-                let icon_count = values.get(5).copied().unwrap_or_default();
-                let input_mode = values.get(2).copied().unwrap_or_default();
-                tracing::info!(
-                    selector = format_args!("0x{id:02X}"),
-                    icon_count,
-                    input_mode,
-                    valid = (1..=64).contains(&icon_count) && (0..=3).contains(&input_mode),
-                    "start target icon-selection procedure"
-                );
-                ethornell_vm::Value::None
+                unreachable!("CProcSelect parameters are decoded by the VM pointer bridge")
             }
-            // VM writes the output word for 0xBD.
             (0x90, 0xBD) => {
                 let _args = pop_args(stack, 2);
                 ethornell_vm::Value::Int(0)
@@ -4504,56 +4381,4 @@ impl RuntimeTraceApi {
         }
     }
 
-    pub(super) fn apply_native_bitmap_operation(
-        &mut self,
-        args: &[ethornell_vm::Value],
-        operation: NativeBitmapOperation,
-    ) {
-        let values = args.iter().map(value_to_i32).collect::<Vec<_>>();
-        let handles = values
-            .iter()
-            .rev()
-            .copied()
-            .filter(|value| self.graph_resources.contains_key(value))
-            .take(2)
-            .collect::<Vec<_>>();
-        let [destination, source] = handles.as_slice() else {
-            return;
-        };
-        match operation {
-            NativeBitmapOperation::Copy => self.copy_graph_backing(*source, *destination),
-            NativeBitmapOperation::Composite => {
-                let x = values.get(1).copied().unwrap_or_default();
-                let y = values.first().copied().unwrap_or_default();
-                self.composite_graph_bitmap(*destination, *source, x, y, 0, 256);
-            }
-            NativeBitmapOperation::Scale => {
-                let scale_x = values
-                    .iter()
-                    .copied()
-                    .find(|value| value.unsigned_abs() >= 0x100)
-                    .unwrap_or(0x1_0000);
-                let scale_y = scale_x;
-                if let Some(image) = self
-                    .graph_bitmap_image(*source)
-                    .and_then(|image| scale_decoded_image_fixed(&image, scale_x, scale_y))
-                {
-                    let width = image.width;
-                    let height = image.height;
-                    let key = format!("runtime:native-scale:{destination}");
-                    self.store_graph_image(key.clone(), image);
-                    self.graph_resources
-                        .insert(*destination, RuntimeGraphResource::whole(key));
-                    self.bitmap_dimensions.insert(*destination, (width, height));
-                }
-            }
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-pub(super) enum NativeBitmapOperation {
-    Copy,
-    Composite,
-    Scale,
 }

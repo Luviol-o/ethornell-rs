@@ -70,7 +70,7 @@ pub(crate) fn test_path_writable(path: &Path) -> bool {
 
 pub(crate) fn shell_open(target: &str) -> bool {
     if super::file_policy::restricted() { return false; }
-    if std::env::var_os("ETHORNELL_GUI_HEADLESS").is_some() {
+    if std::env::var_os("ETHORNELL_GUI_HEADLESS").is_some() || super::host_dialog::host_dialogs_suppressed() {
         return false;
     }
 

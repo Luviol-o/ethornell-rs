@@ -1,0 +1,18 @@
+[package]
+name = "ethornell_vita"
+version = "0.1.0"
+edition = "2024"
+license = "MPL-2.0"
+build = "build.rs"
+
+# A workspace of its own: the Vita build uses nightly and build-std, and its
+# own lockfile.
+[workspace]
+
+[package.metadata.vita]
+title_id = "ETHORNELL"
+title_name = "Ethornell"
+build_std = "std,panic_abort"
+
+[dependencies]
+ethornell-app = { path = "../../../crates/ethornell-app", default-features = false, features = ["host-driven"] }

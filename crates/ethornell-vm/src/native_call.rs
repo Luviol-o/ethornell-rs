@@ -4634,169 +4634,45 @@ const GRAPH90_BLIT_BITMAP_PARAMETERS: &[NativeParameterSpec] = &[
     },
 ];
 const GRAPH90_SYNTHESIZE_BITMAP_PARAMETERS: &[NativeParameterSpec] = &[
-    NativeParameterSpec {
-        name: "arg0",
-        kind: "i32 / bitmap operand",
-        description: "Source-order argument 0; handler/helper role is preserved but finer pixel-formula semantics remain open.",
-    },
-    NativeParameterSpec {
-        name: "arg1",
-        kind: "i32 / bitmap operand",
-        description: "Source-order argument 1; handler/helper role is preserved but finer pixel-formula semantics remain open.",
-    },
-    NativeParameterSpec {
-        name: "arg2",
-        kind: "i32 / bitmap operand",
-        description: "Source-order argument 2; handler/helper role is preserved but finer pixel-formula semantics remain open.",
-    },
-    NativeParameterSpec {
-        name: "arg3",
-        kind: "i32 / bitmap operand",
-        description: "Source-order argument 3; handler/helper role is preserved but finer pixel-formula semantics remain open.",
-    },
-    NativeParameterSpec {
-        name: "arg4",
-        kind: "i32 / bitmap operand",
-        description: "Source-order argument 4; handler/helper role is preserved but finer pixel-formula semantics remain open.",
-    },
-    NativeParameterSpec {
-        name: "arg5",
-        kind: "i32 / bitmap operand",
-        description: "Source-order argument 5; handler/helper role is preserved but finer pixel-formula semantics remain open.",
-    },
-    NativeParameterSpec {
-        name: "arg6",
-        kind: "i32 / bitmap operand",
-        description: "Source-order argument 6; handler/helper role is preserved but finer pixel-formula semantics remain open.",
-    },
+    NativeParameterSpec { name: "destination", kind: "bitmap handle", description: "Required native bitmap slot." },
+    NativeParameterSpec { name: "x", kind: "i32", description: "Native positional integer." },
+    NativeParameterSpec { name: "y", kind: "i32", description: "Native positional integer." },
+    NativeParameterSpec { name: "source", kind: "bitmap handle", description: "Required native bitmap slot." },
+    NativeParameterSpec { name: "mask", kind: "gray bitmap or -1", description: "Source-sized format3 plane, or crossfade fallback." },
+    NativeParameterSpec { name: "mask_shift", kind: "i32", description: "Native positional integer." },
+    NativeParameterSpec { name: "transition", kind: "u32 <=256", description: "Crossfade/mask strength." },
 ];
 const GRAPH90_COMPOSITE_BITMAPS_PARAMETERS: &[NativeParameterSpec] = &[
-    NativeParameterSpec {
-        name: "arg0",
-        kind: "i32 / bitmap operand",
-        description: "Source-order argument 0; handler/helper role is preserved but finer pixel-formula semantics remain open.",
-    },
-    NativeParameterSpec {
-        name: "arg1",
-        kind: "i32 / bitmap operand",
-        description: "Source-order argument 1; handler/helper role is preserved but finer pixel-formula semantics remain open.",
-    },
-    NativeParameterSpec {
-        name: "arg2",
-        kind: "i32 / bitmap operand",
-        description: "Source-order argument 2; handler/helper role is preserved but finer pixel-formula semantics remain open.",
-    },
-    NativeParameterSpec {
-        name: "arg3",
-        kind: "i32 / bitmap operand",
-        description: "Source-order argument 3; handler/helper role is preserved but finer pixel-formula semantics remain open.",
-    },
-    NativeParameterSpec {
-        name: "arg4",
-        kind: "i32 / bitmap operand",
-        description: "Source-order argument 4; handler/helper role is preserved but finer pixel-formula semantics remain open.",
-    },
-    NativeParameterSpec {
-        name: "arg5",
-        kind: "i32 / bitmap operand",
-        description: "Source-order argument 5; handler/helper role is preserved but finer pixel-formula semantics remain open.",
-    },
+    NativeParameterSpec { name: "destination", kind: "bitmap handle", description: "Required native bitmap slot." },
+    NativeParameterSpec { name: "source", kind: "bitmap handle", description: "Required native bitmap slot." },
+    NativeParameterSpec { name: "map1", kind: "format4 bitmap", description: "Displacement map covering destination." },
+    NativeParameterSpec { name: "map2", kind: "format4 bitmap or -1", description: "Optional equal-sized second vector map." },
+    NativeParameterSpec { name: "alpha", kind: "u32 <=256", description: "Map interpolation strength." },
+    NativeParameterSpec { name: "bilinear", kind: "BOOL", description: "Native sampling selector." },
 ];
 const GRAPH90_COPY_BITMAP_PARAMETERS: &[NativeParameterSpec] = &[
-    NativeParameterSpec {
-        name: "arg0",
-        kind: "i32 / bitmap operand",
-        description: "Source-order argument 0; handler/helper role is preserved but finer pixel-formula semantics remain open.",
-    },
-    NativeParameterSpec {
-        name: "arg1",
-        kind: "i32 / bitmap operand",
-        description: "Source-order argument 1; handler/helper role is preserved but finer pixel-formula semantics remain open.",
-    },
-    NativeParameterSpec {
-        name: "arg2",
-        kind: "i32 / bitmap operand",
-        description: "Source-order argument 2; handler/helper role is preserved but finer pixel-formula semantics remain open.",
-    },
-    NativeParameterSpec {
-        name: "arg3",
-        kind: "i32 / bitmap operand",
-        description: "Source-order argument 3; handler/helper role is preserved but finer pixel-formula semantics remain open.",
-    },
+    NativeParameterSpec { name: "destination", kind: "bitmap handle", description: "Required native bitmap slot." },
+    NativeParameterSpec { name: "source", kind: "bitmap handle", description: "Required native bitmap slot." },
+    NativeParameterSpec { name: "edge_mode", kind: "enum 0..1", description: "Black padding or edge clamp." },
+    NativeParameterSpec { name: "radius", kind: "u32 <=256", description: "Horizontal blur radius, 256 clipped to255." },
 ];
 const GRAPH90_SCALE_BITMAP_REGION_PARAMETERS: &[NativeParameterSpec] = &[
-    NativeParameterSpec {
-        name: "arg0",
-        kind: "i32 / bitmap operand",
-        description: "Source-order argument 0; handler/helper role is preserved but finer pixel-formula semantics remain open.",
-    },
-    NativeParameterSpec {
-        name: "arg1",
-        kind: "i32 / bitmap operand",
-        description: "Source-order argument 1; handler/helper role is preserved but finer pixel-formula semantics remain open.",
-    },
-    NativeParameterSpec {
-        name: "arg2",
-        kind: "i32 / bitmap operand",
-        description: "Source-order argument 2; handler/helper role is preserved but finer pixel-formula semantics remain open.",
-    },
-    NativeParameterSpec {
-        name: "arg3",
-        kind: "i32 / bitmap operand",
-        description: "Source-order argument 3; handler/helper role is preserved but finer pixel-formula semantics remain open.",
-    },
-    NativeParameterSpec {
-        name: "arg4",
-        kind: "i32 / bitmap operand",
-        description: "Source-order argument 4; handler/helper role is preserved but finer pixel-formula semantics remain open.",
-    },
-    NativeParameterSpec {
-        name: "arg5",
-        kind: "i32 / bitmap operand",
-        description: "Source-order argument 5; handler/helper role is preserved but finer pixel-formula semantics remain open.",
-    },
-    NativeParameterSpec {
-        name: "arg6",
-        kind: "i32 / bitmap operand",
-        description: "Source-order argument 6; handler/helper role is preserved but finer pixel-formula semantics remain open.",
-    },
-    NativeParameterSpec {
-        name: "arg7",
-        kind: "i32 / bitmap operand",
-        description: "Source-order argument 7; handler/helper role is preserved but finer pixel-formula semantics remain open.",
-    },
-    NativeParameterSpec {
-        name: "arg8",
-        kind: "i32 / bitmap operand",
-        description: "Source-order argument 8; handler/helper role is preserved but finer pixel-formula semantics remain open.",
-    },
-    NativeParameterSpec {
-        name: "arg9",
-        kind: "i32 / bitmap operand",
-        description: "Source-order argument 9; handler/helper role is preserved but finer pixel-formula semantics remain open.",
-    },
+    NativeParameterSpec { name: "destination", kind: "bitmap handle", description: "Required native bitmap slot." },
+    NativeParameterSpec { name: "dest_x", kind: "i32", description: "Native positional integer." },
+    NativeParameterSpec { name: "dest_y", kind: "i32", description: "Native positional integer." },
+    NativeParameterSpec { name: "dest_width", kind: "i32", description: "Native positional integer." },
+    NativeParameterSpec { name: "dest_height", kind: "i32", description: "Native positional integer." },
+    NativeParameterSpec { name: "source", kind: "bitmap handle", description: "Required native bitmap slot." },
+    NativeParameterSpec { name: "source_x", kind: "i32", description: "Native positional integer." },
+    NativeParameterSpec { name: "source_y", kind: "i32", description: "Native positional integer." },
+    NativeParameterSpec { name: "source_width", kind: "i32", description: "Native positional integer." },
+    NativeParameterSpec { name: "source_height", kind: "i32", description: "Native positional integer." },
 ];
 const GRAPH90_TRANSFORM_BITMAP_PARAMETERS: &[NativeParameterSpec] = &[
-    NativeParameterSpec {
-        name: "arg0",
-        kind: "i32 / bitmap operand",
-        description: "Source-order argument 0; handler/helper role is preserved but finer pixel-formula semantics remain open.",
-    },
-    NativeParameterSpec {
-        name: "arg1",
-        kind: "i32 / bitmap operand",
-        description: "Source-order argument 1; handler/helper role is preserved but finer pixel-formula semantics remain open.",
-    },
-    NativeParameterSpec {
-        name: "arg2",
-        kind: "i32 / bitmap operand",
-        description: "Source-order argument 2; handler/helper role is preserved but finer pixel-formula semantics remain open.",
-    },
-    NativeParameterSpec {
-        name: "arg3",
-        kind: "i32 / bitmap operand",
-        description: "Source-order argument 3; handler/helper role is preserved but finer pixel-formula semantics remain open.",
-    },
+    NativeParameterSpec { name: "destination", kind: "bitmap handle", description: "Required native bitmap slot." },
+    NativeParameterSpec { name: "source", kind: "bitmap handle", description: "Required native bitmap slot." },
+    NativeParameterSpec { name: "scale", kind: "nonzero 16.16", description: "Native inverse rotation scale." },
+    NativeParameterSpec { name: "angle", kind: "16.16 degrees", description: "Rotation about bitmap center." },
 ];
 const GRAPH90_BLIT_BITMAP_REGION_PARAMETERS: &[NativeParameterSpec] = &[
     NativeParameterSpec {
@@ -5632,7 +5508,7 @@ const GRAPH90_CONFIGURE_CURRENT_OBJECT_VM_EFFECT_PARAMETERS: &[NativeParameterSp
     NativeParameterSpec {
         name: "record_count",
         kind: "positive i32",
-        description: "Number of VM records.",
+        description: "Number of four-sample wave records.",
     },
     NativeParameterSpec {
         name: "record_pointer",
@@ -5679,14 +5555,14 @@ const GRAPH90_CONFIGURE_CURRENT_OBJECT_BITMAP_SIZE_PARAMETERS: &[NativeParameter
         description: "Target bitmap resource.",
     },
     NativeParameterSpec {
-        name: "width",
+        name: "scale_16_16",
         kind: "nonzero i32",
-        description: "Configured width.",
+        description: "Nonzero unsigned 16.16 scale of the rotating background.",
     },
     NativeParameterSpec {
-        name: "height",
-        kind: "nonzero i32",
-        description: "Configured height.",
+        name: "rotation_16_16",
+        kind: "i32 16.16 degrees",
+        description: "Rotation around the bitmap center.",
     },
 ];
 const GRAPH90_CONFIGURE_CURRENT_OBJECT_BLIT_SOURCES_PARAMETERS: &[NativeParameterSpec] = &[
@@ -6030,12 +5906,12 @@ const GRAPH90_CONFIGURE_SPRITE_VM_EFFECT_PARAMETERS: &[NativeParameterSpec] = &[
     NativeParameterSpec {
         name: "record_count",
         kind: "positive i32",
-        description: "VM effect-record count.",
+        description: "Number of four-sample wave records.",
     },
     NativeParameterSpec {
         name: "record_pointer",
         kind: "BP pointer",
-        description: "VM effect-record pointer.",
+        description: "Wave-table slot (0..=7), not a BP pointer.",
     },
     NativeParameterSpec {
         name: "alpha_parameter",
@@ -6182,49 +6058,31 @@ const GRAPH90_CONFIGURE_SPRITE_TRANSFORM_MODE6_PARAMETERS: &[NativeParameterSpec
         description: "Stored beside the optional secondary bitmap, or forced to -1 when absent.",
     },
     NativeParameterSpec {
-        name: "fixed_parameter_x",
-        kind: "i32 converted to 16.16",
-        description: "Mode-6 fixed-point field.",
+        name: "anchor_x", kind: "integer pixels", description: "Anchor converted to16.16.",
     },
     NativeParameterSpec {
-        name: "fixed_parameter_y",
-        kind: "i32 converted to 16.16",
-        description: "Mode-6 fixed-point field.",
+        name: "anchor_y", kind: "integer pixels", description: "Anchor converted to16.16.",
     },
     NativeParameterSpec {
-        name: "transform_parameter_0",
-        kind: "i32 target transform field",
-        description: "Mode-6 transform input.",
+        name: "pitch", kind: "16.16 degrees", description: "X-axis Euler angle.",
     },
     NativeParameterSpec {
-        name: "transform_parameter_1",
-        kind: "i32 target transform field",
-        description: "Mode-6 transform input.",
+        name: "heading", kind: "16.16 degrees", description: "Y-axis Euler angle.",
     },
     NativeParameterSpec {
-        name: "transform_parameter_2",
-        kind: "i32 target transform field",
-        description: "Mode-6 transform input.",
+        name: "bank", kind: "16.16 degrees", description: "Z-axis Euler angle.",
     },
     NativeParameterSpec {
-        name: "transform_parameter_3",
-        kind: "i32 target transform field",
-        description: "Mode-6 transform input.",
+        name: "rotation_order", kind: "enum0..5", description: "Euler-axis permutation.",
     },
     NativeParameterSpec {
-        name: "transform_parameter_4",
-        kind: "i32 target transform field",
-        description: "Mode-6 transform input.",
+        name: "distance", kind: "i32", description: "Projection focal distance.",
     },
     NativeParameterSpec {
-        name: "transform_parameter_5",
-        kind: "i32 target transform field",
-        description: "Mode-6 transform input.",
+        name: "project_position", kind: "BOOL", description: "Translate before or after perspective.",
     },
     NativeParameterSpec {
-        name: "transform_parameter_6",
-        kind: "i32 target transform field",
-        description: "Mode-6 transform input.",
+        name: "stored_sampling_flag", kind: "i32", description: "Stored flag; case6 always uses bilinear sampling.",
     },
     NativeParameterSpec {
         name: "blend_mode",
@@ -6261,63 +6119,19 @@ const GRAPH90_SET_FILTER_ENABLED_PARAMETERS: &[NativeParameterSpec] = &[
     },
 ];
 const GRAPH90_CONFIGURE_FILTER_PARAMETERS: &[NativeParameterSpec] = &[
-    NativeParameterSpec {
-        name: "filter",
-        kind: "filter handle",
-        description: "Target CDspObjFilter.",
-    },
-    NativeParameterSpec {
-        name: "filter_parameter",
-        kind: "i32 target filter selector",
-        description: "Primary filter parameter.",
-    },
-    NativeParameterSpec {
-        name: "alpha_parameter",
-        kind: "i32 transparency parameter",
-        description: "Target transparency parameter.",
-    },
-    NativeParameterSpec {
-        name: "priority",
-        kind: "u16 render priority",
-        description: "Display-chain priority.",
-    },
+    NativeParameterSpec { name: "filter", kind: "filter handle", description: "CDspObjFilter." },
+    NativeParameterSpec { name: "color", kind: "packed RGB", description: "Mode0 color blend." },
+    NativeParameterSpec { name: "strength", kind: "u32 <=256", description: "Native alpha after mask/multiplier." },
+    NativeParameterSpec { name: "priority", kind: "u32 <65536", description: "Display-chain priority." },
 ];
 const GRAPH90_CONFIGURE_FILTER_WITH_MASK_PARAMETERS: &[NativeParameterSpec] = &[
-    NativeParameterSpec {
-        name: "filter",
-        kind: "filter handle",
-        description: "Target CDspObjFilter.",
-    },
-    NativeParameterSpec {
-        name: "reserved",
-        kind: "i32 ignored by target core",
-        description: "Consumed by the public ABI but not used by sub_43F110.",
-    },
-    NativeParameterSpec {
-        name: "filter_parameter",
-        kind: "i32 target filter selector",
-        description: "Primary filter parameter.",
-    },
-    NativeParameterSpec {
-        name: "mask_resource",
-        kind: "format-3 resource handle or -1",
-        description: "Optional mask descriptor.",
-    },
-    NativeParameterSpec {
-        name: "mask_parameter",
-        kind: "i32 target mask field",
-        description: "Stored beside the validated mask descriptor.",
-    },
-    NativeParameterSpec {
-        name: "alpha_parameter",
-        kind: "i32 transparency parameter",
-        description: "Target transparency parameter.",
-    },
-    NativeParameterSpec {
-        name: "priority",
-        kind: "u16 render priority",
-        description: "Display-chain priority.",
-    },
+    NativeParameterSpec { name: "filter", kind: "filter handle", description: "CDspObjFilter." },
+    NativeParameterSpec { name: "mode", kind: "enum 0..3", description: "Color blend, brightness, luma colorization or XOR blend. Other values draw nothing." },
+    NativeParameterSpec { name: "color", kind: "packed RGB", description: "Filter color." },
+    NativeParameterSpec { name: "mask", kind: "format3 bitmap or -1", description: "Optional screen-sized gray mask; overrides mode." },
+    NativeParameterSpec { name: "mask_shift", kind: "i32", description: "Native shift count uses low five bits." },
+    NativeParameterSpec { name: "strength", kind: "u32 <=256", description: "Native filter strength." },
+    NativeParameterSpec { name: "priority", kind: "u32 <65536", description: "Display-chain priority." },
 ];
 const GRAPH90_CREATE_MAP_OBJECT_PARAMETERS: &[NativeParameterSpec] = &[];
 const GRAPH90_RELEASE_MAP_OBJECT_PARAMETERS: &[NativeParameterSpec] = &[NativeParameterSpec {
@@ -6375,31 +6189,11 @@ const GRAPH90_CONFIGURE_MAP_OBJECT_PARAMETERS: &[NativeParameterSpec] = &[
     },
 ];
 const GRAPH90_INITIALIZE_MAP_GRID_PARAMETERS: &[NativeParameterSpec] = &[
-    NativeParameterSpec {
-        name: "map",
-        kind: "map handle",
-        description: "Target CDspObjMap.",
-    },
-    NativeParameterSpec {
-        name: "columns",
-        kind: "i32 1..=256",
-        description: "Grid columns.",
-    },
-    NativeParameterSpec {
-        name: "rows",
-        kind: "i32 1..=256",
-        description: "Grid rows.",
-    },
-    NativeParameterSpec {
-        name: "cell_width",
-        kind: "positive i32",
-        description: "Tile-cell width.",
-    },
-    NativeParameterSpec {
-        name: "cell_height",
-        kind: "positive i32",
-        description: "Tile-cell height.",
-    },
+    NativeParameterSpec { name: "map", kind: "map handle", description: "CDspObjMap." },
+    NativeParameterSpec { name: "columns", kind: "positive u32", description: "At most1024/cell_width." },
+    NativeParameterSpec { name: "rows", kind: "positive u32", description: "At most768/cell_height." },
+    NativeParameterSpec { name: "cell_width", kind: "u32 1..256", description: "Tile width." },
+    NativeParameterSpec { name: "cell_height", kind: "u32 1..256", description: "Tile height." },
 ];
 const GRAPH90_UPLOAD_MAP_TILE_DATA_PARAMETERS: &[NativeParameterSpec] = &[
     NativeParameterSpec {
@@ -6456,16 +6250,8 @@ const GRAPH90_SET_MAP_VIEWPORT_PARAMETERS: &[NativeParameterSpec] = &[
     },
 ];
 const GRAPH90_REPLACE_MAP_TILE_ID_PARAMETERS: &[NativeParameterSpec] = &[
-    NativeParameterSpec {
-        name: "map",
-        kind: "map handle",
-        description: "Target CDspObjMap.",
-    },
-    NativeParameterSpec {
-        name: "tile_id",
-        kind: "u16 tile identifier",
-        description: "Tile identifier replaced in the secondary grid using the target complement rule.",
-    },
+    NativeParameterSpec { name: "map", kind: "map handle", description: "CDspObjMap." },
+    NativeParameterSpec { name: "tile_id", kind: "i32", description: "Invalidate matching current IDs using complemented desired IDs; extra desired-cursor advance on matches is preserved." },
 ];
 const GRAPH90_CREATE_WINDOW_OBJECT_PARAMETERS: &[NativeParameterSpec] = &[
     NativeParameterSpec {
@@ -6881,12 +6667,12 @@ const GRAPH90_SELECTION_COLUMN_LAYOUT_PARAMETERS: &[NativeParameterSpec] = &[
     NativeParameterSpec {
         name: "window",
         kind: "window handle",
-        description: "Window whose fixed column layout is updated.",
+        description: "Window whose per-item text colors are updated.",
     },
     NativeParameterSpec {
         name: "layout",
         kind: "BP pointer to 16 i32 values or null",
-        description: "Target copies exactly 16 DWORDs and toggles the custom-layout gate.",
+        description: "Target copies exactly 16 RGB DWORDs and toggles the per-item-color gate.",
     },
 ];
 const GRAPH90_INTERACTIVE_POLL_GATE_PARAMETERS: &[NativeParameterSpec] = &[NativeParameterSpec {
@@ -8078,51 +7864,15 @@ const GRAPH91_DETACH_OBJECT_PARAMETERS: &[NativeParameterSpec] = &[
     },
 ];
 const GRAPH91_MULTILAYER_INITIALIZE_PARAMETERS: &[NativeParameterSpec] = &[
-    NativeParameterSpec {
-        name: "x",
-        kind: "i32",
-        description: "CDspObjBackML base X position.",
-    },
-    NativeParameterSpec {
-        name: "y",
-        kind: "i32",
-        description: "CDspObjBackML base Y position.",
-    },
-    NativeParameterSpec {
-        name: "bitmap",
-        kind: "bitmap handle",
-        description: "Bitmap assigned to layer zero.",
-    },
-    NativeParameterSpec {
-        name: "source_x",
-        kind: "i32",
-        description: "Layer-zero source X.",
-    },
-    NativeParameterSpec {
-        name: "source_y",
-        kind: "i32",
-        description: "Layer-zero source Y.",
-    },
-    NativeParameterSpec {
-        name: "rotation",
-        kind: "signed fixed-point",
-        description: "Layer-zero rotation/deformation value.",
-    },
-    NativeParameterSpec {
-        name: "scale_x",
-        kind: "nonzero signed 16.16",
-        description: "Layer-zero horizontal scale.",
-    },
-    NativeParameterSpec {
-        name: "scale_y",
-        kind: "nonzero signed 16.16",
-        description: "Layer-zero vertical scale.",
-    },
-    NativeParameterSpec {
-        name: "transparency",
-        kind: "i32",
-        description: "Layer-zero composition/transparency field.",
-    },
+    NativeParameterSpec { name: "destination_x", kind: "signed16.16", description: "Layer0 destination anchor X." },
+    NativeParameterSpec { name: "destination_y", kind: "signed16.16", description: "Layer0 destination anchor Y." },
+    NativeParameterSpec { name: "bitmap", kind: "bitmap handle", description: "Live source with captured generation." },
+    NativeParameterSpec { name: "source_x", kind: "signed16.16", description: "Source anchor X." },
+    NativeParameterSpec { name: "source_y", kind: "signed16.16", description: "Source anchor Y." },
+    NativeParameterSpec { name: "angle", kind: "16.16 degrees", description: "Layer0 rotation." },
+    NativeParameterSpec { name: "scale_x", kind: "nonzero16.16", description: "Horizontal scale." },
+    NativeParameterSpec { name: "scale_y", kind: "nonzero16.16", description: "Vertical scale." },
+    NativeParameterSpec { name: "bilinear", kind: "BOOL", description: "Sampling flag, not transparency." },
 ];
 const GRAPH91_MULTILAYER_INDEX_PARAMETERS: &[NativeParameterSpec] = &[NativeParameterSpec {
     name: "layer",
@@ -8193,53 +7943,17 @@ const GRAPH91_MULTILAYER_BITMAP_PARAMETERS: &[NativeParameterSpec] = &[
     },
 ];
 const GRAPH91_MULTILAYER_TRANSFORM_PARAMETERS: &[NativeParameterSpec] = &[
-    NativeParameterSpec {
-        name: "layer",
-        kind: "0..=7",
-        description: "Layer index.",
-    },
-    NativeParameterSpec {
-        name: "rotation",
-        kind: "signed fixed-point",
-        description: "Rotation/deformation field.",
-    },
-    NativeParameterSpec {
-        name: "scale_x",
-        kind: "nonzero signed 16.16",
-        description: "Horizontal scale.",
-    },
-    NativeParameterSpec {
-        name: "scale_y",
-        kind: "nonzero signed 16.16",
-        description: "Vertical scale.",
-    },
-    NativeParameterSpec {
-        name: "transparency",
-        kind: "i32",
-        description: "Composition/transparency field.",
-    },
+    NativeParameterSpec { name: "layer", kind: "u32 <8", description: "Private layer index." },
+    NativeParameterSpec { name: "angle", kind: "16.16 degrees", description: "Base rotation." },
+    NativeParameterSpec { name: "scale_x", kind: "nonzero16.16", description: "Base horizontal scale." },
+    NativeParameterSpec { name: "scale_y", kind: "nonzero16.16", description: "Base vertical scale." },
+    NativeParameterSpec { name: "bilinear", kind: "BOOL", description: "Sampling selector; strength is configured separately by91:45." },
 ];
 const GRAPH91_MULTILAYER_TRANSFORM_VELOCITY_PARAMETERS: &[NativeParameterSpec] = &[
-    NativeParameterSpec {
-        name: "layer",
-        kind: "0..=7",
-        description: "Layer index.",
-    },
-    NativeParameterSpec {
-        name: "rotation_delta",
-        kind: "i32",
-        description: "Per-frame rotation increment.",
-    },
-    NativeParameterSpec {
-        name: "scale_x_delta",
-        kind: "i32",
-        description: "Per-frame horizontal-scale increment.",
-    },
-    NativeParameterSpec {
-        name: "scale_y_delta",
-        kind: "i32",
-        description: "Per-frame vertical-scale increment.",
-    },
+    NativeParameterSpec { name: "layer", kind: "u32 <8", description: "Private layer index." },
+    NativeParameterSpec { name: "angle_delta", kind: "16.16 degrees", description: "Coefficient applied through rotation curve to fixed8.24 progress." },
+    NativeParameterSpec { name: "scale_x_delta", kind: "16.16", description: "Reciprocal interpolation target offset." },
+    NativeParameterSpec { name: "scale_y_delta", kind: "16.16", description: "Reciprocal interpolation target offset." },
 ];
 
 const GRAPH91_SPRITE_RELATION_PARAMETERS: &[NativeParameterSpec] = &[
@@ -8272,154 +7986,42 @@ const GRAPH91_EFFECTOR_ENABLED_PARAMETERS: &[NativeParameterSpec] = &[
     },
 ];
 const GRAPH91_DUAL_VECTOR_EFFECTOR_PARAMETERS: &[NativeParameterSpec] = &[
-    NativeParameterSpec {
-        name: "effector",
-        kind: "effector handle",
-        description: "Target CDspObjEffector.",
-    },
-    NativeParameterSpec {
-        name: "first_vector_map",
-        kind: "screen-sized format-4 bitmap",
-        description: "Required first vector map.",
-    },
-    NativeParameterSpec {
-        name: "second_vector_map",
-        kind: "screen-sized format-4 bitmap or -1",
-        description: "Optional second vector map.",
-    },
-    NativeParameterSpec {
-        name: "blend_parameter",
-        kind: "i32",
-        description: "Target mode-zero composition field.",
-    },
-    NativeParameterSpec {
-        name: "gradient_mode",
-        kind: "i32",
-        description: "Target mode-zero selector field.",
-    },
-    NativeParameterSpec {
-        name: "priority",
-        kind: "i32",
-        description: "Display-object priority.",
-    },
+    NativeParameterSpec { name: "effector", kind: "effector handle", description: "CDspObjEffector." },
+    NativeParameterSpec { name: "map1", kind: "format4 bitmap", description: "Must cover screen." },
+    NativeParameterSpec { name: "map2", kind: "format4 bitmap or -1", description: "Must cover screen independently; dimensions may differ from first." },
+    NativeParameterSpec { name: "strength", kind: "u32 <=256", description: "Native effect alpha, not output layer opacity." },
+    NativeParameterSpec { name: "bilinear", kind: "BOOL", description: "Displacement sampling selector." },
+    NativeParameterSpec { name: "priority", kind: "u32 <65536", description: "Display-chain priority." },
 ];
 const GRAPH91_GRADIENT_EFFECTOR_PARAMETERS: &[NativeParameterSpec] = &[
-    NativeParameterSpec {
-        name: "effector",
-        kind: "effector handle",
-        description: "Target CDspObjEffector.",
-    },
-    NativeParameterSpec {
-        name: "gradient_type",
-        kind: "0 or 1",
-        description: "Target gradient selector.",
-    },
-    NativeParameterSpec {
-        name: "blend_parameter",
-        kind: "i32",
-        description: "Composition field.",
-    },
-    NativeParameterSpec {
-        name: "priority",
-        kind: "i32",
-        description: "Display-object priority.",
-    },
+    NativeParameterSpec { name: "effector", kind: "effector handle", description: "CDspObjEffector." },
+    NativeParameterSpec { name: "edge_mode", kind: "enum0..1", description: "Horizontal blur black padding or edge clamp." },
+    NativeParameterSpec { name: "radius", kind: "u32 <=256", description: "Native blur width stored as alpha." },
+    NativeParameterSpec { name: "priority", kind: "u32 <65536", description: "Display-chain priority." },
 ];
 const GRAPH91_RIPPLE_EFFECTOR_PARAMETERS: &[NativeParameterSpec] = &[
-    NativeParameterSpec {
-        name: "effector",
-        kind: "effector handle",
-        description: "Target CDspObjEffector.",
-    },
-    NativeParameterSpec {
-        name: "vector_distance_map",
-        kind: "screen-sized format-6 bitmap",
-        description: "Combined vector and distance map.",
-    },
-    NativeParameterSpec {
-        name: "maximum_distance",
-        kind: "nonzero i32",
-        description: "Distance normalization limit.",
-    },
-    NativeParameterSpec {
-        name: "ripple",
-        kind: "registered ripple index",
-        description: "Target ripple-table entry.",
-    },
-    NativeParameterSpec {
-        name: "blend_parameter",
-        kind: "i32",
-        description: "Composition field.",
-    },
-    NativeParameterSpec {
-        name: "priority",
-        kind: "i32",
-        description: "Display-object priority.",
-    },
+    NativeParameterSpec { name: "effector", kind: "effector handle", description: "CDspObjEffector." },
+    NativeParameterSpec { name: "map", kind: "format6 bitmap", description: "Exactly screen extent." },
+    NativeParameterSpec { name: "sample_count", kind: "nonzero u32", description: "Four copied wave samples per record." },
+    NativeParameterSpec { name: "wave_slot", kind: "enum0..7", description: "Wave table slot, not BP pointer." },
+    NativeParameterSpec { name: "amplitude", kind: "u32 <=256", description: "Wave amplitude multiplier." },
+    NativeParameterSpec { name: "priority", kind: "u32 <65536", description: "Display-chain priority." },
 ];
 const GRAPH91_TRANSFORM_EFFECTOR_PARAMETERS: &[NativeParameterSpec] = &[
-    NativeParameterSpec {
-        name: "effector",
-        kind: "effector handle",
-        description: "Target CDspObjEffector.",
-    },
-    NativeParameterSpec {
-        name: "x",
-        kind: "i32",
-        description: "Mode-three base X.",
-    },
-    NativeParameterSpec {
-        name: "y",
-        kind: "i32",
-        description: "Mode-three base Y.",
-    },
-    NativeParameterSpec {
-        name: "rotation",
-        kind: "i32",
-        description: "Mode-three rotation.",
-    },
-    NativeParameterSpec {
-        name: "scale_x",
-        kind: "nonzero signed 16.16",
-        description: "Horizontal scale.",
-    },
-    NativeParameterSpec {
-        name: "scale_y",
-        kind: "nonzero signed 16.16",
-        description: "Vertical scale.",
-    },
-    NativeParameterSpec {
-        name: "effect_parameter",
-        kind: "i32",
-        description: "Target mode-three field.",
-    },
-    NativeParameterSpec {
-        name: "alpha",
-        kind: "i32",
-        description: "Composition/transparency field.",
-    },
-    NativeParameterSpec {
-        name: "priority",
-        kind: "i32",
-        description: "Display-object priority.",
-    },
+    NativeParameterSpec { name: "effector", kind: "effector handle", description: "CDspObjEffector." },
+    NativeParameterSpec { name: "source_x", kind: "signed16.16", description: "Source anchor X." },
+    NativeParameterSpec { name: "source_y", kind: "signed16.16", description: "Source anchor Y." },
+    NativeParameterSpec { name: "angle", kind: "16.16 degrees", description: "Inverse affine rotation." },
+    NativeParameterSpec { name: "scale_x", kind: "nonzero unsigned16.16", description: "Horizontal scale at strength256." },
+    NativeParameterSpec { name: "scale_y", kind: "nonzero unsigned16.16", description: "Vertical scale at strength256." },
+    NativeParameterSpec { name: "bilinear", kind: "BOOL", description: "Four-bit bilinear sampling flag." },
+    NativeParameterSpec { name: "strength", kind: "u32 <=256", description: "Native effect alpha, not output layer opacity." },
+    NativeParameterSpec { name: "priority", kind: "u32 <65536", description: "Display-chain priority." },
 ];
 const GRAPH91_SURFACE_EFFECTOR_PARAMETERS: &[NativeParameterSpec] = &[
-    NativeParameterSpec {
-        name: "effector",
-        kind: "effector handle",
-        description: "Target CDspObjEffector.",
-    },
-    NativeParameterSpec {
-        name: "blend_parameter",
-        kind: "i32",
-        description: "Mode-four composition field.",
-    },
-    NativeParameterSpec {
-        name: "priority",
-        kind: "i32",
-        description: "Display-object priority.",
-    },
+    NativeParameterSpec { name: "effector", kind: "effector handle", description: "CDspObjEffector." },
+    NativeParameterSpec { name: "retention", kind: "u32 <=256", description: "Weight of retained previous result; configuration clears it to black." },
+    NativeParameterSpec { name: "priority", kind: "u32 <65536", description: "Display-chain priority." },
 ];
 const GRAPH91_CREATE_LANDSCAPE_PARAMETERS: &[NativeParameterSpec] = &[
     NativeParameterSpec {
@@ -9832,145 +9434,37 @@ const GRAPH92_INVERT_ALPHA_BITMAP_PARAMETERS: &[NativeParameterSpec] = &[NativeP
     description: "Alpha/grayscale bytes inverted in place.",
 }];
 const GRAPH92_COMPOSE_ALPHA_PARAMETERS: &[NativeParameterSpec] = &[
-    NativeParameterSpec {
-        name: "temporary_alpha_bitmap",
-        kind: "bitmap handle",
-        description: "Temporary or primary format-3 alpha map.",
-    },
-    NativeParameterSpec {
-        name: "offset_x",
-        kind: "i32",
-        description: "Translated overlap X offset.",
-    },
-    NativeParameterSpec {
-        name: "offset_y",
-        kind: "i32",
-        description: "Translated overlap Y offset.",
-    },
-    NativeParameterSpec {
-        name: "destination_bitmap",
-        kind: "bitmap handle",
-        description: "Destination alpha-bearing bitmap.",
-    },
-    NativeParameterSpec {
-        name: "optional_source",
-        kind: "bitmap handle or -1",
-        description: "Optional second source used by the native alpha composition helper.",
-    },
-    NativeParameterSpec {
-        name: "blend_parameter",
-        kind: "i32",
-        description: "Native composition/blend parameter.",
-    },
+    NativeParameterSpec { name: "destination_gray", kind: "bitmap handle", description: "Required native bitmap slot." },
+    NativeParameterSpec { name: "x", kind: "i32", description: "Native positional integer." },
+    NativeParameterSpec { name: "y", kind: "i32", description: "Native positional integer." },
+    NativeParameterSpec { name: "primary", kind: "bitmap handle", description: "Required native bitmap slot." },
+    NativeParameterSpec { name: "other", kind: "bitmap or -1", description: "Optional equal-format second alpha source." },
+    NativeParameterSpec { name: "transition", kind: "i32", description: "Native positional integer." },
 ];
 const GRAPH92_BITMAP_TEXT_MEASURE_PARAMETERS: &[NativeParameterSpec] = &[
-    NativeParameterSpec {
-        name: "destination_bitmap",
-        kind: "bitmap handle",
-        description: "Bitmap receiving immediate text.",
-    },
-    NativeParameterSpec {
-        name: "x",
-        kind: "i32",
-        description: "Text origin X.",
-    },
-    NativeParameterSpec {
-        name: "y",
-        kind: "i32",
-        description: "Text origin Y.",
-    },
-    NativeParameterSpec {
-        name: "text",
-        kind: "script string",
-        description: "Text rendered by the target native font subsystem.",
-    },
-    NativeParameterSpec {
-        name: "font",
-        kind: "font selector",
-        description: "Target font selector.",
-    },
-    NativeParameterSpec {
-        name: "size",
-        kind: "i32",
-        description: "Font size.",
-    },
-    NativeParameterSpec {
-        name: "style",
-        kind: "i32",
-        description: "Font style flags.",
-    },
-    NativeParameterSpec {
-        name: "character_spacing",
-        kind: "i32",
-        description: "Character advance adjustment.",
-    },
-    NativeParameterSpec {
-        name: "layout_mode",
-        kind: "i32",
-        description: "Native text layout option.",
-    },
-    NativeParameterSpec {
-        name: "glyph_padding",
-        kind: "i32",
-        description: "Remaining native text-render parameter.",
-    },
+    NativeParameterSpec { name: "destination_bitmap", kind: "bitmap handle", description: "Required native bitmap slot." },
+    NativeParameterSpec { name: "x", kind: "i32", description: "Native positional integer." },
+    NativeParameterSpec { name: "y", kind: "i32", description: "Native positional integer." },
+    NativeParameterSpec { name: "text", kind: "script string", description: "Plain SJIS; LF only layout control." },
+    NativeParameterSpec { name: "font", kind: "registered font", description: "Font selector." },
+    NativeParameterSpec { name: "height", kind: "i32 4..200", description: "Font pixel height." },
+    NativeParameterSpec { name: "width_percent", kind: "i32 25..200", description: "Horizontal cell scaling." },
+    NativeParameterSpec { name: "bold", kind: "BOOL", description: "Bold glyph stroke." },
+    NativeParameterSpec { name: "proportional", kind: "BOOL", description: "Ink bounds plus native margins." },
+    NativeParameterSpec { name: "color", kind: "packed RGB", description: "Glyph color." },
 ];
 const GRAPH92_BITMAP_TEXT_WRAP_PARAMETERS: &[NativeParameterSpec] = &[
-    NativeParameterSpec {
-        name: "destination_bitmap",
-        kind: "bitmap handle",
-        description: "Bitmap receiving wrapped immediate text.",
-    },
-    NativeParameterSpec {
-        name: "x",
-        kind: "i32",
-        description: "Text origin X.",
-    },
-    NativeParameterSpec {
-        name: "y",
-        kind: "i32",
-        description: "Text origin Y.",
-    },
-    NativeParameterSpec {
-        name: "text",
-        kind: "script string",
-        description: "Text rendered by the target native font subsystem.",
-    },
-    NativeParameterSpec {
-        name: "font",
-        kind: "font selector",
-        description: "Target font selector.",
-    },
-    NativeParameterSpec {
-        name: "size",
-        kind: "i32",
-        description: "Font size.",
-    },
-    NativeParameterSpec {
-        name: "style",
-        kind: "i32",
-        description: "Font style flags.",
-    },
-    NativeParameterSpec {
-        name: "character_spacing",
-        kind: "i32",
-        description: "Character advance adjustment.",
-    },
-    NativeParameterSpec {
-        name: "layout_mode",
-        kind: "i32",
-        description: "Native text layout option.",
-    },
-    NativeParameterSpec {
-        name: "glyph_padding",
-        kind: "i32",
-        description: "Remaining native text-render parameter.",
-    },
-    NativeParameterSpec {
-        name: "wrap_limit",
-        kind: "i32",
-        description: "Enables/controls wrapping and line-count return semantics.",
-    },
+    NativeParameterSpec { name: "destination_bitmap", kind: "bitmap handle", description: "Required native bitmap slot." },
+    NativeParameterSpec { name: "x", kind: "i32", description: "Native positional integer." },
+    NativeParameterSpec { name: "y", kind: "i32", description: "Native positional integer." },
+    NativeParameterSpec { name: "text", kind: "script string", description: "Plain SJIS; LF only layout control." },
+    NativeParameterSpec { name: "font", kind: "registered font", description: "Font selector." },
+    NativeParameterSpec { name: "height", kind: "i32 4..200", description: "Font pixel height." },
+    NativeParameterSpec { name: "width_percent", kind: "i32 25..200", description: "Horizontal cell scaling." },
+    NativeParameterSpec { name: "bold", kind: "BOOL", description: "Bold glyph stroke." },
+    NativeParameterSpec { name: "proportional", kind: "BOOL", description: "Ink bounds plus native margins." },
+    NativeParameterSpec { name: "color", kind: "packed RGB", description: "Glyph color." },
+    NativeParameterSpec { name: "extra_line_pitch_percent", kind: "i32 percent", description: "Line advance is height plus height times this percentage." },
 ];
 const GRAPH92_DRAW_BITMAP_TEXT_PARAMETERS: &[NativeParameterSpec] = &[
     NativeParameterSpec {
@@ -13409,36 +12903,12 @@ const USER_C0_04_PARAMETERS: &[NativeParameterSpec] = &[
     },
 ];
 const USER_C0_05_PARAMETERS: &[NativeParameterSpec] = &[
-    NativeParameterSpec {
-        name: "handle",
-        kind: "particle-screen handle",
-        description: "Target particle screen.",
-    },
-    NativeParameterSpec {
-        name: "x",
-        kind: "i32",
-        description: "Display x coordinate.",
-    },
-    NativeParameterSpec {
-        name: "y",
-        kind: "i32",
-        description: "Display y coordinate.",
-    },
-    NativeParameterSpec {
-        name: "z",
-        kind: "i32",
-        description: "Display-chain depth.",
-    },
-    NativeParameterSpec {
-        name: "blend_mode",
-        kind: "native blend enum",
-        description: "Validated target blend mode.",
-    },
-    NativeParameterSpec {
-        name: "alpha",
-        kind: "i32 0..256",
-        description: "Target inverse-alpha parameter.",
-    },
+    NativeParameterSpec { name: "handle", kind: "particle-screen handle", description: "Target particle screen." },
+    NativeParameterSpec { name: "x", kind: "i32", description: "Display X." },
+    NativeParameterSpec { name: "y", kind: "i32", description: "Display Y." },
+    NativeParameterSpec { name: "blend_mode", kind: "native blend enum", description: "Composition selector." },
+    NativeParameterSpec { name: "alpha", kind: "u32 <=256", description: "Inverse transparency." },
+    NativeParameterSpec { name: "priority", kind: "u32 <65536", description: "Display-chain priority." },
 ];
 const USER_C0_06_PARAMETERS: &[NativeParameterSpec] = &[
     NativeParameterSpec {
@@ -13480,80 +12950,24 @@ const USER_C0_09_PARAMETERS: &[NativeParameterSpec] = &[
     },
 ];
 const USER_C0_0A_PARAMETERS: &[NativeParameterSpec] = &[
-    NativeParameterSpec {
-        name: "handle",
-        kind: "particle-screen handle",
-        description: "Target particle screen.",
-    },
-    NativeParameterSpec {
-        name: "capacity",
-        kind: "u32 <= 100",
-        description: "Particle generator capacity/percentage field validated by sub_424A50.",
-    },
+    NativeParameterSpec { name: "handle", kind: "particle-screen handle", description: "Target particle screen." },
+    NativeParameterSpec { name: "rectangle_threshold", kind: "i32", description: "Dirty-rectangle count at which native redraws the whole object; portable rendering redraws the whole frame." },
 ];
 const USER_C0_0B_PARAMETERS: &[NativeParameterSpec] = &[
-    NativeParameterSpec {
-        name: "argument_0",
-        kind: "target positional i32",
-        description: "Native positional argument 0 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_1",
-        kind: "target positional i32",
-        description: "Native positional argument 1 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_2",
-        kind: "target positional i32",
-        description: "Native positional argument 2 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_3",
-        kind: "target positional i32",
-        description: "Native positional argument 3 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_4",
-        kind: "target positional i32",
-        description: "Native positional argument 4 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_5",
-        kind: "target positional i32",
-        description: "Native positional argument 5 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_6",
-        kind: "target positional i32",
-        description: "Native positional argument 6 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_7",
-        kind: "target positional i32",
-        description: "Native positional argument 7 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_8",
-        kind: "target positional i32",
-        description: "Native positional argument 8 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_9",
-        kind: "target positional i32",
-        description: "Native positional argument 9 preserved from the target wrapper ABI.",
-    },
+    NativeParameterSpec { name: "handle", kind: "particle-screen handle", description: "Target particle screen." },
+    NativeParameterSpec { name: "camera_x", kind: "i32", description: "Camera translation in source 16.16 coordinates; converted to 24.8 internally." },
+    NativeParameterSpec { name: "camera_y", kind: "i32", description: "Camera translation in source 16.16 coordinates; converted to 24.8 internally." },
+    NativeParameterSpec { name: "camera_z", kind: "i32", description: "Camera translation in source 16.16 coordinates; converted to 24.8 internally." },
+    NativeParameterSpec { name: "angle_x", kind: "16.16 degrees", description: "Euler rotation, applied X then Y then Z." },
+    NativeParameterSpec { name: "angle_y", kind: "16.16 degrees", description: "Euler rotation, applied X then Y then Z." },
+    NativeParameterSpec { name: "angle_z", kind: "16.16 degrees", description: "Euler rotation, applied X then Y then Z." },
+    NativeParameterSpec { name: "focal_distance", kind: "i32 >0", description: "Perspective projection distance." },
+    NativeParameterSpec { name: "center_x", kind: "i32", description: "Projection origin X." },
+    NativeParameterSpec { name: "center_y", kind: "i32", description: "Projection origin Y." },
 ];
 const USER_C0_0C_PARAMETERS: &[NativeParameterSpec] = &[
-    NativeParameterSpec {
-        name: "handle",
-        kind: "particle-screen handle",
-        description: "Target particle screen.",
-    },
-    NativeParameterSpec {
-        name: "percent",
-        kind: "u32 0..100",
-        description: "Validated emission percentage.",
-    },
+    NativeParameterSpec { name: "handle", kind: "particle-screen handle", description: "Target particle screen." },
+    NativeParameterSpec { name: "interval_ms", kind: "u32 <=100", description: "Simulation tick interval; zero suspends simulation. Recomputes wind segment durations." },
 ];
 const USER_C0_0D_PARAMETERS: &[NativeParameterSpec] = &[
     NativeParameterSpec {
@@ -13573,162 +12987,42 @@ const USER_C0_0F_PARAMETERS: &[NativeParameterSpec] = &[NativeParameterSpec {
     description: "Target particle screen.",
 }];
 const USER_C0_10_PARAMETERS: &[NativeParameterSpec] = &[
-    NativeParameterSpec {
-        name: "argument_0",
-        kind: "target positional i32",
-        description: "Native positional argument 0 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_1",
-        kind: "target positional i32",
-        description: "Native positional argument 1 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_2",
-        kind: "target positional i32",
-        description: "Native positional argument 2 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_3",
-        kind: "target positional i32",
-        description: "Native positional argument 3 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_4",
-        kind: "target positional i32",
-        description: "Native positional argument 4 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_5",
-        kind: "target positional i32",
-        description: "Native positional argument 5 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_6",
-        kind: "target positional i32",
-        description: "Native positional argument 6 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_7",
-        kind: "target positional i32",
-        description: "Native positional argument 7 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_8",
-        kind: "target positional i32",
-        description: "Native positional argument 8 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_9",
-        kind: "target positional i32",
-        description: "Native positional argument 9 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_10",
-        kind: "target positional i32",
-        description: "Native positional argument 10 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_11",
-        kind: "target positional i32",
-        description: "Native positional argument 11 preserved from the target wrapper ABI.",
-    },
+    NativeParameterSpec { name: "handle", kind: "particle-screen handle", description: "Target particle screen." },
+    NativeParameterSpec { name: "enabled", kind: "BOOL", description: "Enables the environment air field." },
+    NativeParameterSpec { name: "wind_x", kind: "i32", description: "Wind vector bank, converted by arithmetic right shift eight." },
+    NativeParameterSpec { name: "spread_x", kind: "i32", description: "Wind vector bank, converted by arithmetic right shift eight." },
+    NativeParameterSpec { name: "wind_y", kind: "i32", description: "Wind vector bank, converted by arithmetic right shift eight." },
+    NativeParameterSpec { name: "spread_y", kind: "i32", description: "Wind vector bank, converted by arithmetic right shift eight." },
+    NativeParameterSpec { name: "wind_z", kind: "i32", description: "Wind vector bank, converted by arithmetic right shift eight." },
+    NativeParameterSpec { name: "spread_z", kind: "i32", description: "Wind vector bank, converted by arithmetic right shift eight." },
+    NativeParameterSpec { name: "hold_duration", kind: "u32 ms", description: "Wind segment timing divided by the simulation interval." },
+    NativeParameterSpec { name: "hold_spread", kind: "u32 ms", description: "Wind segment timing divided by the simulation interval." },
+    NativeParameterSpec { name: "transition_duration", kind: "u32 ms", description: "Wind segment timing divided by the simulation interval." },
+    NativeParameterSpec { name: "transition_spread", kind: "u32 ms", description: "Wind segment timing divided by the simulation interval." },
 ];
 const USER_C0_18_PARAMETERS: &[NativeParameterSpec] = &[
-    NativeParameterSpec {
-        name: "argument_0",
-        kind: "target positional i32",
-        description: "Native positional argument 0 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_1",
-        kind: "target positional i32",
-        description: "Native positional argument 1 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_2",
-        kind: "target positional i32",
-        description: "Native positional argument 2 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_3",
-        kind: "target positional i32",
-        description: "Native positional argument 3 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_4",
-        kind: "target positional i32",
-        description: "Native positional argument 4 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_5",
-        kind: "target positional i32",
-        description: "Native positional argument 5 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_6",
-        kind: "target positional i32",
-        description: "Native positional argument 6 preserved from the target wrapper ABI.",
-    },
+    NativeParameterSpec { name: "kind", kind: "enum 0..1", description: "Zero is snow, one is firefly." },
+    NativeParameterSpec { name: "bank", kind: "u32 <64", description: "Particle animation/style bank." },
+    NativeParameterSpec { name: "frame_count", kind: "u32 <=32", description: "Copied animation frames." },
+    NativeParameterSpec { name: "first_bitmap", kind: "bitmap handle or -1", description: "Consecutive RGB/ARGB bitmaps of equal dimensions and format." },
+    NativeParameterSpec { name: "period", kind: "u32", description: "Base animation timing divisor." },
+    NativeParameterSpec { name: "period_spread", kind: "u32", description: "Timing spread, interpreted by the interpolation mode." },
+    NativeParameterSpec { name: "numerator", kind: "u32", description: "Numerator of the 16.16 animation step." },
 ];
 const USER_C0_1A_PARAMETERS: &[NativeParameterSpec] = &[
-    NativeParameterSpec {
-        name: "argument_0",
-        kind: "target positional i32",
-        description: "Native positional argument 0 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_1",
-        kind: "target positional i32",
-        description: "Native positional argument 1 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_2",
-        kind: "target positional i32",
-        description: "Native positional argument 2 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_3",
-        kind: "target positional i32",
-        description: "Native positional argument 3 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_4",
-        kind: "target positional i32",
-        description: "Native positional argument 4 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_5",
-        kind: "target positional i32",
-        description: "Native positional argument 5 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_6",
-        kind: "target positional i32",
-        description: "Native positional argument 6 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_7",
-        kind: "target positional i32",
-        description: "Native positional argument 7 preserved from the target wrapper ABI.",
-    },
+    NativeParameterSpec { name: "kind", kind: "enum 0..1", description: "Zero is snow, one is firefly." },
+    NativeParameterSpec { name: "bank", kind: "u32 <64", description: "Particle animation/style bank." },
+    NativeParameterSpec { name: "frame_count", kind: "u32 <=32", description: "Copied animation frames." },
+    NativeParameterSpec { name: "first_bitmap", kind: "bitmap handle or -1", description: "Consecutive RGB/ARGB bitmaps of equal dimensions and format." },
+    NativeParameterSpec { name: "period", kind: "u32", description: "Base animation timing divisor." },
+    NativeParameterSpec { name: "period_spread", kind: "u32", description: "Timing spread, interpreted by the interpolation mode." },
+    NativeParameterSpec { name: "numerator", kind: "u32", description: "Numerator of the 16.16 animation step." },
+    NativeParameterSpec { name: "mix", kind: "i32", description: "Secondary firefly animation mixing factor; kind must be one." },
 ];
 const USER_C0_1B_PARAMETERS: &[NativeParameterSpec] = &[
-    NativeParameterSpec {
-        name: "argument_0",
-        kind: "target positional i32",
-        description: "Native positional argument 0 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_1",
-        kind: "target positional i32",
-        description: "Native positional argument 1 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_2",
-        kind: "target positional i32",
-        description: "Native positional argument 2 preserved from the target wrapper ABI.",
-    },
+    NativeParameterSpec { name: "kind", kind: "enum 0..1", description: "Zero is snow, one is firefly." },
+    NativeParameterSpec { name: "bank", kind: "u32 <64", description: "Particle animation/style bank." },
+    NativeParameterSpec { name: "mix", kind: "i32", description: "Mixing factor of an already-defined secondary firefly bank." },
 ];
 const USER_C0_1F_PARAMETERS: &[NativeParameterSpec] = &[NativeParameterSpec {
     name: "mode",
@@ -13736,303 +13030,75 @@ const USER_C0_1F_PARAMETERS: &[NativeParameterSpec] = &[NativeParameterSpec {
     description: "Global target particle interpolation mode.",
 }];
 const USER_C0_20_PARAMETERS: &[NativeParameterSpec] = &[
-    NativeParameterSpec {
-        name: "argument_0",
-        kind: "target positional i32",
-        description: "Native positional argument 0 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_1",
-        kind: "target positional i32",
-        description: "Native positional argument 1 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_2",
-        kind: "target positional i32",
-        description: "Native positional argument 2 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_3",
-        kind: "target positional i32",
-        description: "Native positional argument 3 preserved from the target wrapper ABI.",
-    },
+    NativeParameterSpec { name: "handle", kind: "particle-screen handle", description: "Target particle screen." },
+    NativeParameterSpec { name: "bank", kind: "u32 <64", description: "Particle animation/style bank." },
+    NativeParameterSpec { name: "count", kind: "u32", description: "Requested live particles; aggregate across both kinds must not exceed 32768." },
+    NativeParameterSpec { name: "spacing_ms", kind: "u32", description: "Time between emissions." },
 ];
 const USER_C0_24_PARAMETERS: &[NativeParameterSpec] = &[
-    NativeParameterSpec {
-        name: "argument_0",
-        kind: "target positional i32",
-        description: "Native positional argument 0 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_1",
-        kind: "target positional i32",
-        description: "Native positional argument 1 preserved from the target wrapper ABI.",
-    },
+    NativeParameterSpec { name: "bank", kind: "u32 <64", description: "Particle animation/style bank." },
+    NativeParameterSpec { name: "bitmap", kind: "bitmap handle or -1", description: "Single-frame primary animation definition." },
 ];
 const USER_C0_25_PARAMETERS: &[NativeParameterSpec] = &[
-    NativeParameterSpec {
-        name: "argument_0",
-        kind: "target positional i32",
-        description: "Native positional argument 0 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_1",
-        kind: "target positional i32",
-        description: "Native positional argument 1 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_2",
-        kind: "target positional i32",
-        description: "Native positional argument 2 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_3",
-        kind: "target positional i32",
-        description: "Native positional argument 3 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_4",
-        kind: "target positional i32",
-        description: "Native positional argument 4 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_5",
-        kind: "target positional i32",
-        description: "Native positional argument 5 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_6",
-        kind: "target positional i32",
-        description: "Native positional argument 6 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_7",
-        kind: "target positional i32",
-        description: "Native positional argument 7 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_8",
-        kind: "target positional i32",
-        description: "Native positional argument 8 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_9",
-        kind: "target positional i32",
-        description: "Native positional argument 9 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_10",
-        kind: "target positional i32",
-        description: "Native positional argument 10 preserved from the target wrapper ABI.",
-    },
+    NativeParameterSpec { name: "bank", kind: "u32 <64", description: "Particle animation/style bank." },
+    NativeParameterSpec { name: "x_spread", kind: "i32", description: "Snow distribution/motion field converted by arithmetic right shift eight; spreads use absolute values." },
+    NativeParameterSpec { name: "start_y", kind: "i32", description: "Snow distribution/motion field converted by arithmetic right shift eight; spreads use absolute values." },
+    NativeParameterSpec { name: "z_spread", kind: "i32", description: "Snow distribution/motion field converted by arithmetic right shift eight; spreads use absolute values." },
+    NativeParameterSpec { name: "velocity_x", kind: "i32", description: "Snow distribution/motion field converted by arithmetic right shift eight; spreads use absolute values." },
+    NativeParameterSpec { name: "velocity_x_spread", kind: "i32", description: "Snow distribution/motion field converted by arithmetic right shift eight; spreads use absolute values." },
+    NativeParameterSpec { name: "velocity_y", kind: "i32", description: "Snow distribution/motion field converted by arithmetic right shift eight; spreads use absolute values." },
+    NativeParameterSpec { name: "velocity_y_spread", kind: "i32", description: "Snow distribution/motion field converted by arithmetic right shift eight; spreads use absolute values." },
+    NativeParameterSpec { name: "velocity_z", kind: "i32", description: "Snow distribution/motion field converted by arithmetic right shift eight; spreads use absolute values." },
+    NativeParameterSpec { name: "velocity_z_spread", kind: "i32", description: "Snow distribution/motion field converted by arithmetic right shift eight; spreads use absolute values." },
+    NativeParameterSpec { name: "wind_coefficient", kind: "BP pointer to i32", description: "Dereferenced DWORD converted by right shift eight." },
 ];
 const USER_C0_28_PARAMETERS: &[NativeParameterSpec] = &[
-    NativeParameterSpec {
-        name: "argument_0",
-        kind: "target positional i32",
-        description: "Native positional argument 0 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_1",
-        kind: "target positional i32",
-        description: "Native positional argument 1 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_2",
-        kind: "target positional i32",
-        description: "Native positional argument 2 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_3",
-        kind: "target positional i32",
-        description: "Native positional argument 3 preserved from the target wrapper ABI.",
-    },
+    NativeParameterSpec { name: "handle", kind: "particle-screen handle", description: "Target particle screen." },
+    NativeParameterSpec { name: "bank", kind: "u32 <64", description: "Particle animation/style bank." },
+    NativeParameterSpec { name: "count", kind: "u32", description: "Requested live particles; aggregate across both kinds must not exceed 32768." },
+    NativeParameterSpec { name: "spacing_ms", kind: "u32", description: "Time between emissions." },
 ];
 const USER_C0_29_PARAMETERS: &[NativeParameterSpec] = &[
-    NativeParameterSpec {
-        name: "argument_0",
-        kind: "target positional i32",
-        description: "Native positional argument 0 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_1",
-        kind: "target positional i32",
-        description: "Native positional argument 1 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_2",
-        kind: "target positional i32",
-        description: "Native positional argument 2 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_3",
-        kind: "target positional i32",
-        description: "Native positional argument 3 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_4",
-        kind: "target positional i32",
-        description: "Native positional argument 4 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_5",
-        kind: "target positional i32",
-        description: "Native positional argument 5 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_6",
-        kind: "target positional i32",
-        description: "Native positional argument 6 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_7",
-        kind: "target positional i32",
-        description: "Native positional argument 7 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_8",
-        kind: "target positional i32",
-        description: "Native positional argument 8 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_9",
-        kind: "target positional i32",
-        description: "Native positional argument 9 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_10",
-        kind: "target positional i32",
-        description: "Native positional argument 10 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_11",
-        kind: "target positional i32",
-        description: "Native positional argument 11 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_12",
-        kind: "target positional i32",
-        description: "Native positional argument 12 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_13",
-        kind: "target positional i32",
-        description: "Native positional argument 13 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_14",
-        kind: "target positional i32",
-        description: "Native positional argument 14 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_15",
-        kind: "target positional i32",
-        description: "Native positional argument 15 preserved from the target wrapper ABI.",
-    },
+    NativeParameterSpec { name: "handle", kind: "particle-screen handle", description: "Target particle screen." },
+    NativeParameterSpec { name: "bank", kind: "u32 <64", description: "Particle animation/style bank." },
+    NativeParameterSpec { name: "origin_x", kind: "i32", description: "Recovered per-screen firefly emitter field; see particle.c for native conversion." },
+    NativeParameterSpec { name: "origin_y_spread", kind: "i32", description: "Recovered per-screen firefly emitter field; see particle.c for native conversion." },
+    NativeParameterSpec { name: "origin_z", kind: "i32", description: "Recovered per-screen firefly emitter field; see particle.c for native conversion." },
+    NativeParameterSpec { name: "normalize_velocity", kind: "i32", description: "Recovered per-screen firefly emitter field; see particle.c for native conversion." },
+    NativeParameterSpec { name: "speed", kind: "i32", description: "Recovered per-screen firefly emitter field; see particle.c for native conversion." },
+    NativeParameterSpec { name: "speed_spread", kind: "i32", description: "Recovered per-screen firefly emitter field; see particle.c for native conversion." },
+    NativeParameterSpec { name: "axis_x", kind: "i32", description: "Recovered per-screen firefly emitter field; see particle.c for native conversion." },
+    NativeParameterSpec { name: "axis_y", kind: "i32", description: "Recovered per-screen firefly emitter field; see particle.c for native conversion." },
+    NativeParameterSpec { name: "axis_z", kind: "i32", description: "Recovered per-screen firefly emitter field; see particle.c for native conversion." },
+    NativeParameterSpec { name: "adjust_lifetime", kind: "i32", description: "Recovered per-screen firefly emitter field; see particle.c for native conversion." },
+    NativeParameterSpec { name: "interpolate_velocity", kind: "i32", description: "Recovered per-screen firefly emitter field; see particle.c for native conversion." },
+    NativeParameterSpec { name: "rotate_velocity", kind: "i32", description: "Recovered per-screen firefly emitter field; see particle.c for native conversion." },
+    NativeParameterSpec { name: "angle", kind: "i32", description: "Recovered per-screen firefly emitter field; see particle.c for native conversion." },
+    NativeParameterSpec { name: "angle_spread", kind: "i32", description: "Recovered per-screen firefly emitter field; see particle.c for native conversion." },
 ];
 const USER_C0_2C_PARAMETERS: &[NativeParameterSpec] = &[
-    NativeParameterSpec {
-        name: "argument_0",
-        kind: "target positional i32",
-        description: "Native positional argument 0 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_1",
-        kind: "target positional i32",
-        description: "Native positional argument 1 preserved from the target wrapper ABI.",
-    },
+    NativeParameterSpec { name: "bank", kind: "u32 <64", description: "Particle animation/style bank." },
+    NativeParameterSpec { name: "bitmap", kind: "bitmap handle or -1", description: "Single-frame primary animation definition." },
 ];
 const USER_C0_2D_PARAMETERS: &[NativeParameterSpec] = &[
-    NativeParameterSpec {
-        name: "argument_0",
-        kind: "target positional i32",
-        description: "Native positional argument 0 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_1",
-        kind: "target positional i32",
-        description: "Native positional argument 1 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_2",
-        kind: "target positional i32",
-        description: "Native positional argument 2 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_3",
-        kind: "target positional i32",
-        description: "Native positional argument 3 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_4",
-        kind: "target positional i32",
-        description: "Native positional argument 4 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_5",
-        kind: "target positional i32",
-        description: "Native positional argument 5 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_6",
-        kind: "target positional i32",
-        description: "Native positional argument 6 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_7",
-        kind: "target positional i32",
-        description: "Native positional argument 7 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_8",
-        kind: "target positional i32",
-        description: "Native positional argument 8 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_9",
-        kind: "target positional i32",
-        description: "Native positional argument 9 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_10",
-        kind: "target positional i32",
-        description: "Native positional argument 10 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_11",
-        kind: "target positional i32",
-        description: "Native positional argument 11 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_12",
-        kind: "target positional i32",
-        description: "Native positional argument 12 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_13",
-        kind: "target positional i32",
-        description: "Native positional argument 13 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_14",
-        kind: "target positional i32",
-        description: "Native positional argument 14 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_15",
-        kind: "target positional i32",
-        description: "Native positional argument 15 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_16",
-        kind: "target positional i32",
-        description: "Native positional argument 16 preserved from the target wrapper ABI.",
-    },
-    NativeParameterSpec {
-        name: "argument_17",
-        kind: "target positional i32",
-        description: "Native positional argument 17 preserved from the target wrapper ABI.",
-    },
+    NativeParameterSpec { name: "bank", kind: "u32 <64", description: "Particle animation/style bank." },
+    NativeParameterSpec { name: "lifetime", kind: "i32", description: "Firefly style field; see particle.c for absolute-value and fixed-point conversions." },
+    NativeParameterSpec { name: "lifetime_spread", kind: "i32", description: "Firefly style field; see particle.c for absolute-value and fixed-point conversions." },
+    NativeParameterSpec { name: "x_spread", kind: "i32", description: "Firefly style field; see particle.c for absolute-value and fixed-point conversions." },
+    NativeParameterSpec { name: "start_y", kind: "i32", description: "Firefly style field; see particle.c for absolute-value and fixed-point conversions." },
+    NativeParameterSpec { name: "z_spread", kind: "i32", description: "Firefly style field; see particle.c for absolute-value and fixed-point conversions." },
+    NativeParameterSpec { name: "velocity_x", kind: "i32", description: "Firefly style field; see particle.c for absolute-value and fixed-point conversions." },
+    NativeParameterSpec { name: "velocity_x_spread", kind: "i32", description: "Firefly style field; see particle.c for absolute-value and fixed-point conversions." },
+    NativeParameterSpec { name: "velocity_y", kind: "i32", description: "Firefly style field; see particle.c for absolute-value and fixed-point conversions." },
+    NativeParameterSpec { name: "velocity_y_spread", kind: "i32", description: "Firefly style field; see particle.c for absolute-value and fixed-point conversions." },
+    NativeParameterSpec { name: "velocity_z", kind: "i32", description: "Firefly style field; see particle.c for absolute-value and fixed-point conversions." },
+    NativeParameterSpec { name: "velocity_z_spread", kind: "i32", description: "Firefly style field; see particle.c for absolute-value and fixed-point conversions." },
+    NativeParameterSpec { name: "segment_duration", kind: "i32", description: "Firefly style field; see particle.c for absolute-value and fixed-point conversions." },
+    NativeParameterSpec { name: "segment_spread", kind: "i32", description: "Firefly style field; see particle.c for absolute-value and fixed-point conversions." },
+    NativeParameterSpec { name: "wind_coefficient", kind: "BP pointer to i32", description: "Dereferenced DWORD, shifted right eight." },
+    NativeParameterSpec { name: "fade_in", kind: "i32", description: "Zero becomes one." },
+    NativeParameterSpec { name: "fade_out", kind: "i32", description: "Zero becomes one." },
+    NativeParameterSpec { name: "blend_mode", kind: "native blend enum", description: "Per-particle composition selector." },
 ];
 const USER_C0_40_PARAMETERS: &[NativeParameterSpec] = &[
     NativeParameterSpec {
@@ -16060,7 +15126,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: SYS_DECODE_DATA_PARAMETERS,
         returns: "decoded length through procedure completion",
         scheduling: NativeSchedulingEffect::WaitProcedure,
-        notes: "Target constructs DCProcDecodeData. SDC streams are exact; the non-SDC target decoder remains represented by a bounded raw-copy compatibility path.",
+        notes: "BGI 1.622 499120/465880: SDC, DSC, native CBG v1/v2 buffer or raw copy; input length is not decoded capacity. Tagged BP addresses are resolved; invalid decode returns zero.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SYS_RECORD_TABLE_OPEN,
@@ -16540,7 +15606,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_SYNTHESIZE_BITMAP_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target performs a three-resource bitmap synthesis.",
+        notes: "47A8A0 ->4027E0 ->411C40: positional translated crossfade or source-sized gray mask color blend, exact native integer kernels.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_COMPOSITE_BITMAPS,
@@ -16548,7 +15614,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_COMPOSITE_BITMAPS_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target performs a six-argument multi-source composite.",
+        notes: "47AA20 ->402970 ->412AB0: displacement of source into destination using one/two format4 maps and native nearest/bilinear sampling.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_COPY_BITMAP,
@@ -16556,7 +15622,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_COPY_BITMAP_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target performs a four-argument bitmap copy mode.",
+        notes: "47ABC0 ->402AC0 ->413D90: horizontal blur with black-padding/edge-clamp modes; matching format/extents.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_SCALE_BITMAP_REGION,
@@ -16564,7 +15630,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_SCALE_BITMAP_REGION_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target performs a ten-argument scaled-region operation.",
+        notes: "47ACE0 ->402C90 ->414EA0: clipped rectangle resampling with0x10004 scale and seven-bit bilinear lanes.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_TRANSFORM_BITMAP,
@@ -16572,7 +15638,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_TRANSFORM_BITMAP_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target performs a four-argument bitmap transform/copy.",
+        notes: "47AE90 ->402EA0 ->414B70: centered inverse rotation/scale, shared with BackRTT.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_BLIT_BITMAP_REGION,
@@ -16716,7 +15782,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_SET_OBJECT_PROPERTY_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_47B340 pops extra, value, property, object; sub_4438B0 calls the class SetProperty (vtable +0x5C) and re-sorts on a changed key; status 255/5/254 are script errors. Ported: CDspObj sub_41B8E0 (0 position, 1 blit mode +0xA8, 2 recursive SetAlpha, 0xC0/0xC1/0xC4, 0x8000/0x8001/0x8100, 0x7FFF0000 auto-update flag, 0x7FFFFFFF user slots), CDspObjSprite sub_4285A0 mode gating for 0x40-0x43/0x60/0x80-0x83/0x8F/0x11 and BackF 0x40000000. Open: Sprite 0x10/0x100 rebuilds, mode-6 consumers, and the BackML/BackRPL/BackRTT/BackSTR/Effector values are stored but not yet used by their renderers.",
+        notes: "sub_47B340 (BGI 1.622 sub_47BE40) pops extra, value, property, object; class SetProperty at vtable+0x5C re-sorts when the key changes; status 255/5/254 are fatal. Ported base CDspObj properties, Sprite mode gates and BackF 0x40000000. Sprite property 0x10 now rebuilds primary bitmap through the shared Graph90:57 path (1.622 sub_428940 -> sub_427670), preserves geometry/display state, clears mode-5/6 secondary transitions, and retains the new bitmap for later reprojection; modes 1/3/4 ignore it without bitmap validation. Open: Sprite 0x100 mode-4 rebuild, mode-6 consumers and stored BackML/BackRPL/BackRTT/BackSTR/Effector values still lack renderer consumers.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_SET_OBJECT_ALPHA_MULTIPLIER,
@@ -16740,7 +15806,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_SET_OBJECT_HIT_MASK_BITMAP_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target sub_47B4B0 -> sub_462050 -> sub_443A40 builds or clears CDspObj's independent 1-bit hit mask through sub_41BC70 and reports distinct missing-object/missing-bitmap errors. This hit-mask slot is separate from every Sprite/Background primary display bitmap and must not replace the rendered resource.",
+        notes: "BGI 1.622 47BFB0 -> 443E10 -> 41BF70 copies a one-bit hit plane; -1 restores rectangle acceptance, -2 installs all-zero coverage. The source bitmap may subsequently be released.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_HIT_TEST_OBJECT_AT_POINTER,
@@ -16748,7 +15814,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_HIT_TEST_OBJECT_AT_POINTER_PARAMETERS,
         returns: "hit-test value",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target obtains object and pointer positions, converts to local coordinates, and invokes CDspObj vtable+100 with hit-mask testing enabled.",
+        notes: "BGI 1.622 47C040 -> 4625D0 -> 443F60 tests cursor-relative coordinates through vtable+100; copied masks return the actual 1<<(x&7) bit. Knobs forward to their controlled target.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_INVOKE_UNSUPPORTED_OBJECT_EXTENSION,
@@ -16804,7 +15870,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_CONFIGURE_CURRENT_OBJECT_FRAME_TABLE_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target sub_47B930 copies 2..32 resource handles from VM memory into the current object frame table and applies transparency.",
+        notes: "BGI 1.622 BackD: VM copies 2..32 frame bitmap handles; alpha is a frame index. Generation-bound resources are rasterized directly.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_CONFIGURE_CURRENT_OBJECT_RESOURCE_TRIPLET,
@@ -16812,7 +15878,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_CONFIGURE_CURRENT_OBJECT_RESOURCE_TRIPLET_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target sub_47BA80/sub_4621B0 configures a resource triplet, transparency, and one extension field on the current display object.",
+        notes: "BGI 1.622 BackDST: screen image and one/two format-4 displacement maps; nearest or three-bit interpolated sampling driven by alpha.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_CONFIGURE_CURRENT_OBJECT_BITMAP_MODE,
@@ -16820,7 +15886,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_CONFIGURE_CURRENT_OBJECT_BITMAP_MODE_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target sub_47BBE0/sub_4621D0 validates a bitmap, a two-value mode, and transparency.",
+        notes: "BGI 1.622 BackGRD: horizontal box blur with the native integer reciprocal; mode 0 black-pads and mode 1 extends edge pixels.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_CONFIGURE_CURRENT_OBJECT_VM_EFFECT,
@@ -16828,7 +15894,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_CONFIGURE_CURRENT_OBJECT_VM_EFFECT_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target sub_47BCC0/sub_4621E0 binds a bitmap and auxiliary resource to a nonempty VM record table and stores transparency.",
+        notes: "BGI 1.622 BackRPL: bitmap plus format-6 vector map, wave-record count and wave slot 0..7; clipped vector sampling with optional four-bit interpolation. Alpha scales wave samples.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_CONFIGURE_CURRENT_OBJECT_BITMAP_SIZE_POSITION,
@@ -16836,7 +15902,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_CONFIGURE_CURRENT_OBJECT_BITMAP_SIZE_POSITION_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target sub_47BE20/sub_462200 validates the bitmap and minimum dimensions and stores size plus position.",
+        notes: "BGI 1.622 BackSTR: interpolate a 16.16 source origin and integer extent, then seven-bit bilinear stretch. Property 102 packs target XY in value and target WH in extra.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_CONFIGURE_CURRENT_OBJECT_BITMAP_SIZE,
@@ -16844,7 +15910,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_CONFIGURE_CURRENT_OBJECT_BITMAP_SIZE_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target sub_47BEF0/sub_462220 binds a bitmap and a nonzero width/height pair to the current object.",
+        notes: "BGI 1.622 BackRTT: unsigned nonzero 16.16 scale and signed 16.16 angle; property 80 modulates them and 101 resets their base values. Alpha drives the modulation.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_CONFIGURE_CURRENT_OBJECT_BLIT_SOURCES,
@@ -16852,7 +15918,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_CONFIGURE_CURRENT_OBJECT_BLIT_SOURCES_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target sub_47BF90/sub_462230 configures two resources; the mode must be zero and the final flag is boolean-like.",
+        notes: "BGI 1.622 BackMSC: mosaic primary and optional secondary/black/white; alpha controls block size and composition, not ordinary layer transparency.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_SET_CURRENT_OBJECT_RENDER_CONTROLS,
@@ -16956,7 +16022,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_CONFIGURE_SPRITE_VM_EFFECT_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target sub_47C8F0/sub_462430 configures sprite mode 4 with a primary drawable bitmap, format-6 effect resource, and nonempty VM record table; the primary remains materialized while the effect state is applied.",
+        notes: "BGI 1.622 Sprite mode 4: format-6 vector sampling and wave-slot window; wraps the complete source allocation. Wave alpha is separate from mask/multiplier coverage.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_CONFIGURE_SPRITE_TRANSFORM_MODE5,
@@ -17004,7 +16070,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_CONFIGURE_FILTER_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target sub_47D390 calls the full filter configurator with no mask, preserving filter parameter, transparency, and priority.",
+        notes: "47DE90 ->43F4D0 ->420F90: mode0 color filter at its display-chain position, native alpha/mask/multiplier applied exactly once.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_CONFIGURE_FILTER_WITH_MASK,
@@ -17012,7 +16078,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_CONFIGURE_FILTER_WITH_MASK_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target sub_47D400/sub_462580 consumes one reserved ABI slot, then configures a filter with an optional format-3 mask whose dimensions must match.",
+        notes: "47DF00 ->43F4D0 ->420E40: second operand selects one of four color filters, not reserved. Optional screen-sized format3 mask overrides mode; generation is retained.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_CREATE_MAP_OBJECT,
@@ -17044,7 +16110,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_CONFIGURE_MAP_OBJECT_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target sub_47D710/sub_4626B0 configures map resource, position, blend, transparency, and priority.",
+        notes: "47E210 ->423E20 ->424470: live atlas descriptors and generation, private retained tile bitmap, position/blend/alpha/priority.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_INITIALIZE_MAP_GRID,
@@ -17052,7 +16118,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_INITIALIZE_MAP_GRID_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target sub_47D820/sub_4626D0 initializes a map grid; each count is at most 256 and total pixel size is bounded by 1024x768.",
+        notes: "47E320 ->423E70: tile width/height1..256, total visible extent<=1024x768; allocates two u16 grids including extra row/column, retains uploaded source.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_UPLOAD_MAP_TILE_DATA,
@@ -17060,7 +16126,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_UPLOAD_MAP_TILE_DATA_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target sub_47D900/sub_4626F0 copies a u16 map-data rectangle from VM memory into the map object.",
+        notes: "47E400 ->424010: VM resolves BP pointer and copies width*height little-endian u16 entries; disables viewport and invalidates current cache IDs.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_SET_MAP_VIEWPORT,
@@ -17068,7 +16134,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_SET_MAP_VIEWPORT_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target sub_47D9A0/sub_462710 updates the map source viewport, cell offsets, and wrapping selector.",
+        notes: "47E4A0 ->4240A0: copied/wrapped visible source tile grid and sub-tile pixel offsets; wrap-only changes do not rebuild.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_REPLACE_MAP_TILE_ID,
@@ -17076,7 +16142,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_REPLACE_MAP_TILE_ID_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target sub_47DA70/sub_462730 scans the first grid; when an entry equals tile_id, it writes the bitwise complement of the current second-grid entry. Target assembly advances the second-grid cursor once per cell plus one extra step after a match.",
+        notes: "47E570 ->424240: invalidates matching cache IDs using complemented desired IDs; preserves extra desired cursor advance on matches. Native overread is safely zero in the port.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_CREATE_WINDOW_OBJECT,
@@ -17204,7 +16270,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_START_ITEM_SELECTION_PARAMETERS,
         returns: "cooperative selection result",
         scheduling: NativeSchedulingEffect::WaitProcedure,
-        notes: "Target sub_47E480/sub_491470 validates item_count, initial_selection and column_count, copies the string table, configures CProcSelectItem, and returns scheduler status 2.",
+        notes: "BGI 1.622 43B740/43BCB0: VM decodes the item string table; per-thread selection handles numeric keys, ragged-grid navigation, pointer hover, blink, cancel and two-value completion.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_DRAW_ITEM_SELECTION_GRID,
@@ -17220,7 +16286,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_START_ITEM_SELECTION_EX_PARAMETERS,
         returns: "cooperative selection result",
         scheduling: NativeSchedulingEffect::WaitProcedure,
-        notes: "Target selects CProcSelectItemEx and configures two optional overlay bitmap slots.",
+        notes: "BGI 1.622 CProcSelectItemEx: per-thread item selection with copied bracket bitmaps, hover deselection and immediate two-value completion.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_START_ITEM_SELECTION_EX_BLINK,
@@ -17228,7 +16294,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_START_ITEM_SELECTION_EX_PARAMETERS,
         returns: "cooperative selection result",
         scheduling: NativeSchedulingEffect::WaitProcedure,
-        notes: "Target selects CProcSelectItemExBlink; its class enforces the initial 20-tick blinking/interaction gate.",
+        notes: "BGI 1.622 43CB00: automatically blink the initial item for twenty 50ms ticks, then return two values; no confirmation input is required.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_SET_ITEM_SELECTION_HIGHLIGHT_STYLES,
@@ -17260,7 +16326,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_SELECTION_COLUMN_LAYOUT_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target sub_441080/sub_42C7A0 toggles the custom-layout gate and copies exactly sixteen DWORD column anchors.",
+        notes: "BGI 1.622 42CBB0 supplies sixteen per-item RGB colors to 43BA30; the VM copies the table, and null disables these overrides.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_SET_INTERACTIVE_PROCEDURE_POLL_GATE,
@@ -17276,7 +16342,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_START_ICON_SELECTION_PARAMETERS,
         returns: "cooperative selection result",
         scheduling: NativeSchedulingEffect::WaitProcedure,
-        notes: "Target sub_491870 constructs CProcSelectIcon and parses 16-byte icon records. The previous shake interpretation was disproved by the target constructor path.",
+        notes: "BGI 1.622 43AC40: independent Virtual item masks/scopes; keyboard assignment and callback 512; completion pushes local X, local Y, then selected index or -1.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_START_ICON_SELECTION_EX,
@@ -17284,7 +16350,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_START_ICON_SELECTION_PARAMETERS,
         returns: "cooperative selection result",
         scheduling: NativeSchedulingEffect::WaitProcedure,
-        notes: "Target sub_4919A0 constructs CProcSelectIconEx and parses 64-byte extended icon records.",
+        notes: "BGI 1.622 CProcSelectIconEx: copies 64-byte item records, independent Virtual mask geometry and overlays; completion returns three values, as the base Icon procedure.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_DRAW_ICON_BATCH,
@@ -17852,7 +16918,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH92_COMPOSE_ALPHA_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "0x00485A60 intersects translated rectangles, derives or blends alpha from format-2 sources, and clears destination alpha outside the overlap.",
+        notes: "486560 ->403C20 ->418BE0: allocate screen-sized format3 plane, extract or mix source alpha in translated overlap; zero outside.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH92_DRAW_BITMAP_TEXT_MEASURE,
@@ -17860,7 +16926,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH92_BITMAP_TEXT_MEASURE_PARAMETERS,
         returns: "largest line advance",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "0x00485BA0 draws immediate text through the target native font subsystem and returns measured advance without wrapping.",
+        notes: "4866A0 ->403600 ->4097F0: styled plain SJIS bitmap text, fixed/proportional metrics, RGB/bold/width percentage; returns maximum successful line advance. Host glyph outlines use the CPU font session.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH92_DRAW_WRAPPED_BITMAP_TEXT,
@@ -17868,7 +16934,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH92_BITMAP_TEXT_WRAP_PARAMETERS,
         returns: "wrapped line count",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "0x00485D50 is the wrapping variant of the immediate bitmap text renderer.",
+        notes: "486850 ->403680 ->4097F0: styled bitmap text wrapping with recovered hanging punctuation and extra line-pitch percentage; returns last successfully drawn line number.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH92_DRAW_BITMAP_TEXT,
@@ -18156,7 +17222,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_MULTILAYER_INITIALIZE_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_481D90 switches the active background to CDspObjBackML mode 12, configures/enables layer zero, selects it and sets the background position.",
+        notes: "482890 ->43E070 ->41E4B0: configure layer0 in an eight-layer private compositor; reuse other existing records. All anchors are16.16 and final operand is sampling flag.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_SELECT_MULTILAYER_LAYER,
@@ -18164,7 +17230,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_MULTILAYER_INDEX_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_481EC0 requires mode 12 and stores one of eight current-layer indices.",
+        notes: "4829C0 ->41E2C0 selects record0..7 used by virtual position/alpha/property setters.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_SET_MULTILAYER_LAYER_ENABLED,
@@ -18180,7 +17246,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_MULTILAYER_PAIR_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_481FB0 calls sub_41DC80 and stores signed 16.16 X/Y at record offsets +8/+12, with target pixel snapping when active.",
+        notes: "482AB0 ->41DF90 writes the chosen private destination anchor in16.16, independent of other layers.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_SET_MULTILAYER_LAYER_BLEND_MODE,
@@ -18196,7 +17262,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_MULTILAYER_SCALAR_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_4820D0 validates 0..=256 and writes record offset +20.",
+        notes: "482BD0 ->41E070 stores native per-layer composition strength; also addressed by selected-layer alpha setter.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_SET_MULTILAYER_LAYER_BITMAP,
@@ -18204,7 +17270,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_MULTILAYER_BITMAP_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_482160 calls sub_41DDC0; -1 clears the layer, otherwise bitmap generation and source X/Y are stored and source deltas reset.",
+        notes: "482C60 ->41E0D0 captures bitmap generation and source16.16 anchors, resetting source deltas.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_SET_MULTILAYER_LAYER_TRANSFORM,
@@ -18212,7 +17278,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_MULTILAYER_TRANSFORM_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_482230 calls sub_41DE80, rejects zero scales, stores rotation/scale/transparency and clears all transform deltas.",
+        notes: "482D30 ->41E190 stores rotation/scales/sampling flag and clears transform coefficients.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_SET_MULTILAYER_LAYER_AUXILIARY_PAIR,
@@ -18220,7 +17286,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_MULTILAYER_PAIR_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_482310 calls sub_41DEF0 and writes the two record DWORDs at offsets +52/+56.",
+        notes: "482E10 ->41E200 sets independent rotation and reciprocal-scale curve selectors, consumed at draw.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_SET_MULTILAYER_LAYER_SOURCE_VELOCITY,
@@ -18228,7 +17294,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_MULTILAYER_PAIR_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_4823A0 calls sub_41DF20 and writes per-frame source-coordinate increments at offsets +60/+64.",
+        notes: "482EA0 ->41E230 stores16.16 source-anchor coefficients evaluated against unsigned8.24 fixed progress; not per-frame velocity.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_SET_MULTILAYER_LAYER_TRANSFORM_VELOCITY,
@@ -18236,7 +17302,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_MULTILAYER_TRANSFORM_VELOCITY_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_482430 writes the rotation increment at +68 and scale increments at +72/+76.",
+        notes: "482F30 ->41E260/41E290 stores rotation and reciprocal-scale interpolation coefficients.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_SET_SPRITE_RELATION,
@@ -18276,7 +17342,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_DUAL_VECTOR_EFFECTOR_PARAMETERS,
         returns: "void; target reports map validation errors",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_43F410 -> sub_420110 selects effector mode zero and validates one or two screen-sized format-4 maps.",
+        notes: "4830B0 ->420430 ->4201B0: transform display prefix through one/two live format4 maps with captured generations.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_CONFIGURE_GRADIENT_EFFECTOR,
@@ -18284,7 +17350,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_GRADIENT_EFFECTOR_PARAMETERS,
         returns: "void; target rejects gradient types outside 0..=1",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_43F4E0 -> sub_420250 selects effector mode one.",
+        notes: "483300 ->420570 ->413D90: horizontal blur of captured display prefix, with black-pad or edge-clamp mode.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_CONFIGURE_RIPPLE_EFFECTOR,
@@ -18292,7 +17358,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_RIPPLE_EFFECTOR_PARAMETERS,
         returns: "void; target validates map, maximum distance and ripple registration",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_43F560 -> sub_4202A0 selects mode two and requires a screen-sized format-6 vector/distance map.",
+        notes: "4833C0 ->4205C0: screen-sized format6 plus copied wave window; alpha setter rescales amplitude and property100 selects window offset. Draw414300.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_CONFIGURE_TRANSFORM_EFFECTOR,
@@ -18300,7 +17366,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_TRANSFORM_EFFECTOR_PARAMETERS,
         returns: "void; target rejects zero scales",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_43F640 -> sub_420410 selects mode three and stores base position, rotation, scales and composition fields.",
+        notes: "483660 ->420730: inverse affine transform of captured prefix. Alpha/fixed setters evaluate coefficients; assigning coefficients alone preserves cached derived fields.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_CONFIGURE_SURFACE_EFFECTOR,
@@ -18308,7 +17374,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_SURFACE_EFFECTOR_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_43F6D0 -> sub_4204D0 selects mode four and clears the internal destination surface.",
+        notes: "483790 ->4207F0: clear retained bitmap; each draw blends it over current prefix and saves result for the next draw.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_CREATE_LANDSCAPE,
@@ -18332,7 +17398,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_LANDSCAPE_HIT_TEST_PARAMETERS,
         returns: "i32 boolean",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_482DA0 obtains the current cursor, subtracts object position and sub_422920 writes the hit line/column pair.",
+        notes: "4838A0 ->422C50 scans candidate rows back-to-front with staggered columns, visible bounds and actual alpha or copied boundary alpha. Writes(column,row).",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_SET_LANDSCAPE_ENABLED,
@@ -18348,7 +17414,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_LANDSCAPE_OBJECT_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_422AF0 sets object position, blend field, composition value and priority.",
+        notes: "483950 ->422E20 sets native position/blend/alpha and validates the priority range of every terrain row.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_SET_LANDSCAPE_CELL_SILHOUETTE,
@@ -18356,7 +17422,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_LANDSCAPE_SILHOUETTE_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_422730 validates configured map coordinates, silhouette type <=2 and level <=256, then updates the 68-byte cell record.",
+        notes: "4839F0 ->422A60 sets one cell color/level/type, consumed by alpha-over/additive silhouette kernels before object blend.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_CONFIGURE_LANDSCAPE_PARTS,
@@ -18364,7 +17430,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_LANDSCAPE_PARTS_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_421930 consumes five-DWORD part descriptors and 34-DWORD pillar/column descriptors from BP memory.",
+        notes: "483C20 ->421C60 copies private part images and builds stacked column images from34-DWORD records, including boundary alpha snapshots and occlusion/depth metadata.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_CONFIGURE_LANDSCAPE_MAP,
@@ -18372,7 +17438,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_LANDSCAPE_MAP_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_421E60 validates dimensions 1..=256 and consumes width*height i32 pillar/column indices.",
+        notes: "483E90 ->422190/4237D0 builds staggered cells, front-neighbor bottom cropping and independent manager packed depth keys.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_CONFIGURE_LANDSCAPE_GUIDES,
@@ -18380,7 +17446,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_LANDSCAPE_GUIDES_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_4224D0 consumes five-DWORD guide-image descriptors.",
+        notes: "484060 ->422800 copies private guide images from five-DWORD rectangles; old cell indices remain stored.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_SET_LANDSCAPE_CELL_GUIDES,
@@ -18388,7 +17454,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_LANDSCAPE_CELL_GUIDES_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_422680 applies one of four guide layers to each BP-provided column/line pair.",
+        notes: "484140 ->4229B0 assigns four guide slots to(column,row) pairs, composed at the column boundary height with combined alpha.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_COPY_LANDSCAPE_PART,
@@ -18396,7 +17462,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_LANDSCAPE_PART_COPY_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_422050 copies source part image state only when destination geometry/format is compatible.",
+        notes: "484390 ->422380 copies one private part and rebuilds referencing column color bitmaps; configure-time boundary alpha snapshots remain unchanged.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_SET_LANDSCAPE_CELL_COLUMN,
@@ -18404,7 +17470,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_LANDSCAPE_CELL_COLUMN_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_4222A0 changes one cell pillar/column index and updates affected neighboring records.",
+        notes: "484590 ->4225D0 replaces a column and rebuilds itself plus three cells behind it, resetting affected guide/shade records.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_GET_LANDSCAPE_CELL_VALUE,
@@ -18412,7 +17478,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_LANDSCAPE_CELL_VALUE_PARAMETERS,
         returns: "i32 boolean",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_4228B0 writes a zero-extended WORD from cell-record offset +22 through the BP pointer.",
+        notes: "4847A0 ->422BE0 writes high16 of the cell packed manager key, including terrain row/frame priority offsets.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_COPY_LANDSCAPE_CELL_IMAGE,
@@ -18420,7 +17486,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_LANDSCAPE_CELL_IMAGE_PARAMETERS,
         returns: "i32 boolean",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_4227C0 copies the selected cell-part image into an existing destination bitmap.",
+        notes: "4849A0 ->422AF0 recreates destination in the private boundary part dimensions/format and copies it; original source atlas is not consulted.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_CONFIGURE_WINDOW_FONT,
@@ -18989,7 +18055,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: SOUND_BGM_FADE_VOLUME_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_487450: volume > 128 and channel >= 16 are fatal; an unloaded channel is ignored; otherwise the channel volume ramps linearly from its current value over the given milliseconds (sub_4A2AE0).",
+        notes: "BGI 1.622 sub_487F50 -> sub_4A3650 (older sub_487450): volume >128 or channel >=16 is fatal (unsigned); ignore unloaded channels. Schedule an independent play-volume envelope from the last polled value, with signed wrapping GetTickCount deltas and truncation toward zero (sub_4A2DF0). The host polls it alongside the fade envelope before composing gain. Duration zero/negative completes on the next poll. Backend attenuation-to-gain mapping and poll cadence remain portable approximations.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SOUND_SET_BGM_PAN,
@@ -19005,7 +18071,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: SOUND_CHANNEL_DURATION_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_4874E0 schedules the independent BGM fade envelope toward 128.",
+        notes: "BGI 1.622 sub_487FE0 -> sub_4A3560: unsigned channel >=16 is fatal; ignore unloaded channels. Schedule the independent fade envelope from its last polled sample toward 128 without modifying the play-volume envelope; zero/negative duration completes on next poll. Portable gain mapping and frame-based poll cadence remain approximations.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SOUND_FADE_BGM_TO_SILENCE,
@@ -19013,7 +18079,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: SOUND_CHANNEL_DURATION_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_487520 schedules the independent BGM fade envelope toward zero.",
+        notes: "BGI 1.622 sub_488020 -> sub_4A3500: unsigned channel >=16 is fatal; ignore unloaded channels. Schedule the independent fade envelope from its last polled sample toward zero without stopping or releasing the stream; zero/negative duration completes on next poll. Portable gain mapping and frame-based poll cadence remain approximations.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SOUND_SET_BGM_SECONDARY_VOLUME,
@@ -19045,7 +18111,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: SOUND_CHANNEL_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_487740 releases the resident sound buffer for one SE channel.",
+        notes: "BGI 1.622 sub_488240 -> sub_494E70 -> sub_4A3280 (older handler sub_487740): unsigned channel >=64 is fatal; clear the copied 64-byte wave header and release the resident SE buffer. Later A0:2F returns zero until another buffer is loaded; stopping alone (A0:25) retains the header.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SOUND_LOAD_SE_DOUBLE_RATE,
@@ -19061,7 +18127,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: SOUND_SE_PLAY_PARAMETERS,
         returns: "playback position/status",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_487860: pan > 128, volume > 128 and channel >= 64 are fatal; an unloaded channel pushes 0, otherwise the SE restarts with that volume/pan and the length in ms is pushed (sub_4943E0: header samples * 1000 / rate, scaled by the playback rate).",
+        notes: "BGI 1.622 sub_488360 -> sub_4A4050 (older sub_487860): pan >128, volume >128 or channel >=64 is fatal (unsigned). Unloaded pushes zero; every loaded play cancels the SE fade, restores its envelope to 128, stops/restarts the wave even when already active, and returns copied-header length in milliseconds (sub_494ED0). A0:25 keeps that header and A0:22 clears it.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SOUND_STOP_SE,
@@ -19069,7 +18135,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: SOUND_CHANNEL_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_4878F0 stops one SE playback without releasing its resident buffer.",
+        notes: "BGI 1.622 sub_4883F0 -> sub_494EB0 -> sub_4A3A80 -> sub_4A34D0 (older handler sub_4878F0): unsigned channel >=64 is fatal, an unloaded channel is a no-op, otherwise stop playback while preserving the resident wave/header, gain banks and any active fade envelope. A0:24 always restarts this buffer and cancels its previous fade.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SOUND_FADE_SE_TO_SILENCE,
@@ -19077,7 +18143,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: SOUND_CHANNEL_DURATION_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_487920 schedules the independent SE fade envelope toward zero.",
+        notes: "BGI 1.622 sub_488420 -> sub_494EC0 -> sub_4A35C0: unsigned channel >=64 is fatal; ignore unloaded channels. Schedule the independent SE fade toward zero from the last polled sample; repeated fades retarget that sample, A0:25 preserves the envelope, and A0:24 cancels it and restores 128. Fading to zero does not stop/release the buffer. Portable gain mapping and frame-based poll cadence remain approximations.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SOUND_LOAD_SE_CUSTOM_RATE,
@@ -19583,7 +18649,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: USER_C0_05_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_4756C0 -> sub_490D00 -> sub_441370 configures the display transform and composition state.",
+        notes: "BGI 1.622 sub_476030 -> sub_424A10 applies x/y, blend, inverse alpha and priority. Per-plane priority offsets are installed by C0:06.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::USER2_CONFIGURE_PARTICLE_FRAME_TABLES,
@@ -19615,7 +18681,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: USER_C0_0A_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_475870 -> sub_490D50 -> sub_4414B0/sub_424A50 sets the validated particle-generator field.",
+        notes: "BGI 1.622 sub_4761E0 -> sub_441870 -> sub_424C00 writes the dirty-rectangle redraw threshold (+368), not particle capacity. The portable renderer redraws the full frame.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::USER2_CONFIGURE_PARTICLE_EMITTER_TRANSFORM,
@@ -19631,7 +18697,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: USER_C0_0C_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_4759C0 -> sub_490D90 -> sub_441540/sub_424A50 validates and applies an emission percentage.",
+        notes: "BGI 1.622 sub_476330 -> sub_424DD0 sets simulation interval 0..100ms, not emission percentage; zero suspends advancement. It recomputes air-field segment durations.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::USER2_ADVANCE_PARTICLE_SCREEN,
@@ -20948,6 +20014,8 @@ const PORTABLE_EQUIVALENT_OPCODES: &[NativeOpcode] = &[
     opcodes::GRAPH90_START_OBJECT_MOTION_CONTROL,
     opcodes::GRAPH90_CONFIGURE_SPRITE_DUAL_BITMAP,
     opcodes::SYS_CONFIGURE_CURSOR_MOTION,
+    opcodes::SOUND_STOP_SE,
+    opcodes::SOUND_RELEASE_SE,
 ];
 
 const PARTIAL_IMPLEMENTATION_OPCODES: &[NativeOpcode] = &[
@@ -21267,9 +20335,7 @@ const PARTIAL_IMPLEMENTATION_OPCODES: &[NativeOpcode] = &[
     opcodes::SOUND_SET_BGM_SECONDARY_VOLUME,
     opcodes::SOUND_LOAD_SE,
     opcodes::SOUND_LOAD_SE_SCALED,
-    opcodes::SOUND_RELEASE_SE,
     opcodes::SOUND_LOAD_SE_DOUBLE_RATE,
-    opcodes::SOUND_STOP_SE,
     opcodes::SOUND_FADE_SE_TO_SILENCE,
     opcodes::SOUND_LOAD_SE_CUSTOM_RATE,
     opcodes::SOUND_REGISTER_SE_MEMORY,

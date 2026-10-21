@@ -41,6 +41,8 @@ mod host_dialog;
 mod host_installer;
 mod input_state;
 mod native_background;
+mod native_background_effect;
+mod native_bitmap_transforms;
 mod native_display;
 mod native_effect;
 mod native_graph;
@@ -48,7 +50,18 @@ mod native_graph_ext;
 mod native_graph_resource;
 mod native_graph_sys91;
 mod native_graph_sys92;
+mod native_input_chain;
+mod native_particle;
+mod native_selection;
 mod native_sound;
+mod native_sprite_mask;
+mod native_sprite_perspective;
+mod native_projected_source;
+mod native_map_filter;
+mod native_effector;
+mod native_backml;
+mod native_landscape;
+mod native_sprite_filters;
 mod native_system;
 mod native_system_ext;
 mod native_user;
@@ -70,7 +83,7 @@ mod title;
 mod user_files;
 use animation::{GraphAnimationRegistry, LayerAnimationSystem};
 use audio_runtime::{
-    AudioAsset, AudioCommand, NativeAudioClock, NativeCdAudioState, SoundSlot,
+    AudioAsset, AudioCommand, NativeAudioClock, NativeCdAudioState, NativeSoundRamp, SoundSlot,
     execute_audio_command,
 };
 use character_image::decode_scenario_resource_image;
@@ -391,77 +404,108 @@ impl RuntimeCursorMotion {
     }
 }
 
+/// The target frame-time accumulator (sub_401600 / sub_4017F0 / sub_401830 /
+/// sub_401670). Each main-loop pass times the script/update work
+/// (sub_48D480, committed with flag 0 into a pending span) and then the scene
+/// composition before Present (sub_462010/sub_462050, flag 1), so Present and
+/// its vertical-sync wait are never measured. The target counts in
+/// QueryPerformanceCounter ticks; nanoseconds stand in for a 1 GHz counter.
+/// The within-budget test also requires the raster scan line not to have
+/// wrapped, which the target skips when the raster status is unavailable;
+/// portable hosts have no raster status, so only the time test remains.
 #[derive(Debug, Clone)]
 struct RuntimePerformanceProfile {
-    enabled: bool,
+    enabled: i32,
+    refresh_rate: u32,
+    budget: i64,
+    total: i64,
     sample_count: u32,
-    total_duration_ns: u128,
     within_budget_count: u32,
-    budget_ns: u64,
+    pending: i64,
+    started: Option<Instant>,
 }
 
 impl Default for RuntimePerformanceProfile {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: 0,
+            refresh_rate: 0,
+            budget: 0,
+            total: 0,
             sample_count: 0,
-            total_duration_ns: 0,
             within_budget_count: 0,
-            budget_ns: NATIVE_TICK_MS.saturating_mul(1_000_000).saturating_mul(96) / 100,
+            pending: 0,
+            started: None,
         }
     }
 }
 
 impl RuntimePerformanceProfile {
-    fn set_enabled(&mut self, enabled: bool) {
+    const FREQUENCY: i64 = 1_000_000_000;
+
+    /// sub_401600: store the raw flag; a non-zero flag resets the counters
+    /// and takes 96% of one display refresh (sub_46F8E0 / sub_45E9E0, 60 Hz
+    /// when the refresh rate is unknown) as the frame budget.
+    fn set_enabled(&mut self, enabled: i32) {
         self.enabled = enabled;
-        if enabled {
+        if enabled != 0 {
+            let refresh = if self.refresh_rate == 0 { 60 } else { self.refresh_rate };
+            self.budget = 96 * (Self::FREQUENCY / i64::from(refresh)) / 100;
+            self.total = 0;
             self.sample_count = 0;
-            self.total_duration_ns = 0;
             self.within_budget_count = 0;
+            self.pending = 0;
         }
     }
 
-    fn record_present(&mut self, duration: Duration) {
-        if !self.enabled {
+    /// sub_4017F0.
+    fn begin(&mut self) {
+        if self.enabled != 0 {
+            self.started = Some(Instant::now());
+        }
+    }
+
+    /// sub_401830.
+    fn end(&mut self, commit: bool) {
+        if self.enabled == 0 {
             return;
         }
-        let duration_ns = duration.as_nanos();
-        self.sample_count = self.sample_count.saturating_add(1);
-        self.total_duration_ns = self.total_duration_ns.saturating_add(duration_ns);
-        if duration_ns < u128::from(self.budget_ns) {
-            self.within_budget_count = self.within_budget_count.saturating_add(1);
+        let elapsed = self
+            .started
+            .map(|started| started.elapsed().as_nanos().min(i64::MAX as u128) as i64)
+            .unwrap_or(0);
+        self.record(elapsed, commit);
+    }
+
+    fn record(&mut self, elapsed: i64, commit: bool) {
+        let span = self.pending.wrapping_add(elapsed);
+        if commit {
+            self.total = self.total.wrapping_add(span);
+            if span < self.budget {
+                self.within_budget_count = self.within_budget_count.wrapping_add(1);
+            }
+            self.sample_count = self.sample_count.wrapping_add(1);
+            self.pending = 0;
+        } else {
+            self.pending = span;
         }
     }
 
+    /// sub_401670; the x87 results are truncated to __int64 and stored as a
+    /// DWORD.
     fn metric(&self, selector: i32) -> i32 {
-        let clamp_i32 = |value: u128| value.min(i32::MAX as u128) as i32;
+        let count = f64::from(self.sample_count);
         match selector {
-            0 => self.sample_count.min(i32::MAX as u32) as i32,
-            1 if self.sample_count != 0 => clamp_i32(
-                self.total_duration_ns
-                    .checked_div(u128::from(self.sample_count))
-                    .unwrap_or(0)
-                    .checked_div(1_000)
-                    .unwrap_or(0),
-            ),
-            2 if self.total_duration_ns != 0 => clamp_i32(
-                u128::from(self.budget_ns / 2)
-                    .saturating_mul(u128::from(self.sample_count))
-                    .saturating_mul(10_000)
-                    .checked_div(self.total_duration_ns)
-                    .unwrap_or(0),
-            ),
+            0 => self.sample_count as i32,
+            1 if self.sample_count != 0 => {
+                (self.total as f64 / (Self::FREQUENCY as f64 * count) * 1_000_000.0) as i64 as i32
+            }
+            2 if self.total > 0 => {
+                ((self.budget >> 1) as f64 * count / self.total as f64 * 10_000.0) as i64 as i32
+            }
             3 if self.sample_count != 0 => {
-                let within = u128::from(self.within_budget_count);
-                let samples = u128::from(self.sample_count);
-                clamp_i32(
-                    within
-                        .saturating_mul(within)
-                        .saturating_mul(10_000)
-                        .checked_div(samples.saturating_mul(samples))
-                        .unwrap_or(0),
-                )
+                let within = f64::from(self.within_budget_count);
+                (within * within / (count * count) * 10_000.0) as i64 as i32
             }
             _ => 0,
         }
@@ -471,29 +515,31 @@ impl RuntimePerformanceProfile {
 #[cfg(test)]
 mod runtime_performance_profile_tests {
     use super::RuntimePerformanceProfile;
-    use std::time::Duration;
 
     #[test]
     fn target_metric_formulas_and_enable_reset_are_preserved() {
         let mut profile = RuntimePerformanceProfile {
-            budget_ns: 10_000_000,
+            refresh_rate: 100,
             ..RuntimePerformanceProfile::default()
         };
-        profile.set_enabled(true);
-        profile.record_present(Duration::from_millis(4));
-        profile.record_present(Duration::from_millis(12));
+        profile.set_enabled(1);
+        assert_eq!(profile.budget, 9_600_000);
+        // Update span (pending) plus composition span form one sample.
+        profile.record(1_000_000, false);
+        profile.record(3_000_000, true);
+        profile.record(12_000_000, true);
 
         assert_eq!(profile.metric(0), 2);
         assert_eq!(profile.metric(1), 8_000);
-        assert_eq!(profile.metric(2), 6_250);
+        assert_eq!(profile.metric(2), 6_000);
         assert_eq!(profile.metric(3), 2_500);
         assert_eq!(profile.metric(99), 0);
 
-        profile.set_enabled(false);
-        profile.record_present(Duration::from_millis(1));
+        profile.set_enabled(0);
+        profile.end(true);
         assert_eq!(profile.metric(0), 2);
 
-        profile.set_enabled(true);
+        profile.set_enabled(1);
         assert_eq!(profile.metric(0), 0);
         assert_eq!(profile.metric(1), 0);
         assert_eq!(profile.metric(2), 0);
@@ -585,6 +631,20 @@ struct RuntimeTraceApi {
     graph_input_objects: BTreeMap<i32, RuntimeGraphInputObject>,
     graph_key_assignments: [Option<[i32; 24]>; 4],
     graph_active_input_handle: i32,
+    background_effects: BTreeMap<i32,native_background_effect::BackgroundEffect>,
+    native_sprite_filtered_draws:BTreeMap<i32,native_sprite_filters::FilteredSpriteDraw>,
+    native_landscapes:BTreeMap<i32,native_landscape::LandscapeRaster>,
+    native_landscape_next_layer:i32,
+    native_effector_rasters:BTreeMap<i32,native_effector::EffectorRaster>,
+    native_maps: BTreeMap<i32,native_map_filter::NativeMap>,
+    native_filters: BTreeMap<i32,native_map_filter::NativeFilter>,
+    native_projection_mips: BTreeMap<i32,native_projected_source::ProjectionMipCache>,
+    native_mode6_rasters: BTreeMap<i32,native_sprite_perspective::Mode6Raster>,
+    native_vm_effect_bindings: BTreeMap<i32,[(i32,u64);2]>,
+    icon_input_chains: BTreeMap<i32,native_input_chain::InputChain>,
+    native_sprite_masks: BTreeMap<i32,native_sprite_mask::SpriteMask>,
+    native_vm_effect_revision: u64,
+    native_selections: native_selection::SelectionRegistry,
     graph_item_selection_highlight_styles: [i32; 2],
     graph_item_selection_input_mask: i32,
     graph_item_selection_navigation: [i32; 4],
@@ -708,6 +768,11 @@ struct RuntimeTraceApi {
     sound_play_volumes: [u8; 64],
     /// Independent SE fade envelope selected by A0:26 (target record +0x40).
     sound_fade_volumes: [u8; 64],
+    /// GetTickCount-domain clock and the two independent sound envelopes.
+    native_sound_tick: u32,
+    bgm_play_ramps: [Option<NativeSoundRamp>; 16],
+    bgm_fade_ramps: [Option<NativeSoundRamp>; 16],
+    sound_fade_ramps: [Option<NativeSoundRamp>; 64],
     bgm_channel_active: [bool; 16],
     sound_channel_active: [bool; 64],
     bgm_playback_clocks: [NativeAudioClock; 16],
@@ -961,8 +1026,22 @@ impl RuntimeTraceApi {
             graph_input_objects: BTreeMap::new(),
             graph_key_assignments: [None; 4],
             graph_active_input_handle: 0,
-            graph_item_selection_highlight_styles: [0; 2],
-            graph_item_selection_input_mask: 0,
+            background_effects: BTreeMap::new(),
+            native_sprite_filtered_draws:BTreeMap::new(),
+            native_landscapes:BTreeMap::new(),
+            native_landscape_next_layer:-0x31000000,
+            native_effector_rasters:BTreeMap::new(),
+            native_maps:BTreeMap::new(),
+            native_filters:BTreeMap::new(),
+            native_projection_mips: BTreeMap::new(),
+            native_mode6_rasters:BTreeMap::new(),
+            native_vm_effect_bindings: BTreeMap::new(),
+            icon_input_chains: BTreeMap::new(),
+            native_sprite_masks: BTreeMap::new(),
+            native_vm_effect_revision: 0,
+            native_selections: native_selection::SelectionRegistry::default(),
+            graph_item_selection_highlight_styles: [0xFF0000,0xFFFF00],
+            graph_item_selection_input_mask: 600,
             graph_item_selection_navigation: [0; 4],
             graph_item_selection_column_layouts: BTreeMap::new(),
             graph_interactive_procedure_poll_gate: 0,
@@ -1042,6 +1121,10 @@ impl RuntimeTraceApi {
             sound_secondary_volumes: [128; 64],
             sound_play_volumes: [128; 64],
             sound_fade_volumes: [128; 64],
+            native_sound_tick: 0,
+            bgm_play_ramps: [None; 16],
+            bgm_fade_ramps: [None; 16],
+            sound_fade_ramps: [None; 64],
             bgm_channel_active: [false; 16],
             sound_channel_active: [false; 64],
             bgm_playback_clocks: [NativeAudioClock::default(); 16],
@@ -1330,6 +1413,8 @@ impl RuntimeTraceApi {
         // sub_442EE0 (CreateWorkBitmap) copies the whole current back buffer
         // into the new bitmap; sub_442F80 (CreatePrioritizedWorkBitmap)
         // renders the display tree up to the given priority into it.
+        self.refresh_native_sprite_filters();
+        self.refresh_native_filters();
         let captured = snapshot::compose_runtime_frame_through_priority(self, true, priority);
         self.clear_bitmap_text(bitmap);
         self.effects.remove_bitmap(bitmap);
@@ -2569,7 +2654,7 @@ impl RuntimeTraceApi {
                 || self
                     .graph_object_properties
                     .get(&object)
-                    .is_some_and(|properties| properties.native.suppress_draw != 0)
+                    .is_some_and(|properties| properties.native.suppress_draw != 0 || properties.mask_alpha as u32>=256 || properties.alpha_multiplier==0)
             {
                 return false;
             }
@@ -2856,7 +2941,9 @@ impl RuntimeTraceApi {
         );
     }
 
-    fn graph_object_pointer_hit(&self, object: i32) -> Option<i32> {
+    fn graph_object_pointer_hit(&self, object:i32)->Option<i32> {self.graph_object_pointer_hit_at(object,self.mouse_pos)}
+
+    fn graph_object_pointer_hit_at(&self, object: i32, point:Option<(f32,f32)>) -> Option<i32> {
         // CDspObjKnob vtable+100 is sub_4215C0 and delegates the complete hit
         // query to the controlled target. Keep the relation as virtual
         // forwarding, not ownership, and guard pathological control cycles.
@@ -2873,7 +2960,13 @@ impl RuntimeTraceApi {
             resolved = target;
         }
         let object = resolved;
-        let (mouse_x, mouse_y) = self.mouse_pos?;
+        let (mouse_x, mouse_y) = point?;
+        if let Some(surface) = self.graph_surfaces.get(&object) {
+            let (x, y) = self.surface_world_position(object);
+            return Some(if mouse_x >= x && mouse_y >= y && mouse_x < x + surface.width && mouse_y < y + surface.height {
+                self.graph_object_mask_hit(object, (mouse_x - x) as i32, (mouse_y - y) as i32)
+            } else { 0 });
+        }
         let layers = self.graph_object_layers.get(&object)?;
         for layer_id in layers.iter().rev() {
             let layer = self.graph_layers.get(layer_id)?;
@@ -2884,15 +2977,55 @@ impl RuntimeTraceApi {
             let width = layer.width.max(0.0) * layer.scale_x.abs().max(f32::EPSILON);
             let height = layer.height.max(0.0) * layer.scale_y.abs().max(f32::EPSILON);
             if mouse_x >= x && mouse_y >= y && mouse_x < x + width && mouse_y < y + height {
-                // Target CDspObj::HitTest returns a nonzero bit value when a
-                // generated hit mask accepts the local coordinate. The
-                // portable renderer currently has rectangle-level evidence,
-                // so preserve the same truthy contract and use the layer hit id
-                // when one was assigned.
-                return Some(if layer.hit_id != 0 { layer.hit_id } else { 1 });
+                return Some(self.graph_object_mask_hit(object, (mouse_x - x) as i32, (mouse_y - y) as i32));
             }
         }
         Some(0)
+    }
+
+    fn graph_object_mask_hit(&self, object: i32, x: i32, y: i32) -> i32 {
+        self.graph_object_properties.get(&object).and_then(|p| p.hit_mask.as_ref())
+            .map_or(1, |mask| mask.hit(x, y))
+    }
+
+    /// 47BFB0 -> 4625B0 -> 443E10 -> 41BF70. Copy the generated bit plane;
+    /// releasing or changing the source bitmap must not change existing hits.
+    fn configure_graph_object_hit_mask(&mut self, object: i32, resource: i32) -> ethornell_vm::VmResult<()> {
+        if !self.graph_handle_exists(object) {
+            return Err(ethornell_vm::VmError::Runtime(format!("90:3C: invalid display object {object}")));
+        }
+        if matches!(NativeDisplayKind::from_handle(object),NativeDisplayKind::Knob|NativeDisplayKind::Group) {
+            return Err(ethornell_vm::VmError::Runtime("90:3C: display class does not support a hit mask".into()));
+        }
+        let mask = if resource == -1 {
+            None
+        } else if resource == -2 {
+            // The native temporary bitmap is zero-filled before conversion.
+            Some(graph::NativeHitMask { width: 0, height: 0, bits: Vec::new() })
+        } else {
+            let image = self.graph_bitmap_image(resource)
+                .ok_or_else(|| ethornell_vm::VmError::Runtime(format!("90:3C: unavailable bitmap {resource}")))?;
+            let format = self.bitmap_formats.get(&resource).copied().unwrap_or(2);
+            let stride = (image.width as usize + 7) / 8;
+            let mut bits = vec![0u8; stride * image.height as usize];
+            for y in 0..image.height as usize {
+                for x in 0..image.width as usize {
+                    let p = &image.rgba[(y * image.width as usize + x) * 4..][..4];
+                    let hit = match format {
+                        0 | 1 => p[..3].iter().any(|v| *v != 0),
+                        2 => p[3] != 0,
+                        3 => p[0] != 0,
+                        _ => false,
+                    };
+                    if hit { bits[y * stride + x / 8] |= 1 << (x & 7); }
+                }
+            }
+            Some(graph::NativeHitMask { width: image.width, height: image.height, bits })
+        };
+        let properties = self.graph_object_properties.entry(object).or_default();
+        properties.hit_mask_resource = (resource != -1).then_some(resource);
+        properties.hit_mask = mask;
+        Ok(())
     }
 
     /// sub_46DA20: clear fields 0/1/2/4 of every input record (down flag,
@@ -3018,6 +3151,13 @@ impl RuntimeTraceApi {
         removed |= self.graph_input_objects.remove(&object).is_some();
         removed |= self.graph_object_properties.remove(&object).is_some();
         removed |= self.graph_mode5_render_states.remove(&object).is_some();
+        removed |= self.native_projection_mips.remove(&object).is_some();
+        removed |= self.native_mode6_rasters.remove(&object).is_some();
+        removed |= self.native_sprite_filtered_draws.remove(&object).is_some();
+        removed |= self.native_maps.remove(&object).is_some();
+        removed |= self.native_filters.remove(&object).is_some();
+        removed |= self.native_effector_rasters.remove(&object).is_some();
+        if let Some(raster)=self.native_landscapes.remove(&object){for layer in raster.layer_ids(){self.graph_layers.remove(&layer);self.graph_object_properties.remove(&layer);}removed=true;}
         removed |= self.graph_object_input_tables.remove(&object).is_some();
         self.user_controls
             .retain(|_, control| control.title_only || control.owner_id != object);
@@ -4160,10 +4300,12 @@ impl RuntimeTraceApi {
     /// reached from sub_42AD90) then fails everywhere.
     fn graph_input_item_mask_accepts(
         &self,
+        object:i32,
         region: ethornell_vm::GraphInputRegion,
         local_x: i32,
         local_y: i32,
     ) -> bool {
+        if let Some(accepts)=self.icon_input_copied_mask_accepts(object,region.ordinal,local_x,local_y) {return accepts;}
         if region.mask_resource == -2 {
             return false;
         }
@@ -4235,6 +4377,7 @@ impl RuntimeTraceApi {
         screen_point: (f32, f32),
     ) -> Option<(ethornell_vm::GraphInputRegion, i32, i32)> {
         let input = self.graph_input_objects.get(&object)?;
+        if !self.icon_input_pointer_eligible(object,screen_point) {return None;}
         // DCIPIcon owns a CDspObjWindow and its live item children inherit the
         // Window enable state. A disabled/hidden Window cannot receive a hit.
         if self
@@ -4334,7 +4477,7 @@ impl RuntimeTraceApi {
             };
             let local_x = (screen_point.0 - left).floor() as i32;
             let local_y = (screen_point.1 - top).floor() as i32;
-            if !self.graph_input_item_mask_accepts(region, local_x, local_y) {
+            if !self.graph_input_item_mask_accepts(object,region, local_x, local_y) {
                 tracing::debug!(
                     target: "graph_input",
                     object,
@@ -4475,6 +4618,8 @@ impl RuntimeTraceApi {
         value: i32,
         extra: i32,
     ) -> std::result::Result<(), i32> {
+        if let Some(result)=self.set_native_backml_property(target,property,value,extra){return result;}
+        if let Some(result)=self.set_native_effector_property(target,property,value,extra){return result;}
         if let Some(mode) = self.graph90_sprite_mode(target) {
             // CDspObjSprite::SetProperty (sub_4285A0); [77] is the mode.
             let transformed = matches!(mode, 2 | 5 | 6);
@@ -4534,24 +4679,30 @@ impl RuntimeTraceApi {
                     store(self, value, extra);
                     true
                 }
-                // 0x11: sub_42AB50 fills one of sixteen mode-4 table entries.
-                0x11 => {
-                    let index = (value >> 8) & 0xff;
-                    let kind = ((value as u32) >> 16) as i32;
-                    if index >= 16 || kind > 5 {
-                        return Err(254);
-                    }
-                    self.graph_object_properties
-                        .entry(target)
-                        .or_default()
-                        .properties
-                        .insert(0x1100 | index as u32, (kind, extra));
+                // 428940 ->42AF80: low byte=index, next byte=kind,
+                // upper WORD=strength. The extra DWORD is the filter color.
+                0x11=>{
+                    let index=value as u32&255;let kind=(value as u32>>8)&255;
+                    if index>=16||kind>5{return Err(254);}
+                    self.graph_object_properties.entry(target).or_default().properties.insert(0x1100|index,(value,extra));
+                    self.refresh_native_sprite_filters();
                     true
                 }
-                // 0x10 rebuilds the sprite around a new primary bitmap and
-                // 0x100 sets the mode-4 bitmap; scripts never use them.
-                0x10 | 0x100 => {
-                    store(self, value, extra);
+                // sub_4285A0 -> sub_4272F0 (1.622: 428940 -> 427670).
+                // A virtual-property failure becomes status 254, including
+                // a missing bitmap. Modes 1/3/4 are successful no-ops.
+                0x10 => {
+                    if self
+                        .graph90_replace_sprite_primary(target, value)
+                        .map_err(|_| 254)?
+                    {
+                        self.graph_redraw_requested = Some(false);
+                    }
+                    true
+                }
+                // sub_429180 validates the wave window before changing its offset.
+                0x100 => {
+                    self.graph90_set_vm_wave_window(target,value,extra)?;
                     true
                 }
                 _ => false,
@@ -4579,14 +4730,30 @@ impl RuntimeTraceApi {
                     .map_err(|_| 254)?;
                 return Ok(());
             }
+            (Some(NativeBackgroundClass::BackRpl), 255 | 256) => {
+                if property == 256 { self.graph90_set_vm_wave_window(target,value,extra)?; }
+                else {
+                    self.graph_object_properties.entry(target).or_default().properties.insert(property,(value,extra));
+                    self.graph90_refresh_vm_effect(target).map_err(|_| 254)?;
+                }
+                return Ok(());
+            }
+            (Some(NativeBackgroundClass::BackRtt), 0x80 | 0x101) => {
+                let properties=self.graph_object_properties.get(&target).ok_or(5)?;
+                let base=properties.properties.get(&0x101).map(|v|v.0).or_else(||properties.named_properties.get("target-width").copied()).unwrap_or(0);
+                if (property==0x80 && value.wrapping_add(base)==0) || (property==0x101 && value==0) {return Err(254);}
+                let properties=self.graph_object_properties.get_mut(&target).unwrap();
+                properties.properties.insert(property,(value,extra));
+                if property==0x101 {properties.properties.remove(&0x80);}
+                self.refresh_background_effect(target);
+                return Ok(());
+            }
             // CDspObjBackML (sub_41E060), BackRPL (sub_41ED70: 255 -> +0x164,
             // 256 alpha bitmap), BackRTT (sub_41F160: 128/257) and BackSTR
             // (sub_41F9D0: 258) keep their values for the background renderer.
             (Some(NativeBackgroundClass::BackMl), 0x41 | 0x80 | 0x81 | 0x82 | 0x8f)
-            | (Some(NativeBackgroundClass::BackRpl), 255 | 256)
-            | (Some(NativeBackgroundClass::BackRtt), 128 | 257)
             | (Some(NativeBackgroundClass::BackStr), 258) => {
-                if property == 258 && (((value as i16) as i32) < 2 || (value >> 16) < 2) {
+                if property == 258 && ((extra as u16)<2 || (extra as u32>>16)<2) {
                     return Err(254);
                 }
                 self.graph_object_properties
@@ -4594,6 +4761,7 @@ impl RuntimeTraceApi {
                     .or_default()
                     .properties
                     .insert(property, (value, extra));
+                self.refresh_background_effect(target);
                 return Ok(());
             }
             _ => {}
@@ -4738,6 +4906,9 @@ impl RuntimeTraceApi {
                 }
                 _ => {}
             }
+        }
+        if parameter==2 && self.graph90_background_class(object)==Some(NativeBackgroundClass::BackMl) {
+            return Ok(vec![self.graph91_multilayer_background.layers[self.graph91_multilayer_background.selected_layer].blend_parameter]);
         }
         // CDspObj::GetProperty (sub_41BAE0).
         match parameter {
@@ -5208,6 +5379,7 @@ impl RuntimeTraceApi {
             return false;
         }
         self.graph_layers.remove(&target);
+        self.refresh_native_filters();
         let source = snapshot::compose_runtime_frame(self, false);
         let image = match displacement {
             Some(bitmap) => self.effects.warp_displacement_map(bitmap, &source),
@@ -5558,6 +5730,19 @@ impl RuntimeTraceApi {
     }
 
     fn tick_timelines(&mut self, elapsed_ms: u64) {
+        self.tick_mode6_rasters();
+        self.refresh_native_backml();
+        if self.native_vm_effect_revision != self.effects.vector_revision {
+            self.native_vm_effect_revision = self.effects.vector_revision;
+            let objects = self.graph_object_properties.keys().copied().collect::<Vec<_>>();
+            for object in objects { let _ = self.graph90_refresh_vm_effect(object); }
+        }
+        let maps=self.native_maps.keys().copied().collect::<Vec<_>>();
+        for object in maps {self.refresh_native_map(object);}
+        let masks=self.native_sprite_masks.keys().copied().collect::<Vec<_>>();
+        for object in masks {self.refresh_sprite_mask(object);}
+        let backgrounds=self.background_effects.keys().copied().collect::<Vec<_>>();
+        for object in backgrounds {self.refresh_background_effect(object);}
         self.graph_flash_controls.tick(elapsed_ms);
         self.tick_native_user_state(elapsed_ms);
         self.tick_native_effect_state(elapsed_ms);
@@ -5567,6 +5752,7 @@ impl RuntimeTraceApi {
         }
         self.sync_movie_audio();
         self.drain_graph_input_messages();
+        self.tick_icon_input_actions();
         // Target sub_496430 samples each registered Sprite once per main-loop
         // pass and stores only bit zero of the primary-input query. The portable
         // backend uses the same per-frame latching point with its current
@@ -6476,6 +6662,7 @@ impl RuntimeTraceApi {
     }
 
     fn remove_graph_input_control_layers(&mut self, object: i32) {
+        self.release_icon_input_chain(object);
         for layer in self
             .surface_controls
             .remove_owner(SurfaceControlOwner::InputObject(object))
@@ -6701,6 +6888,7 @@ impl RuntimeTraceApi {
     }
 
     fn set_graph_object_alpha_one(&mut self, object: i32, alpha_parameter: i32) {
+        if self.set_native_backml_alpha(object,alpha_parameter){return;}
         let alpha_parameter = alpha_parameter.clamp(0, 256);
         if let Some(transition_mode) = self
             .graph_transition_nodes
@@ -6746,6 +6934,9 @@ impl RuntimeTraceApi {
                 .set_alpha_parameter(alpha_parameter);
             self.log_graph_object_base_alpha_changed(object, alpha_parameter, before);
             let _ = self.graph90_refresh_backf_primary(object);
+            let _ = self.graph90_refresh_vm_effect(object);
+            self.refresh_background_effect(object);
+            self.sync_native_effector_parameters(object);
         }
     }
 
@@ -6778,6 +6969,7 @@ impl RuntimeTraceApi {
         self.display_tree.register_inferred(object);
         let objects = self.graph_native_virtual_descendants_inclusive(object);
         for object in objects {
+            if self.set_native_backml_alpha(object,alpha_parameter){continue;}
             if let Some(transition_mode) = self
                 .graph_transition_nodes
                 .get(&object)
@@ -6816,6 +7008,9 @@ impl RuntimeTraceApi {
                     .set_alpha_parameter(alpha_parameter);
                 self.log_graph_object_base_alpha_changed(object, alpha_parameter, before);
                 let _ = self.graph90_refresh_backf_primary(object);
+            let _ = self.graph90_refresh_vm_effect(object);
+            self.refresh_background_effect(object);
+            self.sync_native_effector_parameters(object);
             }
         }
     }
@@ -7144,7 +7339,7 @@ impl RuntimeTraceApi {
     /// one exception here is a renderer-local BackF texture whose alpha was
     /// synthesized explicitly from the recovered native mask operation.
     fn graph_layer_ignores_source_alpha(&self, layer_id: i32, layer: &RuntimeGraphLayer) -> bool {
-        if layer.key.starts_with("runtime:backf:") {
+        if layer.key.starts_with("runtime:backf:") || layer.key.starts_with("runtime:sprite-mask:") || layer.key.starts_with("runtime:sprite-mode6:") || layer.key.starts_with("runtime:sprite-mode5-raster:") {
             return false;
         }
         let display_object = layer.owner_object.unwrap_or(layer_id);
@@ -7211,7 +7406,7 @@ impl RuntimeTraceApi {
             let backf_secondary = *layer_id == BACK_F_SECONDARY_LAYER_ID
                 && owner_background
                     .is_some_and(|background| background.class == NativeBackgroundClass::BackF);
-            let object_opacity = if backb_secondary || backf_secondary {
+            let object_opacity = if backb_secondary || backf_secondary || (self.native_filters.contains_key(layer_id)||self.native_effector_rasters.contains_key(layer_id)||(layer.key.starts_with("runtime:backml:")||layer.key.starts_with("runtime:landscape:"))) {
                 1.0
             } else {
                 self.object_chain_opacity(layer.owner_object.filter(|object| *object != *layer_id))
@@ -7319,6 +7514,7 @@ impl RuntimeTraceApi {
                     node_opacity,
                 ),
             };
+            let (blend_mode,node_opacity)=if (self.native_filters.contains_key(layer_id)||self.native_effector_rasters.contains_key(layer_id)||(layer.key.starts_with("runtime:backml:")||layer.key.starts_with("runtime:landscape:"))){(0x80,1.0)}else{(blend_mode,node_opacity)};
             let opacity = layer.opacity * node_opacity * object_opacity;
             let opacity = layer
                 .target_surface
@@ -7365,11 +7561,12 @@ impl RuntimeTraceApi {
             if width <= 0.0 || height <= 0.0 {
                 continue;
             }
-            let (x, y, mut z) = self.layer_world_transform(*layer_id, layer);
+            let (x,y,mut z)=self.layer_world_transform(*layer_id,layer);
+            let (x,y)=if layer.key.starts_with("runtime:landscape:"){(0.,0.)}else{(x,y)};
             // Mode5 render state belongs to the sprite's primary layer, whose
             // layer id is the sprite id. Do not apply it to nested auxiliary
             // layers that merely share the same owner.
-            let mode5_render_state = self.graph_mode5_render_states.get(layer_id).copied();
+            let mode5_render_state = self.graph_mode5_render_states.get(layer_id).copied().filter(|_| !layer.key.starts_with("runtime:sprite-mode5-raster:"));
             let destination_quad = mode5_render_state.map(|state| {
                 state
                     .local_affine_quad
@@ -7499,6 +7696,13 @@ impl RuntimeTraceApi {
         // Native CObjectManager inserts equal-depth objects after existing
         // entries. Preserve that chain order; the old reversed order is only
         // available through ETHORNELL_LEGACY_REVERSE_EQUAL_DEPTH.
+        for item in &mut items {
+            self.apply_filtered_sprite_draw(item);
+            if let Some(object)=item.owner_object {
+                let key=if item.key.starts_with("runtime:landscape:"){item.key.rsplit(':').next().and_then(|s|s.parse::<u32>().ok())}else{self.graph90_native_sort_key(object)};
+                if let Some(key)=key{item.order_serial=(u64::from(key&65535)<<32)|(item.order_serial&0xffffffff);}
+            }
+        }
         items.sort_by_key(native_draw_order);
         for (owner, key) in backf_secondaries {
             let Some(secondary) = items
@@ -7740,6 +7944,13 @@ impl RuntimeTraceApi {
     fn should_draw_graph_layer(&self, layer_id: i32, layer: &RuntimeGraphLayer) -> bool {
         if !layer.enabled || !self.object_enabled_for_layer(layer.owner_object) {
             return false;
+        }
+        if let Some(object)=layer.owner_object {
+            if !self.projected_bindings_current(object) {return false;}
+            if layer.key.starts_with("runtime:sprite-mode6:") && !self.mode6_bindings_current(object) {return false;}
+            if layer.key.starts_with("runtime:sprite-mask:") && !self.sprite_mask_binding_current(object) {return false;}
+            if layer.key.starts_with("runtime:background-effect:") && !self.background_effect_bindings_current(object) {return false;}
+            if layer.key.starts_with("runtime:vm-effect:") && self.native_vm_effect_bindings.get(&object).is_some_and(|bindings|bindings.iter().any(|&(bitmap,generation)|self.graph_resources.get(&bitmap).is_none_or(|r|r.generation!=generation))) {return false;}
         }
         // A materialized DCIPIcon child is still governed by its owning
         // CDspObjWindow. Target sub_42AD30 delegates IsEnabled to the parent;
@@ -8536,7 +8747,7 @@ impl RuntimeEngine {
         // Audio clocks follow host elapsed time. Engine time has already been
         // normalized by the frontend to match the target's >500 ms pause-gap
         // rule. Do not replay missed VM frames after a delayed redraw.
-        self.api.advance_audio_clocks(audio_elapsed_ms.min(500));
+        self.api.advance_audio_clocks(audio_elapsed_ms);
         if self.api.native_user.has_blocking_message() {
             return RuntimeFrameReport {
                 last_report: self.last_report.clone(),
@@ -8550,6 +8761,8 @@ impl RuntimeEngine {
         self.api.finish_native_tick_input();
         self.api.sync_display_tree_from_runtime();
         self.api.refresh_aux_masked_sprites();
+        self.api.refresh_native_sprite_filters();
+        self.api.refresh_native_filters();
         report
     }
 }
@@ -8760,12 +8973,17 @@ fn query_runtime_input_event_bits(
     } else {
         scope.wrapping_shl(16) | 0xffff
     };
+    query_runtime_input_event_bits_split(api,packed,packed,consume)
+}
+
+fn query_runtime_input_event_bits_split(api:&mut RuntimeTraceApi,keyboard_scope:i32,packed:i32,consume:bool)->i32 {
+    let scope=packed;
     // `scope_is_packed` describes only the ABI representation of `scope`.
     // Target sub_46DF00 still checks the packed scope through
     // sub_46D810/sub_46D830 before collecting keyboard/class or pointer
     // events. Treating an already-packed CProcDspMsg scope as automatically
     // registered lets messages observe input owned by another processor.
-    let keyboard_registered = native_keyboard_scope_eligible(api, packed);
+    let keyboard_registered = native_keyboard_scope_eligible(api, keyboard_scope);
     let pointer_registered = native_pointer_scope_eligible(api, packed);
     let is_pointer = api.pending_input_descriptor == Some(INPUT_DESCRIPTOR_MOUSE_LEFT);
     let mut result = 0_i32;
@@ -10093,7 +10311,7 @@ mod input_tests {
         let mut hit = vec![Value::Int(object)];
         assert_eq!(
             call_graph(&mut api, 0x90, 0x3d, &mut hit).unwrap(),
-            Value::Int(0x55)
+            Value::Int(1)
         );
 
         let mut unsupported = vec![Value::Int(object)];
@@ -12726,6 +12944,114 @@ mod input_tests {
     }
 
     #[test]
+    fn graph90_38_primary_bitmap_property_rebuilds_and_obeys_mode_gating() {
+        let manager =
+            ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let mut api = super::RuntimeTraceApi::new(manager);
+        assert!(api.create_bitmap_from_rgb(501, 4, 6, 2, &[255; 4 * 6 * 4]));
+        assert!(api.create_bitmap_from_rgb(502, 8, 10, 2, &[255; 8 * 10 * 4]));
+        let Value::Int(sprite) = call_graph(&mut api, 0x90, 0x50, &mut vec![]).unwrap() else {
+            panic!()
+        };
+        let mut configure = [sprite, 10, 20, 501, 1, 32, 123].map(Value::Int).to_vec();
+        call_graph(&mut api, 0x90, 0x56, &mut configure).unwrap();
+        let mut property = [sprite, 0x10, 502, -999].map(Value::Int).to_vec();
+        call_graph(&mut api, 0x90, 0x38, &mut property).unwrap();
+        assert!(property.is_empty());
+        let layer = &api.graph_layers[&sprite];
+        assert_eq!(
+            (layer.width, layer.height, layer.x, layer.y, layer.z),
+            (8.0, 10.0, 10.0, 20.0, 123)
+        );
+        assert_eq!(
+            api.graph_object_properties[&sprite].format_resource,
+            Some(502)
+        );
+        assert_eq!(api.graph_object_properties[&sprite].alpha_parameter(), 32);
+        assert_eq!(api.graph_object_draw_enabled.get(&sprite), Some(&false));
+        let mut bad = [sprite, 0x10, 503, 0].map(Value::Int).to_vec();
+        assert!(call_graph(&mut api, 0x90, 0x38, &mut bad).is_err());
+        assert_eq!(
+            api.graph_object_properties[&sprite].format_resource,
+            Some(502)
+        );
+        for mode in [1, 3, 4] {
+            api.graph_object_properties
+                .get_mut(&sprite)
+                .unwrap()
+                .named_properties
+                .insert("target-object-mode".into(), mode);
+            let mut ignored = [sprite, 0x10, -1, 0].map(Value::Int).to_vec();
+            call_graph(&mut api, 0x90, 0x38, &mut ignored).unwrap();
+            assert_eq!(
+                api.graph_object_properties[&sprite].format_resource,
+                Some(502)
+            );
+        }
+    }
+
+    #[test]
+    fn replaced_projected_sprite_retains_new_bitmap_when_moved_again() {
+        for selector in [0x38, 0x57] {
+            let manager =
+                ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
+            let mut api = super::RuntimeTraceApi::new(manager);
+            api.configure_screen_size(1280, 720);
+            for (bitmap, width, height) in [(501, 8, 8), (502, 16, 12)] {
+                assert!(api.create_bitmap_from_rgb(
+                    bitmap,
+                    width,
+                    height,
+                    2,
+                    &vec![255; width as usize * height as usize * 4]
+                ));
+            }
+            let Value::Int(sprite) = call_graph(&mut api, 0x90, 0x50, &mut vec![]).unwrap() else {
+                panic!()
+            };
+            let mut configure = [
+                sprite, 0, 0, 0, 501, -1, 0, -1, 0, 0, 0, 640, 0, 1, 32, 16, 100,
+            ]
+            .map(Value::Int)
+            .to_vec();
+            call_graph(&mut api, 0x90, 0x5C, &mut configure).unwrap();
+            let args = if selector == 0x38 {
+                vec![sprite, 0x10, 502, 0]
+            } else {
+                vec![sprite, 502]
+            };
+            call_graph(
+                &mut api,
+                0x90,
+                selector,
+                &mut args.into_iter().map(Value::Int).collect(),
+            )
+            .unwrap();
+            assert_eq!(api.graph_layers[&sprite].width, 16.0);
+            let key = api.graph_layers[&sprite].key.clone();
+            let mut position = [sprite, 1 << 16, 2 << 16, 0].map(Value::Int).to_vec();
+            call_graph(&mut api, 0x91, 0x33, &mut position).unwrap();
+            assert_eq!(api.graph_layers[&sprite].key, key);
+            assert_eq!(
+                (
+                    api.graph_layers[&sprite].width,
+                    api.graph_layers[&sprite].height
+                ),
+                (16.0, 12.0)
+            );
+            assert_eq!(
+                api.graph_object_properties[&sprite].named_properties["target-90-5C-arg-4"],
+                502
+            );
+            assert_eq!(
+                api.graph_object_properties[&sprite].named_properties["target-90-5C-arg-5"],
+                -1
+            );
+            assert_eq!(api.graph_object_properties[&sprite].alpha_parameter(), 16);
+        }
+    }
+
+    #[test]
     fn graph90_05_captures_only_display_objects_through_its_priority() {
         let manager =
             ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
@@ -14097,13 +14423,14 @@ mod input_tests {
             api.display_tree.kind(0),
             Some(super::display_tree::NativeDisplayKind::BackMl)
         );
-        let render_id = -0x2100_0000i32;
+        assert_eq!((api.graph91_multilayer_background.layers[0].x_16_16,api.graph91_multilayer_background.layers[0].y_16_16),(0x1_8000,-0x0_8000));
+        let render_id = 0;
         assert_eq!(
             (
                 api.graph_layers[&render_id].x,
                 api.graph_layers[&render_id].y
             ),
-            (1.5, -0.5)
+            (0.0, 0.0)
         );
 
         let mut position = vec![Value::Int(0), Value::Int(0x2_4000), Value::Int(0x3_8000)];
@@ -14111,12 +14438,13 @@ mod input_tests {
         let properties = &api.graph_object_properties[&0];
         assert_eq!(properties.native.fixed_position_x_16_16, 0x2_4000);
         assert_eq!(properties.native.fixed_position_y_16_16, 0x3_8000);
+        assert_eq!((api.graph91_multilayer_background.layers[0].x_16_16,api.graph91_multilayer_background.layers[0].y_16_16),(0x2_4000,0x3_8000));
         assert_eq!(
             (
                 api.graph_layers[&render_id].x,
                 api.graph_layers[&render_id].y
             ),
-            (2.25, 3.5)
+            (0.0, 0.0)
         );
     }
 
@@ -15460,7 +15788,7 @@ mod input_tests {
         display.y = 30.0;
         api.graph_surfaces.insert(surface, display);
         let descriptor = GraphInputDescriptor {
-            groups: vec![GraphInputGroup {
+            groups: vec![GraphInputGroup { navigation_columns: 0,
                 index: 0,
                 initial_current_item: -1,
                 selection_enabled: true,
@@ -15545,7 +15873,7 @@ mod input_tests {
         // selection but not pointer-driven selection, so hovering only
         // swaps the hover bitmap.
         let descriptor = GraphInputDescriptor {
-            groups: vec![GraphInputGroup {
+            groups: vec![GraphInputGroup { navigation_columns: 0,
                 index: 0,
                 initial_current_item: -1,
                 selection_enabled: true,
@@ -15800,7 +16128,7 @@ mod input_tests {
             &mut api,
             object,
             GraphInputDescriptor {
-                groups: vec![ethornell_vm::GraphInputGroup {
+                groups: vec![ethornell_vm::GraphInputGroup { navigation_columns: 0,
                     index: 0,
                     initial_current_item: 1,
                     selection_enabled: true,
@@ -16475,7 +16803,7 @@ mod input_tests {
             object,
             GraphInputDescriptor {
                 flags:[1,0,0,0,1,0,0],
-                groups: vec![GraphInputGroup {
+                groups: vec![GraphInputGroup { navigation_columns: 0,
                     index: 0,
                     initial_current_item: -1,
                     selection_enabled: true,
@@ -16620,7 +16948,7 @@ mod input_tests {
                 object,
                 GraphInputDescriptor {
                     flags: [0, 0, 0, 0, select_on_activation, 0, 0],
-                    groups: vec![GraphInputGroup {
+                    groups: vec![GraphInputGroup { navigation_columns: 0,
                         index: 0,
                         initial_current_item: 0,
                         selection_enabled: true,
@@ -16690,7 +17018,7 @@ mod input_tests {
             &mut api,
             object,
             GraphInputDescriptor {
-                groups: vec![GraphInputGroup {
+                groups: vec![GraphInputGroup { navigation_columns: 0,
                     index: 0,
                     initial_current_item: -1,
                     selection_enabled: true,
@@ -17325,7 +17653,7 @@ mod input_tests {
         let mut input = super::graph_input::RuntimeGraphInputObject::new(0);
         input.configure(GraphInputDescriptor {
             initial_group: 0,
-            groups: vec![GraphInputGroup {
+            groups: vec![GraphInputGroup { navigation_columns: 0,
                 index: 0,
                 initial_current_item: -1,
                 selection_enabled: true,
@@ -17909,39 +18237,28 @@ fn native_keyboard_scope_eligible(api: &RuntimeTraceApi, packed: i32) -> bool {
 /// counts while its object is drawable, the cursor is on screen and over the
 /// object. A covering node above `packed` blocks the pointer, the first node
 /// at or below it must be `packed` itself and cover the cursor.
-fn native_pointer_scope_eligible(api: &RuntimeTraceApi, packed: i32) -> bool {
+fn native_pointer_scope_eligible(api:&RuntimeTraceApi,packed:i32)->bool {native_pointer_scope_eligible_at(api,packed,api.mouse_pos)}
+
+fn native_pointer_scope_eligible_at(api: &RuntimeTraceApi, packed: i32,point:Option<(f32,f32)>) -> bool {
     if api.input_configuration_enabled == 0 {
         return false;
     }
     let packed = packed as u32;
-    let on_screen = api.mouse_pos.is_some_and(|(x, y)| {
+    let (screen_width,screen_height)=snapshot::runtime_frame_size(api);
+    let on_screen = point.is_some_and(|(x, y)| {
         x >= 0.0
             && y >= 0.0
-            && x < api.screen_width.max(1) as f32
-            && y < api.screen_height.max(1) as f32
+            && x < screen_width as f32
+            && y < screen_height as f32
     });
-    let mut nodes = api
-        .pointer_object_nodes
-        .iter()
-        .map(|&(scope, object)| (scope, Some(object)))
-        .chain(
-            api.registered_pointer_input_scopes
-                .scopes_with_counts()
-                .flat_map(|(scope, count)| std::iter::repeat_n((scope, None), count as usize)),
-        )
-        .collect::<Vec<_>>();
+    let mut nodes = api.pointer_object_nodes.iter().filter_map(|&(scope, object)| {
+        (on_screen && api.graph_object_is_drawable(object)).then(||
+            (scope, api.graph_object_pointer_hit_at(object,point).is_some_and(|hit| hit != 0)))
+    }).chain(api.registered_pointer_input_scopes.scopes_with_counts().flat_map(|(scope, count)|
+        std::iter::repeat_n((scope, true), count as usize)))
+        .chain(api.selection_pointer_nodes_at(point)).chain(api.icon_input_pointer_nodes_at(point)).collect::<Vec<_>>();
     nodes.sort_by(|a, b| b.0.cmp(&a.0));
-    for (scope, object) in nodes {
-        let covers = match object {
-            Some(object) => {
-                if !on_screen || !api.graph_object_is_drawable(object) {
-                    continue;
-                }
-                api.graph_object_pointer_hit(object)
-                    .is_some_and(|hit| hit != 0)
-            }
-            None => true,
-        };
+    for (scope, covers) in nodes {
         if scope <= packed {
             if scope != packed {
                 return false;
@@ -18547,6 +18864,7 @@ impl RuntimeTraceApi {
             .filter(|(object, surface, _, hit)| {
                 hit.is_none()
                     && self.graph_input_objects[object].samples_window_pointer_input()
+                    && self.icon_input_window_pointer_eligible(*object,point)
                     && self.graph_input_surface_contains_point(*surface, point)
             })
             .max_by_key(|(object, _, _, _)| *object)
@@ -18771,6 +19089,7 @@ impl RuntimeTraceApi {
         };
         if self.graph_surfaces.contains_key(&surface) {
             self.replace_graph_input_control_layers(object, surface, &descriptor);
+            self.sync_icon_input_virtuals(object);
         }
     }
 
@@ -18793,7 +19112,7 @@ impl RuntimeTraceApi {
                     .get("target-object-mode")
                     .copied()
                     .unwrap_or_default();
-                matches!(mode, 0 | 1).then_some((sprite, aux))
+                matches!(mode, 0 | 1 | 6).then_some((sprite, aux))
             })
             .collect::<Vec<_>>();
         let mut next = BTreeMap::new();
@@ -18825,13 +19144,13 @@ impl RuntimeTraceApi {
             else {
                 continue;
             };
-            let base_format = self
+            let base_format = if base_key.starts_with("runtime:sprite-mode6:") {2} else {self
                 .graph_layers
                 .get(&sprite)
                 .and_then(|_| self.graph_object_properties.get(&sprite))
                 .and_then(|properties| properties.format_resource)
                 .and_then(|resource| self.bitmap_formats.get(&resource).copied())
-                .unwrap_or(2);
+                .unwrap_or(2)};
             let mask_format = self.bitmap_formats.get(&aux).copied().unwrap_or(3);
             let (origin_x, origin_y) = (signature.0, signature.1);
             let mut out = base.clone();
@@ -19154,7 +19473,7 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
         std::mem::take(&mut self.runtime_stubbed)
     }
 
-    fn set_performance_profiling(&mut self, enabled: bool) {
+    fn set_performance_profiling(&mut self, enabled: i32) {
         self.performance_profile.set_enabled(enabled);
     }
 
@@ -20010,6 +20329,9 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
                 if candidate.exists() { candidate } else { path }
             }
         };
+        if host_dialog::host_dialogs_suppressed() {
+            return false;
+        }
         let mut command = std::process::Command::new(&executable_path);
         command.args(&arguments).current_dir(&working_path);
         let result = command.spawn().and_then(|mut child| child.wait());
@@ -20058,6 +20380,7 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
 
     fn shell_open(&mut self, target: &str) -> bool {
         if file_policy::restricted() { tracing::info!(target, "ShellOpen unavailable in host mode"); return false; }
+        if host_dialog::host_dialogs_suppressed() { return false; }
         #[cfg(target_os = "windows")]
         let result = std::process::Command::new("cmd")
             .args(["/C", "start", "", target])
@@ -21760,6 +22083,18 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
         );
     }
 
+    fn configure_background_frames(&mut self,frames:&[i32],alpha:i32)->ethornell_vm::VmResult<()> {
+        self.configure_background_effect(0x44,&[frames.len() as i32,0,alpha],frames)
+    }
+
+    fn start_native_selection(&mut self, request: ethornell_vm::native_selection::NativeSelectionRequest) -> ethornell_vm::VmResult<u64> {
+        self.start_selection(request)
+    }
+
+    fn poll_native_selection(&mut self, id: u64, callbacks: &[[i32; 2]], cancelled: bool) -> Option<ethornell_vm::native_selection::NativeSelectionCompletion> {
+        self.poll_selection(id, callbacks, cancelled)
+    }
+
     fn poll_native_graph_selection(&mut self) -> Option<i32> {
         let (event, payload) = self.poll_object_event_payload(0);
         (event != 0).then_some(payload & 0xffff)
@@ -22369,6 +22704,7 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
         // sub_44A900 resets the pointer-current item and immediately reruns
         // hit testing. If the cursor is already over an item, the target can
         // therefore queue the initial 0x10000002 record during configure.
+        self.configure_icon_input_chain(object);
         if let Some(point) = self.mouse_pos {
             self.initialize_graph_pointer_after_config(object, point);
         }
@@ -22390,6 +22726,7 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                 trace_graph!(self, "input object #{object} region[{ordinal}] {region}");
             }
         }
+
     }
 
     fn query_bitmap_info(&mut self, bitmap: i32) -> Option<ethornell_vm::BitmapInfo> {
@@ -22619,6 +22956,9 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
         std::mem::take(&mut self.system92_text_fragment_records)
     }
 
+    fn upload_map_tile_data(&mut self,object:i32,width:u32,height:u32,tiles:&[u16])->bool {
+        self.upload_native_map(object,width,height,tiles)
+    }
     fn call_graph(
         &mut self,
         call: &mut ethornell_vm::NativeCallFrame,
@@ -24806,21 +25146,7 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                 let args = pop_args(stack, 2);
                 let format_resource = args.first().map(value_to_i32).unwrap_or(-1);
                 let target = args.get(1).map(value_to_i32).unwrap_or_default();
-                let properties = self.graph_object_properties.entry(target).or_default();
-                // Target sub_47B4B0 -> sub_462050 -> sub_443A40 ->
-                // sub_41BC70 builds CDspObj's independent 1-bit hit mask. It
-                // does not replace a Sprite/Background primary bitmap.
-                properties.hit_mask_resource = match format_resource {
-                    -1 => None,
-                    value => Some(value),
-                };
-                tracing::info!(
-                    target,
-                    format_resource,
-                    primary = ?properties.format_resource,
-                    hit_mask = ?properties.hit_mask_resource,
-                    "GraphSetObjectHitMaskBitmap"
-                );
+                self.configure_graph_object_hit_mask(target, format_resource)?;
                 trace_graph!(self, "object #{target} hit-mask bitmap={format_resource}");
             }
             (0x90, 0x3d) => {
@@ -24858,16 +25184,6 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                 if updated {
                     trace_graph!(self, "window #{window} composition-order={order:?}");
                 }
-            }
-            (0x90, 0x19) => {
-                // sub_479DA0 pops seven arguments before sub_4027E0 performs
-                // the three-resource bitmap synthesis.
-                let args = pop_args(stack, 7);
-                self.apply_native_bitmap_operation(
-                    &args,
-                    native_graph::NativeBitmapOperation::Composite,
-                );
-                tracing::info!(?args, "GraphBitmapSynthesis");
             }
             (0x90, 0x1e) => {
                 let args = pop_args(stack, 8);
@@ -25638,8 +25954,11 @@ impl ethornell_vm::SoundApi for RuntimeTraceApi {
         first: &[i32],
         second: &[i32],
     ) -> bool {
-        self.native_effect
-            .configure_particle_frame_tables(handle, first, second)
+        let mut state=std::mem::take(&mut self.native_effect);
+        let valid=state.configure_particle_frame_tables(handle,first,second);
+        if valid {self.render_native_particle_screen(&mut state,handle,self.engine_time_ms as u32,false);}
+        self.native_effect=state;
+        valid
     }
 
     fn user_spline_exists(&self, handle: i32) -> bool {
@@ -25762,14 +26081,6 @@ fn set_sound_channel_active(active: &mut [bool; 64], channel: i32, value: bool) 
     {
         *slot = value;
     }
-}
-
-fn sound_channel_active(active: &[bool; 64], channel: i32) -> bool {
-    usize::try_from(channel)
-        .ok()
-        .and_then(|index| active.get(index))
-        .copied()
-        .unwrap_or(false)
 }
 
 fn scenario_audio_channel(name: &str) -> i32 {
@@ -26295,8 +26606,10 @@ fn run_headless(
             // Headless differs from the window frontend only at final
             // presentation: every logical frame still traverses the shared
             // render tree and produces a complete offscreen framebuffer.
+            runtime.api.performance_profile.begin();
             let frame_composition =
                 snapshot::compose_runtime_frame_with_diagnostics(&runtime.api, true);
+            runtime.api.performance_profile.end(true);
             if snapshot_frames.contains(&frame)
                 && let Some(base_path) = snapshot_path.as_ref()
             {
@@ -26486,11 +26799,13 @@ mod selector_audit {
             (0xC0, "usr2"),
         ];
         let mut stubbed = Vec::new();
+        let only: Vec<(u8, u16)> = std::env::var("AUDIT_ONLY").ok().map(|v| v.split(',').map(|x| { let (g, i) = x.split_once(':').unwrap(); (u8::from_str_radix(g, 16).unwrap(), u16::from_str_radix(i, 16).unwrap()) }).collect()).unwrap_or_default();
         for (group, name) in groups {
             for id in 0..=255u16 {
                 let Some(abi) = ethornell_script::native_abi::lookup(group, id) else {
                     continue;
                 };
+                if !only.is_empty() && !only.contains(&(group, id)) { continue; }
                 let manager =
                     ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR"))
                         .unwrap();

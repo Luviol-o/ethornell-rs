@@ -31,7 +31,7 @@ pub(super) struct Graph91MultiLayerRecord {
     pub blend_mode: i32,
     pub blend_parameter: i32,
     pub bitmap: i32,
-    pub bitmap_generation: i32,
+    pub bitmap_generation: u64,
     pub source_x: i32,
     pub source_y: i32,
     pub rotation: i32,
@@ -162,7 +162,7 @@ impl Graph91LandscapeState {
         let row_step = if row_step == 0 { 16 } else { row_step };
         let column_step = if column_step == 0 { 16 } else { column_step };
         let baseline = if baseline == 0 {
-            35_i32.saturating_mul(row_step)
+            35_i32.wrapping_mul(row_step)
         } else {
             baseline
         };
@@ -191,7 +191,7 @@ impl Graph91LandscapeState {
         }
     }
 
-    fn cell_index(&self, line: i32, column: i32) -> Option<usize> {
+    pub(super) fn cell_index(&self, line: i32, column: i32) -> Option<usize> {
         if line < 0 || column < 0 || line >= self.map_height || column >= self.map_width {
             return None;
         }
@@ -975,89 +975,10 @@ impl RuntimeTraceApi {
                 }
                 ethornell_vm::Value::None
             }
-            0x65 => {
-                let args = Self::graph91_source_ints(stack, 6);
-                if let [handle, first_map, second_map, blend, gradient, priority] = args.as_slice()
-                {
-                    self.graph91_configure_effector(
-                        *handle,
-                        0,
-                        [*first_map, *second_map],
-                        [*blend, *gradient, 0, 0, 0, 0, 0, 0, 0],
-                        *priority,
-                    );
-                }
-                ethornell_vm::Value::None
-            }
-            0x66 => {
-                let args = Self::graph91_source_ints(stack, 4);
-                if let [handle, gradient_type, blend, priority] = args.as_slice()
-                    && (0..=1).contains(gradient_type)
-                {
-                    self.graph91_configure_effector(
-                        *handle,
-                        1,
-                        [-1, -1],
-                        [*gradient_type, *blend, 0, 0, 0, 0, 0, 0, 0],
-                        *priority,
-                    );
-                }
-                ethornell_vm::Value::None
-            }
-            0x67 => {
-                let args = Self::graph91_source_ints(stack, 6);
-                if let [handle, map, max_distance, ripple, blend, priority] = args.as_slice()
-                    && *max_distance != 0
-                {
-                    self.graph91_configure_effector(
-                        *handle,
-                        2,
-                        [*map, -1],
-                        [*max_distance, *ripple, *blend, 0, 0, 0, 0, 0, 0],
-                        *priority,
-                    );
-                }
-                ethornell_vm::Value::None
-            }
-            0x68 => {
-                let args = Self::graph91_source_ints(stack, 9);
-                if let [
-                    handle,
-                    x,
-                    y,
-                    rotation,
-                    scale_x,
-                    scale_y,
-                    parameter,
-                    alpha,
-                    priority,
-                ] = args.as_slice()
-                    && *scale_x != 0
-                    && *scale_y != 0
-                {
-                    self.graph91_configure_effector(
-                        *handle,
-                        3,
-                        [-1, -1],
-                        [
-                            *x, *y, *rotation, *scale_x, *scale_y, *parameter, *alpha, 0, 0,
-                        ],
-                        *priority,
-                    );
-                }
-                ethornell_vm::Value::None
-            }
-            0x69 => {
-                let args = Self::graph91_source_ints(stack, 3);
-                if let [handle, blend, priority] = args.as_slice() {
-                    self.graph91_configure_effector(
-                        *handle,
-                        4,
-                        [-1, -1],
-                        [*blend, 0, 0, 0, 0, 0, 0, 0, 0],
-                        *priority,
-                    );
-                }
+            0x65..=0x69=>{
+                let count=match id{0x65|0x67=>6,0x66=>4,0x68=>9,_=>3};
+                let args=Self::graph91_source_ints(stack,count);
+                if let Err(error)=self.configure_native_effector(id,&args){return Some(Err(error));}
                 ethornell_vm::Value::None
             }
             0x70 => {
@@ -1121,6 +1042,9 @@ impl RuntimeTraceApi {
                         properties.native.priority = *priority as u32;
                         self.display_tree.set_chain_depth(*handle, *priority);
                         self.graph90_refresh_native_sort_key(*handle);
+                        self.graph90_set_common_state(*handle,Some((*x,*y)),Some(*blend_mode),Some(*alpha),Some(*priority));
+                        self.set_graph_object_draw_enabled_raw(*handle,true);
+                        self.refresh_native_landscape(*handle);
                     }
                 }
                 ethornell_vm::Value::None
@@ -1137,6 +1061,7 @@ impl RuntimeTraceApi {
                     cell.silhouette_type = *silhouette_type;
                     cell.silhouette_level = *level;
                     cell.silhouette_value = *value;
+                    self.refresh_native_landscape(*handle);
                 }
                 ethornell_vm::Value::None
             }
@@ -1190,6 +1115,10 @@ impl RuntimeTraceApi {
             return None;
         }
         let id = call.id();
+        if (0x40..=0x4a).contains(&id) {
+            let values=call.args().iter().map(value_to_i32).collect::<Vec<_>>();
+            if let Err(error)=self.validate_native_backml_call(id,&values){return Some(Err(error));}
+        }
         let stack = call.args_mut();
         let value = match id {
             0x31 => {
@@ -1361,6 +1290,7 @@ impl RuntimeTraceApi {
                 {
                     record.auxiliary_a = *value_a;
                     record.auxiliary_b = *value_b;
+                    self.refresh_native_backml();
                 }
                 ethornell_vm::Value::None
             }
@@ -1371,6 +1301,7 @@ impl RuntimeTraceApi {
                 {
                     record.source_delta_x = *delta_x;
                     record.source_delta_y = *delta_y;
+                    self.refresh_native_backml();
                 }
                 ethornell_vm::Value::None
             }
@@ -1382,6 +1313,7 @@ impl RuntimeTraceApi {
                     record.rotation_delta = *rotation_delta;
                     record.scale_delta_x = *scale_delta_x;
                     record.scale_delta_y = *scale_delta_y;
+                    self.refresh_native_backml();
                 }
                 ethornell_vm::Value::None
             }
@@ -1751,7 +1683,9 @@ impl RuntimeTraceApi {
         if !self.graph_resources.contains_key(&bitmap) || scale_x == 0 || scale_y == 0 {
             return;
         }
-        self.graph91_multilayer_background = Graph91MultiLayerBackgroundState::default();
+        if self.graph90_background_class(self.current_graph_object.unwrap_or(0))!=Some(NativeBackgroundClass::BackMl){
+            self.graph91_multilayer_background = Graph91MultiLayerBackgroundState::default();
+        }
         self.graph91_multilayer_background.active = true;
         self.graph91_multilayer_background.object_x_16_16 = x;
         self.graph91_multilayer_background.object_y_16_16 = y;
@@ -1771,6 +1705,8 @@ impl RuntimeTraceApi {
         record.configured = true;
         record.enabled = true;
         record.bitmap = bitmap;
+        record.bitmap_generation=self.graph_resources.get(&bitmap).map_or(0,|r|r.generation);
+        record.x_16_16=x;record.y_16_16=y;
         record.source_x = source_x;
         record.source_y = source_y;
         record.rotation = rotation;
@@ -1806,7 +1742,7 @@ impl RuntimeTraceApi {
         let record = &mut self.graph91_multilayer_background.layers[layer as usize];
         record.configured = bitmap != -1;
         record.bitmap = bitmap;
-        record.bitmap_generation = if bitmap == -1 { 0 } else { 1 };
+        record.bitmap_generation=self.graph_resources.get(&bitmap).map_or(0,|r|r.generation);
         record.source_x = source_x;
         record.source_y = source_y;
         record.source_delta_x = 0;
@@ -1841,70 +1777,8 @@ impl RuntimeTraceApi {
         -0x2100_0000i32 + layer as i32
     }
 
-    pub(super) fn graph91_sync_all_multilayer_render_layers(&mut self) {
-        for layer in 0..8 {
-            self.graph91_sync_multilayer_render_layer(layer);
-        }
-    }
-
-    fn graph91_sync_multilayer_render_layer(&mut self, layer_index: usize) {
-        let render_id = Self::graph91_multilayer_render_id(layer_index);
-        let Some(record) = self
-            .graph91_multilayer_background
-            .layers
-            .get(layer_index)
-            .copied()
-        else {
-            return;
-        };
-        if !self.graph91_multilayer_background.active || !record.configured || record.bitmap == -1 {
-            self.graph_layers.remove(&render_id);
-            self.graph_object_properties.remove(&render_id);
-            return;
-        }
-        let Some(resource) = self.graph_resources.get(&record.bitmap).cloned() else {
-            self.graph_layers.remove(&render_id);
-            return;
-        };
-        let Some((_, region)) = self.resource_image_region(record.bitmap) else {
-            self.graph_layers.remove(&render_id);
-            return;
-        };
-        self.graph_layers.insert(
-            render_id,
-            RuntimeGraphLayer {
-                hit_id: 0,
-                owner_object: None,
-                key: resource.key,
-                target_surface: None,
-                x: fixed_16_to_f32(self.graph91_multilayer_background.object_x_16_16)
-                    + fixed_16_to_f32(record.x_16_16),
-                y: fixed_16_to_f32(self.graph91_multilayer_background.object_y_16_16)
-                    + fixed_16_to_f32(record.y_16_16),
-                width: region.width,
-                height: region.height,
-                src_x: region.x + record.source_x as f32,
-                src_y: region.y + record.source_y as f32,
-                opacity: (1.0 - record.transparency as f32 / 256.0).clamp(0.0, 1.0),
-                z: layer_index as i32,
-                enabled: record.enabled,
-                transform_x: 0.0,
-                transform_y: 0.0,
-                transform_z: 0,
-                scale_x: fixed_16_to_f32(record.scale_x),
-                scale_y: fixed_16_to_f32(record.scale_y),
-                rotation_degrees: fixed_16_to_f32(record.rotation),
-                clip: None,
-            },
-        );
-        let properties = self.graph_object_properties.entry(render_id).or_default();
-        properties.blend_mode = record.blend_mode;
-        properties.named_properties.insert(
-            "multilayer-blend-parameter".to_string(),
-            record.blend_parameter,
-        );
-        self.graph_redraw_requested = Some(false);
-    }
+    pub(super) fn graph91_sync_all_multilayer_render_layers(&mut self) {self.refresh_native_backml();}
+    fn graph91_sync_multilayer_render_layer(&mut self,_layer:usize){self.refresh_native_backml();}
 
     fn graph91_source_ints(stack: &mut Vec<ethornell_vm::Value>, count: usize) -> Vec<i32> {
         let mut args = pop_args(stack, count)
@@ -2212,54 +2086,6 @@ impl RuntimeTraceApi {
         removed
     }
 
-    fn graph91_bitmap_matches(&self, bitmap: i32, required_format: i32) -> bool {
-        if bitmap == -1 {
-            return true;
-        }
-        self.graph_bitmap_image(bitmap).is_some()
-            && self.bitmap_formats.get(&bitmap).copied().unwrap_or(2) == required_format
-    }
-
-    fn graph91_configure_effector(
-        &mut self,
-        handle: i32,
-        mode: i32,
-        maps: [i32; 2],
-        parameters: [i32; 9],
-        priority: i32,
-    ) {
-        if !self.graph91_effectors.contains_key(&handle) {
-            return;
-        }
-        let required_format = if mode == 2 { 6 } else { 4 };
-        if maps[0] != -1 && !self.graph91_bitmap_matches(maps[0], required_format) {
-            return;
-        }
-        if maps[1] != -1 && !self.graph91_bitmap_matches(maps[1], 4) {
-            return;
-        }
-        if let Some(state) = self.graph91_effectors.get_mut(&handle) {
-            state.mode = mode;
-            state.vector_maps = maps;
-            state.parameters = parameters;
-            // Effector mode configurators invoke the same sub_41B8B0
-            // priority virtual after committing their mode-specific state.
-            // Invalid priorities leave the previous priority unchanged.
-            if (0..0x1_0000).contains(&priority) {
-                state.priority = priority;
-            }
-        }
-        if (0..0x1_0000).contains(&priority) {
-            self.graph_object_properties
-                .entry(handle)
-                .or_default()
-                .native
-                .priority = priority as u32;
-            self.display_tree.set_chain_depth(handle, priority);
-            self.graph90_refresh_native_sort_key(handle);
-        }
-    }
-
     fn graph91_create_landscape(
         &mut self,
         cell_width: i32,
@@ -2310,29 +2136,7 @@ impl RuntimeTraceApi {
         handle: i32,
         _alpha_test_mode: i32,
     ) -> Option<[i32; 2]> {
-        let state = self.graph91_landscapes.get(&handle)?;
-        if !state.enabled || state.map_width <= 0 || state.map_height <= 0 {
-            return None;
-        }
-        let (mouse_x, mouse_y) = self.mouse_pos?;
-        let local_y = mouse_y.floor() as i32 - state.y;
-        let line = local_y.div_euclid(state.row_step.max(1));
-        if !(0..state.map_height).contains(&line) {
-            return None;
-        }
-        let stagger = if line & 1 != 0 {
-            state.cell_width / 2
-        } else {
-            0
-        };
-        let local_x = mouse_x.floor() as i32 - state.x - stagger;
-        let column = local_x.div_euclid(state.cell_width.max(1));
-        let index = state.cell_index(line, column)?;
-        let cell = state.cells.get(index)?;
-        if cell.column_index < 0 {
-            return None;
-        }
-        Some([line, column])
+        self.native_landscape_hit(handle,_alpha_test_mode)
     }
 
     pub(super) fn graph91_configure_landscape_parts(
@@ -2345,32 +2149,7 @@ impl RuntimeTraceApi {
         column_count: i32,
         column_words: &[i32],
     ) -> bool {
-        if part_count < 0
-            || column_count < 0
-            || part_words.len() != part_count as usize * 5
-            || column_words.len() != column_count as usize * 34
-            || self.graph_bitmap_image(bitmap).is_none()
-        {
-            return false;
-        }
-        let Some(state) = self.graph91_landscapes.get_mut(&handle) else {
-            return false;
-        };
-        state.source_bitmap = bitmap;
-        state.part_spacing = part_spacing;
-        state.parts = part_words
-            .as_chunks::<5>()
-            .0
-            .iter()
-            .map(|chunk| [chunk[0], chunk[1], chunk[2], chunk[3], chunk[4]])
-            .collect();
-        state.columns = column_words
-            .as_chunks::<34>()
-            .0
-            .iter()
-            .map(|chunk| chunk.to_vec())
-            .collect();
-        true
+        self.configure_native_landscape_parts(handle,bitmap,part_count,part_words,part_spacing,column_count,column_words)
     }
 
     pub(super) fn graph91_configure_landscape_map(
@@ -2389,6 +2168,8 @@ impl RuntimeTraceApi {
         let Some(state) = self.graph91_landscapes.get_mut(&handle) else {
             return false;
         };
+        let priority=self.graph_object_properties.get(&handle).map_or(0,|p|p.native.priority);
+        if priority.wrapping_add((state.priority_row_factor as u32).wrapping_mul(height as u32-1))>=65536{return false;}
         if map
             .iter()
             .any(|&column| column < -1 || column >= state.columns.len() as i32)
@@ -2407,6 +2188,7 @@ impl RuntimeTraceApi {
             cell.derived_value = state.rebuild_derived_value(line, column);
             state.cells.push(cell);
         }
+        self.refresh_native_landscape(handle);
         true
     }
 
@@ -2417,23 +2199,7 @@ impl RuntimeTraceApi {
         guide_count: i32,
         words: &[i32],
     ) -> bool {
-        if guide_count < 0
-            || words.len() != guide_count as usize * 5
-            || self.graph_bitmap_image(bitmap).is_none()
-        {
-            return false;
-        }
-        let Some(state) = self.graph91_landscapes.get_mut(&handle) else {
-            return false;
-        };
-        state.guide_bitmap = bitmap;
-        state.guides = words
-            .as_chunks::<5>()
-            .0
-            .iter()
-            .map(|chunk| [chunk[0], chunk[1], chunk[2], chunk[3], chunk[4]])
-            .collect();
-        true
+        self.configure_native_landscape_guides(handle,bitmap,guide_count,words)
     }
 
     pub(super) fn graph91_set_landscape_cell_guides(
@@ -2467,66 +2233,12 @@ impl RuntimeTraceApi {
                 };
             }
         }
+        self.refresh_native_landscape(handle);
         true
     }
 
     fn graph91_copy_landscape_part(&mut self, handle: i32, destination: i32, source: i32) -> bool {
-        let (bitmap, destination_part, source_part) = {
-            let Some(state) = self.graph91_landscapes.get(&handle) else {
-                return false;
-            };
-            let Ok(source_index) = usize::try_from(source) else {
-                return false;
-            };
-            let Ok(destination_index) = usize::try_from(destination) else {
-                return false;
-            };
-            let Some(source_part) = state.parts.get(source_index).copied() else {
-                return false;
-            };
-            let Some(destination_part) = state.parts.get(destination_index).copied() else {
-                return false;
-            };
-            (state.source_bitmap, destination_part, source_part)
-        };
-        if source_part[2] != destination_part[2]
-            || source_part[3] != destination_part[3]
-            || source_part[4] != destination_part[4]
-        {
-            return false;
-        }
-        let Some(mut image) = self.graph_bitmap_image(bitmap) else {
-            return false;
-        };
-        let source_x = source_part[0].max(0) as u32;
-        let source_y = source_part[1].max(0) as u32;
-        let destination_x = destination_part[0].max(0) as u32;
-        let destination_y = destination_part[1].max(0) as u32;
-        let width = source_part[2].max(0) as u32;
-        let height = source_part[3].max(0) as u32;
-        if source_x.saturating_add(width) > image.width
-            || source_y.saturating_add(height) > image.height
-            || destination_x.saturating_add(width) > image.width
-            || destination_y.saturating_add(height) > image.height
-        {
-            return false;
-        }
-        let mut pixels = Vec::with_capacity(width as usize * height as usize * 4);
-        for y in 0..height {
-            let start = ((source_y + y) as usize * image.width as usize + source_x as usize) * 4;
-            let end = start + width as usize * 4;
-            pixels.extend_from_slice(&image.rgba[start..end]);
-        }
-        for y in 0..height {
-            let source_offset = y as usize * width as usize * 4;
-            let destination_offset =
-                ((destination_y + y) as usize * image.width as usize + destination_x as usize) * 4;
-            image.rgba[destination_offset..destination_offset + width as usize * 4]
-                .copy_from_slice(&pixels[source_offset..source_offset + width as usize * 4]);
-        }
-        let format = self.bitmap_formats.get(&bitmap).copied().unwrap_or(2);
-        self.graph91_store_bitmap(bitmap, image, format);
-        true
+        self.copy_native_landscape_part(handle,destination,source)
     }
 
     fn graph91_set_landscape_cell_column(
@@ -2549,6 +2261,11 @@ impl RuntimeTraceApi {
         if let Some(cell) = state.cells.get_mut(index) {
             cell.column_index = column_index;
             cell.derived_value = derived;
+            let behind=column-if line&1!=0{0}else{1};
+            for (row,col) in [(line,column),(line-1,behind),(line-1,behind+1),(line-2,column)]{
+                if let Some(index)=state.cell_index(row,col){state.cells[index].guides=[None;4];state.cells[index].silhouette_type=0;state.cells[index].silhouette_level=0;state.cells[index].silhouette_value=0;}
+            }
+            self.refresh_native_landscape(handle);
             return true;
         }
         false
@@ -2572,62 +2289,7 @@ impl RuntimeTraceApi {
         line: i32,
         column: i32,
     ) -> bool {
-        let (source_bitmap, part) = {
-            let Some(state) = self.graph91_landscapes.get(&handle) else {
-                return false;
-            };
-            let Some(index) = state.cell_index(line, column) else {
-                return false;
-            };
-            let Some(cell) = state.cells.get(index) else {
-                return false;
-            };
-            let Ok(column_index) = usize::try_from(cell.column_index) else {
-                return false;
-            };
-            let Some(column_record) = state.columns.get(column_index) else {
-                return false;
-            };
-            let Some(&part_index) = column_record.first() else {
-                return false;
-            };
-            let Ok(part_index) = usize::try_from(part_index) else {
-                return false;
-            };
-            let Some(part) = state.parts.get(part_index).copied() else {
-                return false;
-            };
-            (state.source_bitmap, part)
-        };
-        let Some(source) = self.graph_bitmap_image(source_bitmap) else {
-            return false;
-        };
-        let Some(mut output) = self.graph_bitmap_image(destination) else {
-            return false;
-        };
-        let source_x = part[0].max(0) as u32;
-        let source_y = part[1].max(0) as u32;
-        let width = part[2].max(0) as u32;
-        let height = part[3].max(0) as u32;
-        if source_x.saturating_add(width) > source.width
-            || source_y.saturating_add(height) > source.height
-            || width > output.width
-            || height > output.height
-        {
-            return false;
-        }
-        for y in 0..height {
-            for x in 0..width {
-                let source_offset =
-                    ((source_y + y) as usize * source.width as usize + (source_x + x) as usize) * 4;
-                let destination_offset = (y as usize * output.width as usize + x as usize) * 4;
-                output.rgba[destination_offset..destination_offset + 4]
-                    .copy_from_slice(&source.rgba[source_offset..source_offset + 4]);
-            }
-        }
-        let format = self.bitmap_formats.get(&destination).copied().unwrap_or(2);
-        self.graph91_store_bitmap(destination, output, format);
-        true
+        self.copy_native_landscape_cell(destination,handle,line,column)
     }
 
     fn graph91_apply_grayscale_mask(

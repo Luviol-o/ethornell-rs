@@ -401,6 +401,12 @@ impl ApplicationHandler for WindowApp {
                 let audio_elapsed_ms = host_clock_ms.saturating_sub(*last_audio_clock_ms);
                 *last_audio_clock_ms = host_clock_ms;
                 if let Some(runtime) = runtime.as_mut() {
+                    // sub_45E9E0: the display mode's refresh rate (dword_5177C8).
+                    runtime.api.performance_profile.refresh_rate = window
+                        .current_monitor()
+                        .and_then(|monitor| monitor.current_video_mode())
+                        .and_then(|mode| mode.refresh_rate_millihertz())
+                        .map_or(0, |rate| (u32::from(rate) + 500) / 1000);
                     let frame_report = runtime_frontend::drive_runtime_frame(
                         runtime,
                         pending_input_events,
@@ -556,6 +562,9 @@ impl ApplicationHandler for WindowApp {
                         return;
                     }
                 }
+                if let Some(runtime) = runtime.as_mut() {
+                    runtime.api.performance_profile.begin();
+                }
                 let commands = if let Some(runtime) = runtime.as_ref() {
                     match frame_presenter::prepare_frame(renderer, &runtime.api, graph_textures) {
                         Ok(commands) => commands,
@@ -606,15 +615,13 @@ impl ApplicationHandler for WindowApp {
                     commands
                 };
                 renderer.submit(&commands);
-                let present_started = Instant::now();
+                if let Some(runtime) = runtime.as_mut() {
+                    runtime.api.performance_profile.end(true);
+                }
                 window.pre_present_notify();
                 match renderer.render() {
                     Ok(()) => {
                         if let Some(runtime) = runtime.as_mut() {
-                            runtime
-                                .api
-                                .performance_profile
-                                .record_present(present_started.elapsed());
                             runtime.api.presentation_state =
                                 runtime.api.engine_time_ms.min(i32::MAX as u64) as i32;
                         }

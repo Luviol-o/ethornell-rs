@@ -609,9 +609,11 @@ impl HostRuntime {
             self.runtime.api.screen_width.max(1) as f32,
             self.runtime.api.screen_height.max(1) as f32,
         );
+        self.runtime.api.performance_profile.begin();
         let commands =
             frame_presenter::prepare_frame(renderer, &self.runtime.api, &mut self.textures)?;
         renderer.submit(&commands);
+        self.runtime.api.performance_profile.end(true);
         renderer.render()?;
         self.runtime.api.presentation_state =
             self.runtime.api.engine_time_ms.min(i32::MAX as u64) as i32;
@@ -842,7 +844,7 @@ mod tests {
                     if frame==2010 && std::env::var_os("ETHORNELL_RESTRICTED_TRACE").is_some(){for (&id,obj) in &host.runtime.api.graph_input_objects {eprintln!("local-only INPUT object={id} layer={} running={} desc={:?} hover={:?} savehit={:?}",obj.layer,obj.is_running(),obj.descriptor,obj.hovered,host.runtime.api.hit_test_graph_input_object(id,(650.0,705.0)));}}
                     if frame==2010 && std::env::var_os("ETHORNELL_RESTRICTED_TRACE").is_some(){for (&id,obj) in &host.runtime.api.graph_input_objects {eprintln!("local-only SURFACE object={id} world={:?} surface={:?}",host.runtime.api.surface_world_position(obj.layer),host.runtime.api.graph_surfaces.get(&obj.layer));for y in (550..720).step_by(10){for x in (0..1280).step_by(20){if let Some((r,_,_))=host.runtime.api.hit_test_graph_input_object(id,(x as f32,y as f32)){if r.index==0 {eprintln!("local-only SAVEHIT {id} x={x} y={y}");}}}}}}
                     if frame==2010 && std::env::var_os("ETHORNELL_RESTRICTED_TRACE").is_some(){for (&id,obj) in &host.runtime.api.graph_input_objects {for (&lid,layer) in &host.runtime.api.graph_layers {if layer.target_surface==Some(obj.layer) && host.runtime.api.surface_controls.contains_layer_for_owner(SurfaceControlOwner::InputObject(id),lid) {eprintln!("local-only INPUTLAYER obj={id} layer={lid} hit={} xywh=({},{} {}x{}) transform={:?} enabled={} key={}",layer.hit_id,layer.x,layer.y,layer.width,layer.height,host.runtime.api.layer_world_transform(lid,layer),layer.enabled,layer.key);}}}}
-                    if frame==2010 && std::env::var_os("ETHORNELL_RESTRICTED_TRACE").is_some(){for (&id,obj) in &host.runtime.api.graph_input_objects {if let Some(r)=obj.descriptor.regions.first(){eprintln!("local-only HITFACT obj={id} eligible={} mask={} visible={} configure_size={:?}",obj.pointer_hit_eligible(*r),host.runtime.api.graph_input_item_mask_accepts(*r,22,14),host.runtime.api.graph_surfaces.get(&obj.layer).is_some_and(|s|host.runtime.api.surface_display_chain_visible(obj.layer,s)),host.runtime.api.resource_image_region(native_surface_control_configure_resource(r)).map(|(_,r)|(r.width,r.height)));}}}
+                    if frame==2010 && std::env::var_os("ETHORNELL_RESTRICTED_TRACE").is_some(){for (&id,obj) in &host.runtime.api.graph_input_objects {if let Some(r)=obj.descriptor.regions.first(){eprintln!("local-only HITFACT obj={id} eligible={} mask={} visible={} configure_size={:?}",obj.pointer_hit_eligible(*r),host.runtime.api.graph_input_item_mask_accepts(id,*r,22,14),host.runtime.api.graph_surfaces.get(&obj.layer).is_some_and(|s|host.runtime.api.surface_display_chain_visible(obj.layer,s)),host.runtime.api.resource_image_region(native_surface_control_configure_resource(r)).map(|(_,r)|(r.width,r.height)));}}}
                     if frame==2010 && std::env::var_os("ETHORNELL_RESTRICTED_TRACE").is_some(){for (&id,obj) in &host.runtime.api.graph_input_objects {eprintln!("local-only VISFACT obj={id} drawable={} opacity={} props={:?}",host.runtime.api.display_tree.chain_drawable(obj.layer),host.runtime.api.surface_display_opacity(obj.layer),host.runtime.api.graph_object_properties.get(&obj.layer));}}
                     let budget=if measure_only {ethornell_vm::VmResourceBudget {max_vm_count:64,max_memory_capacity_bytes:2*1024*1024*1024}} else {host.vm_budget};
                     host.runtime.vm.check_resource_budget(budget).map_err(|_|EthornellError::Other(format!("restricted budget failed before frame={frame} usage={:?}",host.runtime.vm.resource_usage())))?;

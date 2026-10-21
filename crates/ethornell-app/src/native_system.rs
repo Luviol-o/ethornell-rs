@@ -158,10 +158,7 @@ impl RuntimeTraceApi {
                 let _arg0_unrecovered = stack.pop();
                 ethornell_vm::Value::None
             }
-            0x5D => {
-                let _enabled = pop_int_value(stack).unwrap_or_default();
-                ethornell_vm::Value::None
-            }
+            0x5D => unreachable!("exclusive-thread ownership is handled by the VM scheduler"),
             0x63 => {
                 let argument = pop_int_value(stack).unwrap_or_default();
                 self.native_system.display_scaling_mode = i32::from(argument == 0);
