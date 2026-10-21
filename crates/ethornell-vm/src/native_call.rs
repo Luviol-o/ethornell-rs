@@ -15542,7 +15542,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_CREATE_BITMAP_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_4799B0 pops format, height, width, handle; sub_407DA0 frees the slot, accepts formats 0..=6 (7 becomes 1) and allocates width*bpp*height bytes with _aligned_malloc. Handle >= 0x4000, a bad format or a failed allocation is a script error; handle 0 is an ordinary slot. The target leaves the pixels uninitialised; the portable bitmap starts zeroed. Formats 4 and 6 also create the displacement/vector maps.",
+        notes: "BGI 1.622 sub_47A4B0 -> sub_4026C0 -> sub_407D90: pops format, height, width, bitmap; a failed creation is fatal (無効なピクセルモード).",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_RELEASE_BITMAP,
@@ -15550,7 +15550,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_RELEASE_BITMAP_PARAMETERS,
         returns: "boolean success",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target releases one bitmap registry slot and pushes success.",
+        notes: "sub_47A550 -> sub_407CE0: releases the slot, 1 when it existed.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_FILL_BITMAP,
@@ -15558,7 +15558,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_FILL_BITMAP_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target clears/fills the selected bitmap with the supplied packed color.",
+        notes: "sub_47A580 -> sub_408030: bitmap check, unregistered bitmap fatal; 0 clears all bytes, otherwise per format (RGB555, low 24 bits, all 32 bits, low byte; 4..6 untouched).",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_CREATE_BITMAP_FROM_PIXELS,
@@ -15566,7 +15566,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_CREATE_BITMAP_FROM_PIXELS_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target creates a bitmap from caller memory. The VM bridge preserves BP memory ownership and byte count.",
+        notes: "sub_47A5C0 -> sub_4080A0: pops pixels, format, height, width, bitmap (checked); packed 3-byte format 1, otherwise raw; unblend colour applied.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_COPY_BITMAP_PIXELS,
@@ -15574,7 +15574,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_COPY_BITMAP_PIXELS_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target copies bitmap bytes to caller memory subject to capacity and writes the copied count.",
+        notes: "sub_47A630 -> sub_4081F0: pops bitmap, capacity, written, buffer; {2,3,4,1}[format] bytes per pixel; missing bitmap / small buffer fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_QUERY_BITMAP_INFO,
@@ -15582,7 +15582,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_QUERY_BITMAP_INFO_PARAMETERS,
         returns: "boolean found",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_479C00 pops bitmap then the record pointer; sub_407F20 writes [pixels, row_stride, width, height, format, bytes_per_pixel] only for an existing bitmap, the wrapper then always clears field 0 and pushes the found flag. For GDI DIB-section bitmaps the stride comes from GetObjectA (bmWidthBytes), which equals width * 4 for the 4-byte formats, and the pointer it rewrites is cleared, so no visible difference remains.",
+        notes: "sub_47A700 -> sub_407F10: six DWORDs (pointer cleared, pitch, width, height, format, bpp) and found.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_VALIDATE_BITMAP_FORMAT,
@@ -15590,7 +15590,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_VALIDATE_BITMAP_FORMAT_PARAMETERS,
         returns: "status 0/1/2",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target returns 0 for compatible, 1 for missing, and 2 for incompatible, with its format-2 to format-1 conversion allowance.",
+        notes: "sub_47A740 -> sub_4081A0: 0 same format, 0 after reducing 2 to 1, 1 missing, 2 otherwise.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_BLIT_BITMAP,
@@ -15598,7 +15598,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_BLIT_BITMAP_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_479C70 pops parameter, mode, source, y, x, destination; handles must be < 0x4000, the mode one of 0-9, 0x20-0x27, 0x40, 0x41, 0x80, 0xC0, 0xC1, 0xF0, 0xFF and the parameter <= 0x100 (script errors otherwise). sub_402720 -> sub_40A530 clips and sub_40A9E0 dispatches the integer kernels (bitmap_blend.rs): 0x20/0xC0 alias 1/5, 0x21-0x27 run 2-4/6-9 with 256-p; incompatible formats (sub_40A9A0) are a script error, unsupported format pairs leave the destination unchanged. The 16-bit format-0 kernels are not ported; no script creates format-0 bitmaps.",
+        notes: "sub_47A770 -> sub_402720: bitmaps, mode list (sub_4987B0) and level checks; missing/incompatible fatal; no overlap draws nothing before the format check.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_SYNTHESIZE_BITMAP,
@@ -15606,7 +15606,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_SYNTHESIZE_BITMAP_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "47A8A0 ->4027E0 ->411C40: positional translated crossfade or source-sized gray mask color blend, exact native integer kernels.",
+        notes: "sub_47A8A0 -> sub_4027E0: synthesize with optional grey-scale mask; 1.622 error texts.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_COMPOSITE_BITMAPS,
@@ -15614,7 +15614,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_COMPOSITE_BITMAPS_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "47AA20 ->402970 ->412AB0: displacement of source into destination using one/two format4 maps and native nearest/bilinear sampling.",
+        notes: "sub_47AA20 -> sub_402970/sub_412AB0: vector-map warp; checks in target order (maps, level, map validity, formats).",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_COPY_BITMAP,
@@ -15622,7 +15622,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_COPY_BITMAP_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "47ABC0 ->402AC0 ->413D90: horizontal blur with black-padding/edge-clamp modes; matching format/extents.",
+        notes: "sub_47ABC0 -> sub_402AC0/sub_413D90: gradation copy; size/format, type, level errors.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_SCALE_BITMAP_REGION,
@@ -15630,7 +15630,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_SCALE_BITMAP_REGION_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "47ACE0 ->402C90 ->414EA0: clipped rectangle resampling with0x10004 scale and seven-bit bilinear lanes.",
+        notes: "sub_47ACE0 -> sub_402C90/sub_414DF0: scaled region; output/reference range and format errors.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_TRANSFORM_BITMAP,
@@ -15638,7 +15638,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_TRANSFORM_BITMAP_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "47AE90 ->402EA0 ->414B70: centered inverse rotation/scale, shared with BackRTT.",
+        notes: "sub_47AE90 -> sub_402EA0/sub_414AF0: rotate/scale; compatibility and zero-scale errors.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_BLIT_BITMAP_REGION,
@@ -15646,7 +15646,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_BLIT_BITMAP_REGION_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target performs an eight-argument rectangular bitmap operation.",
+        notes: "sub_47AF90 -> sub_4032C0: pops height, width, source y/x, source, y, x, destination; missing bitmaps fatal; clipped raw copy, zero size does nothing.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_CREATE_BITMAP_REGION,
@@ -15654,7 +15654,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_CREATE_BITMAP_REGION_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_47A590 pops height, width, y, x, source, destination; sub_4033A0 fails (script error) on a missing source, a zero width/height or an allocation failure, otherwise recreates the destination in the source's format and copies it at (-x, -y) with mode 0x80 (raw row copy, including format 4/6 sample maps). Pixels outside the source are uninitialised in the target and zero here.",
+        notes: "sub_47B090 -> sub_4033A0: detached copy region; source (2), size (3), allocation (1) with the 1.622 texts.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_START_OBJECT_CONTROL,
@@ -20047,6 +20047,15 @@ const PORTABLE_EQUIVALENT_OPCODES: &[NativeOpcode] = &[
     opcodes::GRAPH90_INITIALIZE_BITMAP_MEMORY_MANAGER,
     opcodes::GRAPH90_SET_RASTER_FORMAT_MODE,
     opcodes::GRAPH90_REGISTER_FONT,
+    opcodes::GRAPH90_CREATE_BITMAP_FROM_PIXELS,
+    opcodes::GRAPH90_COPY_BITMAP_PIXELS,
+    opcodes::GRAPH90_VALIDATE_BITMAP_FORMAT,
+    opcodes::GRAPH90_SYNTHESIZE_BITMAP,
+    opcodes::GRAPH90_COMPOSITE_BITMAPS,
+    opcodes::GRAPH90_COPY_BITMAP,
+    opcodes::GRAPH90_SCALE_BITMAP_REGION,
+    opcodes::GRAPH90_TRANSFORM_BITMAP,
+    opcodes::GRAPH90_BLIT_BITMAP_REGION,
 ];
 
 const PARTIAL_IMPLEMENTATION_OPCODES: &[NativeOpcode] = &[
@@ -20153,15 +20162,6 @@ const PARTIAL_IMPLEMENTATION_OPCODES: &[NativeOpcode] = &[
     opcodes::GRAPH91_SET_MULTILAYER_LAYER_SOURCE_VELOCITY,
     opcodes::GRAPH91_SET_MULTILAYER_LAYER_TRANSFORM_VELOCITY,
     opcodes::GRAPH90_SET_DISPLAY_OPTIONS,
-    opcodes::GRAPH90_CREATE_BITMAP_FROM_PIXELS,
-    opcodes::GRAPH90_COPY_BITMAP_PIXELS,
-    opcodes::GRAPH90_VALIDATE_BITMAP_FORMAT,
-    opcodes::GRAPH90_SYNTHESIZE_BITMAP,
-    opcodes::GRAPH90_COMPOSITE_BITMAPS,
-    opcodes::GRAPH90_COPY_BITMAP,
-    opcodes::GRAPH90_SCALE_BITMAP_REGION,
-    opcodes::GRAPH90_TRANSFORM_BITMAP,
-    opcodes::GRAPH90_BLIT_BITMAP_REGION,
     opcodes::GRAPH90_START_SPECIAL_OBJECT_CONTROL,
     opcodes::GRAPH90_START_SPLINE_OBJECT_CONTROL,
     opcodes::GRAPH90_START_SHAKE_OBJECT_CONTROL,

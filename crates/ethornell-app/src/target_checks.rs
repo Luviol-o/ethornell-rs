@@ -47,9 +47,10 @@ pub(crate) fn priority(value: i32) -> VmResult<()> {
     Ok(())
 }
 
-/// sub_4987B0: effect mode <= 0x80.
+/// sub_4987B0: the blend/effect modes 0..=9, 0x20..=0x27, 0x40, 0x41,
+/// 0x80, 0xC0, 0xC1, 0xF0, 0xFF.
 pub(crate) fn effect_mode(value: i32) -> VmResult<()> {
-    if value as u32 > 0x80 {
+    if !matches!(value as u32, 0..=9 | 0x20..=0x27 | 0x40 | 0x41 | 0x80 | 0xC0 | 0xC1 | 0xF0 | 0xFF) {
         return fail(format!("無効なエフェクトモード [ {value} ] が指定されました"));
     }
     Ok(())

@@ -3481,104 +3481,6 @@ impl RuntimeTraceApi {
         removed
     }
 
-    fn apply_graph_blit_rect(&mut self, args: &[ethornell_vm::Value]) {
-        let popped = args.iter().map(value_to_i32).collect::<Vec<_>>();
-        let mut source_order = popped.clone();
-        source_order.reverse();
-        let height = popped.first().copied().unwrap_or_default().max(0) as f32;
-        let width = popped.get(1).copied().unwrap_or_default().max(0) as f32;
-        let y = popped.get(2).copied().unwrap_or_default() as f32;
-        let x = popped.get(3).copied().unwrap_or_default() as f32;
-        let resource_id = source_order
-            .iter()
-            .copied()
-            .find(|value| self.resolve_resource_key(*value).is_some());
-        let target = source_order
-            .iter()
-            .copied()
-            .find(|value| {
-                *value > 0
-                    && Some(*value) != resource_id
-                    && (self.graph_layers.contains_key(value)
-                        || self.graph_surfaces.contains_key(value)
-                        || *value >= 128)
-            })
-            .unwrap_or_default();
-        let Some(resource_id) = resource_id else {
-            trace_graph!(self, "blit rect skipped no resource raw={source_order:?}");
-            return;
-        };
-        let Some(key) = self.resolve_resource_key(resource_id).map(str::to_string) else {
-            return;
-        };
-        let Some(image) = self.graph_images.get(&key) else {
-            return;
-        };
-        let width = if width > 0.0 {
-            width.min(image.width as f32)
-        } else {
-            image.width as f32
-        };
-        let height = if height > 0.0 {
-            height.min(image.height as f32)
-        } else {
-            image.height as f32
-        };
-        if let Some(surface) = self.graph_surfaces.get_mut(&target) {
-            surface.resource_id = Some(resource_id);
-            surface.viewport_width = width;
-            surface.viewport_height = height;
-            trace_graph!(
-                self,
-                "blit rect surface #{target} res=#{resource_id} {key} x={x:.0} y={y:.0} w={width:.0} h={height:.0}"
-            );
-            return;
-        }
-        let layer_id = if target != -1 { target } else { resource_id };
-        let owner_object = self.current_graph_object;
-        if let Some(object) = owner_object {
-            self.graph_object_layers
-                .entry(object)
-                .or_default()
-                .insert(layer_id);
-        }
-        self.display_tree
-            .register(layer_id, NativeDisplayKind::Sprite);
-        if let Some(owner) = owner_object {
-            self.display_tree.register_inferred(owner);
-            let _ = self.display_tree.set_parent(layer_id, owner);
-        }
-        self.graph_layers.insert(
-            layer_id,
-            RuntimeGraphLayer {
-                hit_id: layer_id,
-                owner_object,
-                key: key.clone(),
-                target_surface: None,
-                x,
-                y,
-                width,
-                height,
-                src_x: x.max(0.0),
-                src_y: y.max(0.0),
-                opacity: 1.0,
-                z: layer_id,
-                enabled: true,
-                transform_x: 0.0,
-                transform_y: 0.0,
-                transform_z: 0,
-                scale_x: 1.0,
-                scale_y: 1.0,
-                rotation_degrees: 0.0,
-                clip: None,
-            },
-        );
-        trace_graph!(
-            self,
-            "blit rect layer #{layer_id} res=#{resource_id} {key} x={x:.0} y={y:.0} w={width:.0} h={height:.0} owner={owner_object:?}"
-        );
-    }
-
     fn refresh_graph_object_rect(&mut self, args: &[ethornell_vm::Value]) {
         let values = args.iter().map(value_to_i32).collect::<Vec<_>>();
         if values.len() != 5 {
@@ -11348,7 +11250,7 @@ mod input_tests {
         assert!(
             error
                 .to_string()
-                .contains("destination bitmap 131 is missing")
+                .contains("指定された出力先ビットマップ [ 131 ] は存在しません")
         );
 
         api.recreate_native_bitmap(131, 1, 1, 3);
@@ -11361,7 +11263,7 @@ mod input_tests {
             Value::Int(0),
         ];
         let error = call_graph(&mut api, 0x90, 0x18, &mut incompatible).unwrap_err();
-        assert!(error.to_string().contains("formats are incompatible"));
+        assert!(error.to_string().contains("互換性がありません"));
     }
 
     #[test]
@@ -22870,6 +22772,7 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
             bitmap,
             RuntimeSurface::bitmap(bitmap, width as f32, height as f32),
         );
+        self.apply_bitmap_unblend_color(bitmap);
         true
     }
 
@@ -24200,11 +24103,36 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                 return Ok(ethornell_vm::Value::Int(i32::from(existed)));
             }
             (0x90, 0x13) => {
+                // sub_47A580 -> sub_408030: bitmap check, an unregistered
+                // bitmap is fatal. Colour 0 clears every byte (sub_40A610);
+                // otherwise sub_40A700 fills by format: 0 as RGB555, 1 the
+                // low 24 bits, 2 the whole value, 3 the low byte; formats 4..6
+                // are left as they are.
                 let color = pop_int_value(stack).unwrap_or_default();
                 let bitmap_id = pop_int_value(stack).unwrap_or_default();
+                target_checks::bitmap(bitmap_id)?;
+                let Some(&(width, height)) = self.bitmap_dimensions.get(&bitmap_id) else {
+                    return Err(ethornell_vm::VmError::Runtime(format!(
+                        "指定されたビットマップエントリ [ {bitmap_id} ] にはビットマップが登録されていません"
+                    )));
+                };
                 self.clear_bitmap_text(bitmap_id);
-                if let Some(&(width, height)) = self.bitmap_dimensions.get(&bitmap_id) {
-                    let pixel = native_bitmap_clear_color(color);
+                let format = self.bitmap_formats.get(&bitmap_id).copied().unwrap_or(2);
+                let value = color as u32;
+                let (r, g, b) = ((value >> 16) as u8, (value >> 8) as u8, value as u8);
+                let pixel = if color == 0 {
+                    // Zero bytes: opaque black for the opaque formats.
+                    Some(if format == 2 { [0, 0, 0, 0] } else { [0, 0, 0, 255] })
+                } else {
+                    match format {
+                        0 => Some([r & 0xF8, g & 0xF8, b & 0xF8, 255]),
+                        1 => Some([r, g, b, 255]),
+                        2 => Some(native_bitmap_clear_color(color)),
+                        3 => Some([b, 0, 0, 255]),
+                        _ => None,
+                    }
+                };
+                if let Some(pixel) = pixel.filter(|_| format <= 3) {
                     let mut rgba = Vec::with_capacity(width as usize * height as usize * 4);
                     for _ in 0..width as usize * height as usize {
                         rgba.extend_from_slice(&pixel);
@@ -24227,7 +24155,6 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                 if color == 0 {
                     self.effects.clear_vector_map(bitmap_id);
                 }
-                tracing::debug!(bitmap_id, color, "GraphClearBitmap");
             }
             (0x90, 0x16) => {
                 let bitmap = stack.pop();
@@ -24280,24 +24207,29 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                     for handle in [destination, source] {
                         target_checks::bitmap(handle)?;
                     }
-                    if !matches!(mode, 0..=9 | 0x20..=0x27 | 0x40 | 0x41 | 0x80 | 0xc0 | 0xc1 | 0xf0 | 0xff)
-                    {
-                        return Err(ethornell_vm::VmError::Runtime(format!(
-                            "Graph90:18 blit mode {mode:#x} is invalid"
-                        )));
-                    }
-                    if !(0..=0x100).contains(&parameter) {
-                        return Err(ethornell_vm::VmError::Runtime(format!(
-                            "Graph90:18 blit parameter {parameter} exceeds 256"
-                        )));
-                    }
+                    target_checks::effect_mode(mode)?;
+                    target_checks::effect_level(parameter)?;
                     let status = self.validate_native_bitmap_blit(destination, source);
+                    // sub_40A520 clips first: without overlap nothing is
+                    // drawn and the format check is never reached.
+                    if status == 3
+                        && let (Some(d), Some(s)) = (
+                            ethornell_vm::GraphApi::query_bitmap_info(self, destination),
+                            ethornell_vm::GraphApi::query_bitmap_info(self, source),
+                        )
+                        && (x >= d.width as i32
+                            || y >= d.height as i32
+                            || x + s.width as i32 <= 0
+                            || y + s.height as i32 <= 0)
+                    {
+                        return Ok(ethornell_vm::Value::None);
+                    }
                     if status != 0 {
                         return Err(ethornell_vm::VmError::Runtime(match status {
-                            1 => format!("Graph90:18 destination bitmap {destination} is missing"),
-                            2 => format!("Graph90:18 source bitmap {source} is missing"),
+                            1 => format!("指定された出力先ビットマップ [ {destination} ] は存在しません"),
+                            2 => format!("指定された出力元ビットマップ [ {source} ] は存在しません"),
                             3 => format!(
-                                "Graph90:18 bitmap formats are incompatible: destination={destination} source={source}"
+                                "出力先ビットマップ [ {destination} ] と出力元ビットマップ [ {source} ] のピクセルモードには互換性がありません"
                             ),
                             _ => unreachable!("validated native bitmap status"),
                         }));
@@ -24396,13 +24328,9 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                     );
                     if status != 0 {
                         return Err(ethornell_vm::VmError::Runtime(match status {
-                            1 => format!(
-                                "Graph90:1F failed to allocate destination bitmap {destination}"
-                            ),
-                            2 => format!("Graph90:1F source bitmap {source} is missing"),
-                            3 => format!(
-                                "Graph90:1F bitmap region has zero dimensions: {width}x{height}"
-                            ),
+                            1 => format!("指定された出力先ビットマップ [ {destination} ] は無効です"),
+                            2 => format!("指定された複写元ビットマップ [ {source} ] は無効です"),
+                            3 => format!("無効な複写範囲 [ {width} , {height} ] が指定されました"),
                             _ => unreachable!("native bitmap-region status"),
                         }));
                     }
@@ -25604,12 +25532,47 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                 }
             }
             (0x90, 0x1e) => {
-                let args = pop_args(stack, 8);
-                self.apply_graph_blit_rect(&args);
-                tracing::debug!(
-                    args = ?summarize_values(&args),
-                    "GraphBlitRectFast"
-                );
+                // sub_47AF90 -> sub_4032C0: pops height, width, source y,
+                // source x, source, destination y, destination x,
+                // destination. Missing bitmaps are fatal; a zero size does
+                // nothing. The source rectangle is clipped to the source
+                // and copied raw (mode 0x80) to (x, y) unshifted.
+                let p: Vec<i32> = pop_args(stack, 8).iter().map(value_to_i32).collect();
+                let [height, width, source_y, source_x, source, y, x, destination] =
+                    p.try_into().unwrap_or([0; 8]);
+                let (Some(mut out), Some(source_image)) =
+                    (self.graph_bitmap_image(destination), self.graph_bitmap_image(source))
+                else {
+                    return Err(ethornell_vm::VmError::Runtime(
+                        if self.graph_bitmap_image(destination).is_none() {
+                            format!("指定された転送先ビットマップ [ {destination} ] は無効です")
+                        } else {
+                            format!("指定された転送元ビットマップ [ {source} ] は無効です")
+                        },
+                    ));
+                };
+                if width != 0 && height != 0 {
+                    let left = source_x.max(0);
+                    let top = source_y.max(0);
+                    let right = (source_x as i64 + width as i64 - 1).min(source_image.width as i64 - 1);
+                    let bottom = (source_y as i64 + height as i64 - 1).min(source_image.height as i64 - 1);
+                    if right >= left as i64 && bottom >= top as i64 {
+                        let region = crop_decoded_image(
+                            &source_image,
+                            RuntimeClipRect {
+                                x: left as f32,
+                                y: top as f32,
+                                width: (right + 1 - left as i64) as f32,
+                                height: (bottom + 1 - top as i64) as f32,
+                            },
+                        );
+                        let destination_format = self.bitmap_formats.get(&destination).copied().unwrap_or(2);
+                        let source_format = self.bitmap_formats.get(&source).copied().unwrap_or(2);
+                        crate::bitmap_blend::blit_copy(&mut out, destination_format, &region, source_format, x, y);
+                        self.replace_graph_bitmap_pixels(destination, out);
+                        self.clear_bitmap_text(destination);
+                    }
+                }
             }
             (0x90, 0x22) => {
                 // Target selector 0x22 dispatches to sub_47A790 ->

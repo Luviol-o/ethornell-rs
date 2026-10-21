@@ -4347,6 +4347,12 @@ impl Vm {
                     let height = self.pop_int()?;
                     let width = self.pop_int()?;
                     let bitmap = self.pop_int()?;
+                    // sub_47A5C0: sub_4986D0 first.
+                    if bitmap as u32 >= 0x4000 {
+                        return Err(VmError::Runtime(format!(
+                            "無効なビットマップ番号 [ {bitmap} ] が指定されました"
+                        )));
+                    }
                     // sub_4080B0: format 1 (and 7, which sub_407DA0 maps to
                     // 1) reads packed 3-byte B,G,R pixels into XRGB dwords;
                     // every other format is a tightly packed copy using the
@@ -4366,20 +4372,32 @@ impl Vm {
                     api.create_bitmap_from_rgb(bitmap, width, height, format, &bytes);
                     Value::None
                 } else if (code, id) == (0x90, 0x15) {
+                    // sub_47A630 -> sub_4081F0: an unknown bitmap (9) or a
+                    // buffer smaller than the packed image (10) is fatal.
                     let bitmap = self.pop_int()?;
-                    let capacity = self.pop_int()?.max(0) as usize;
+                    let capacity = self.pop_int()? as u32;
                     let written = self.pop_ptr()?;
                     let destination = self.pop_ptr()?;
-                    let bytes = api
-                        .read_bitmap_pixels(bitmap, capacity)
-                        .filter(|bytes| bytes.len() <= capacity);
-                    let count = bytes.as_ref().map(Vec::len).unwrap_or_default();
-                    if let Some(bytes) = bytes {
-                        let range = self.resolve_write_range(destination, bytes.len())?;
-                        self.memory[range].copy_from_slice(&bytes);
-                        self.clear_shadow_values(destination, bytes.len());
+                    if bitmap as u32 >= 0x4000 {
+                        return Err(VmError::Runtime(format!(
+                            "無効なビットマップ番号 [ {bitmap} ] が指定されました"
+                        )));
                     }
-                    self.write_int(written, 2, count as u32)?;
+                    if api.query_bitmap_info(bitmap).is_none() {
+                        return Err(VmError::Runtime(format!(
+                            "指定されたビットマップ [ {bitmap} ] は存在しません"
+                        )));
+                    }
+                    let Some(bytes) = api.read_bitmap_pixels(bitmap, capacity as usize) else {
+                        return Err(VmError::Runtime(format!(
+                            "指定されたイメージの格納先のサイズ [ {} ] ではイメージを取得できません",
+                            capacity as i32
+                        )));
+                    };
+                    let range = self.resolve_write_range(destination, bytes.len())?;
+                    self.memory[range].copy_from_slice(&bytes);
+                    self.clear_shadow_values(destination, bytes.len());
+                    self.write_int(written, 2, bytes.len() as u32)?;
                     Value::None
                 } else if (code, id) == (0x90, 0x16) {
                     let bitmap = self.pop_value()?.as_i32();
