@@ -257,4 +257,27 @@ worker sub_4014D0 for 28..2B, file times, drives, dialogs, installer);
 44 (child threads), 6A/6B (the script-error path sub_464C50 -> sub_464A80:
 message box unless captured, capture when dword_566014, throw) — VM model.
 
-Next: group 0x90 in table order.
+Group 0x90 in progress (2026-10-22): 00..5D done except 0C and 10.
+Shared tools: `crates/ethornell-app/src/target_checks.rs` holds the 1.622
+validators sub_4984C0..sub_4989C0 with their texts; use them instead of
+English placeholder errors.
+
+Renderer items found by the 0x90 audit (selector state is right, the
+drawing is not yet the target's; do these as one renderer pass):
+
+* Presentation: sub_462100 is ported as a gate (Graph90:01 enable,
+  Graph90:02 interval, `take_present_due`); redraw requests are treated as
+  always pending and partial (dirty-rectangle) redraws as full ones.
+* Back buffer: 90:04/05 copy the current tree, the target copies the last
+  presented frame (only differs between a change and the next present).
+* 90:0C (dword_565B54/58): CDspObjWindow::Draw (sub_42B520) blits the
+  window's own buffer only while this is set, with the combined
+  transparency; the app ignores it. 90:10's async CProcLoadBitmap
+  completes at once (timing is VM procedure scheduling).
+* Sprite mode 2 (90:59) renders as a float quad; the target's affine
+  raster (sub_429A60/sub_4295C0/sub_4281E0) and its <2 extent check are
+  only approximated.
+* Text glyphs come from host fonts; the anti-aliasing layouts of 90:0D
+  are stored but GDI rasterization is not reproduced.
+
+Next: 90:60 onwards in table order.
