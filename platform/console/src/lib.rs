@@ -219,6 +219,20 @@ pub unsafe extern "C" fn ethornell_console_dialog(
     }
 }
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn ethornell_console_diagnostics(
+    ptr: *mut c_void,
+    text: *mut c_char,
+    size: usize,
+) {
+    if ptr.is_null() {
+        return;
+    }
+    let s = unsafe { &*ptr.cast::<Session>() };
+    unsafe {
+        copy_text(text, size, &s.host.diagnostics());
+    }
+}
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn ethornell_console_last_error(text: *mut c_char, size: usize) {
     ERROR.with(|e| unsafe { copy_text(text, size, &e.borrow()) });
 }

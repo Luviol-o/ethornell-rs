@@ -2,6 +2,8 @@
 #include "deko.h"
 #include "ethornell_console.h"
 #include <deko3d.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 static uint32_t vertex_program, fragment_program;
 static bool frame_started;
@@ -84,6 +86,31 @@ int32_t ethornell_gpu_draw(const EthornellDraw *source) {
   return 0;
 }
 int32_t ethornell_gpu_end(void) {
+  /* One-shot GPU readback requested from the CLI, without desktop input. */
+  const char *request = "sdmc:/switch/ethornell/capture.request";
+  FILE *marker = fopen(request, "rb");
+  if (marker) {
+    fclose(marker);
+    remove(request);
+    const uint32_t w = ethornell_deko_display_width(),
+                   h = ethornell_deko_display_height();
+    uint8_t *rgba = malloc((size_t)w * h * 4);
+    if (rgba && ethornell_deko_display_read(rgba)) {
+      FILE *out = fopen("sdmc:/switch/ethornell/capture.ppm", "wb");
+      if (out) {
+        fprintf(out, "P6\n%u %u\n255\n", w, h);
+        for (uint32_t y = 0; y < h; y++) {
+          uint8_t row[1280 * 3];
+          for (uint32_t x = 0; x < w; x++)
+            memcpy(row + x * 3, rgba + ((size_t)y * w + x) * 4, 3);
+          fwrite(row, 3, w, out);
+        }
+        fclose(out);
+      }
+    }
+    free(rgba);
+  }
+
   ethornell_deko_end_frame(true);
   frame_started = false;
   return 0;

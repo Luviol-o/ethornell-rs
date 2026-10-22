@@ -401,6 +401,24 @@ bool ethornell_deko_texture_read(int32_t id, uint8_t* rgba) {
     return true;
 }
 
+bool ethornell_deko_display_read(uint8_t* rgba) {
+    if (!recording || display_slot < 0) return false;
+    const uint32_t size = DisplayWidth * DisplayHeight * 4;
+    DkMemBlock staging = make_memory(size, DkMemBlockFlags_CpuCached | DkMemBlockFlags_GpuCached);
+    dkCmdBufBarrier(current->cmdbuf, DkBarrier_Fragments, DkInvalidateFlags_Image);
+    DkImageView view;
+    dkImageViewDefaults(&view, &framebuffers[display_slot]);
+    const DkImageRect rect = { 0, 0, 0, DisplayWidth, DisplayHeight, 1 };
+    const DkCopyBuf dst = { dkMemBlockGetGpuAddr(staging), 0, 0 };
+    dkCmdBufCopyImageToBuffer(current->cmdbuf, &view, &rect, &dst, 0);
+    submit_recorded();
+    dkQueueWaitIdle(queue);
+    dkMemBlockFlushCpuCache(staging, 0, size);
+    memcpy(rgba, dkMemBlockGetCpuAddr(staging), size);
+    dkMemBlockDestroy(staging);
+    return true;
+}
+
 bool ethornell_deko_begin_frame(void) {
     FrameSlot* slot = &slots[frame_number % FrameSlots];
     if (slot->fence_pending) {

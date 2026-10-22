@@ -34,6 +34,7 @@ pub enum RenderCommand {
         y: f32,
         width: f32,
         height: f32,
+        /// Normalized texture coordinates in 0..=1, already divided by image size.
         src_x: f32,
         src_y: f32,
         src_width: f32,

@@ -1,3 +1,4 @@
+#![cfg_attr(target_os = "vita", feature(alloc_error_hook))]
 #[cfg(not(target_os = "vita"))]
 fn main() {
     eprintln!("Build with cargo +nightly vita build vpk -- --release");
@@ -97,7 +98,50 @@ mod vita {
             }
         }
     }
+    #[repr(C)]
+    struct MallInfo {
+        arena: usize,
+        ordblks: usize,
+        smblks: usize,
+        hblks: usize,
+        hblkhd: usize,
+        usmblks: usize,
+        fsmblks: usize,
+        used: usize,
+        free: usize,
+        keepcost: usize,
+    }
+    unsafe extern "C" {
+        fn mallinfo() -> MallInfo;
+    }
+    static RESERVE: std::sync::Mutex<Option<Vec<u8>>> = std::sync::Mutex::new(None);
+    static LAST_STATUS: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+    fn memory_status(stage: &str) {
+        let h = unsafe { mallinfo() };
+        let mut info = SceKernelFreeMemorySizeInfo {
+            size: std::mem::size_of::<SceKernelFreeMemorySizeInfo>() as i32,
+            size_user: 0,
+            size_cdram: 0,
+            size_phycont: 0,
+        };
+        let rc = unsafe { sceKernelGetFreeMemorySize(&mut info) };
+        log(&format!(
+            "{stage}: heap arena={} used={} free={} kernel-user={} cdram={} rc={rc:#x}",
+            h.arena, h.used, h.free, info.size_user, info.size_cdram
+        ));
+    }
     pub fn run() {
+        *RESERVE.lock().unwrap() = Some(vec![0u8; 128 * 1024]);
+        std::alloc::set_alloc_error_hook(|layout| {
+            if let Ok(mut reserve) = RESERVE.try_lock() {
+                reserve.take();
+            }
+            memory_status(&format!("OOM allocating {} bytes", layout.size()));
+            if let Ok(last) = LAST_STATUS.try_lock() {
+                log(&last);
+            }
+        });
+        memory_status("startup");
         log("starting Ethornell Vita (GXM)");
         let rc = unsafe { ethornell_vita_gpu_init() };
         if rc < 0 {
@@ -117,6 +161,7 @@ mod vita {
             }
             return;
         }
+        memory_status("after engine init");
         let audio = match Audio::new() {
             Ok(audio) => audio,
             Err(e) => {
@@ -143,7 +188,23 @@ mod vita {
         let mut last = start;
         let mut quit = false;
         let mut request = 0u64;
+        let mut frame = 0u64;
         while !quit {
+            if frame < 120 || frame % 300 == 0 {
+                let mut status = [0i8; 2048];
+                unsafe {
+                    ethornell_console_diagnostics(engine, status.as_mut_ptr(), status.len());
+                }
+                let status = unsafe { std::ffi::CStr::from_ptr(status.as_ptr()) }
+                    .to_string_lossy()
+                    .into_owned();
+                *LAST_STATUS.lock().unwrap() = format!("frame={frame} {status}");
+                if frame % 10 == 0 || frame % 300 == 0 {
+                    log(&LAST_STATUS.lock().unwrap());
+                    memory_status("tick");
+                }
+            }
+            frame += 1;
             let now = Instant::now();
             let elapsed = now.duration_since(last).as_secs_f32().min(0.1);
             last = now;

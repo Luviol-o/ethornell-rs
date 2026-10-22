@@ -319,8 +319,8 @@ impl Renderer<'_> {
                     height: 18. / sy,
                     src_x: 0.,
                     src_y: 0.,
-                    src_width: 12.,
-                    src_height: 18.,
+                    src_width: 1.,
+                    src_height: 1.,
                     opacity: 1.,
                     ignore_source_alpha: false,
                     blend_mode: 1,
@@ -387,8 +387,8 @@ impl Renderer<'_> {
                     height: texture.height as f32,
                     src_x: 0.,
                     src_y: 0.,
-                    src_width: texture.width as f32,
-                    src_height: texture.height as f32,
+                    src_width: 1.,
+                    src_height: 1.,
                     opacity: 1.,
                     ignore_source_alpha: false,
                     blend_mode: 1,
@@ -478,12 +478,7 @@ impl Renderer<'_> {
             [src_x + src_width, src_y + src_height],
             [src_x + src_width, src_y],
         ]
-        .map(|[u, v]| {
-            [
-                (u / t.width as f32).clamp(0., 1.),
-                (v / t.height as f32).clamp(0., 1.),
-            ]
-        });
+        .map(|[u, v]| [u.clamp(0., 1.), v.clamp(0., 1.)]);
         let vertices = [0, 1, 2, 0, 2, 3].map(|i| NativeVertex {
             position: points[i],
             uv: uv[i],
@@ -574,10 +569,10 @@ mod tests {
             y: 0.,
             width: 10.,
             height: 10.,
-            src_x: 0.,
+            src_x: 0.25,
             src_y: 0.,
-            src_width: 2.,
-            src_height: 2.,
+            src_width: 0.5,
+            src_height: 1.,
             opacity: 0.5,
             ignore_source_alpha: true,
             blend_mode: 0xf0,
@@ -592,7 +587,8 @@ mod tests {
         assert_eq!(d.linear, 0);
         assert_eq!(d.vertices[0].ignore_alpha, 1.);
         assert_eq!(d.vertices[0].opacity, 0.5);
-        assert_eq!(d.vertices[2].uv, [1., 1.]);
+        assert_eq!(d.vertices[0].uv, [0.25, 0.]);
+        assert_eq!(d.vertices[2].uv, [0.75, 1.]);
         assert!(d.scissor[0] > 100);
         assert!(d.scissor[2] < 12);
         if let RenderCommand::DrawTexture {

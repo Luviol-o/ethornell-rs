@@ -40,3 +40,5 @@ int32_t ethornell_console_respond(void *engine, uint64_t request,
 int32_t ethornell_console_dialog(void *engine, uint64_t request,
                                  const char *json);
 void ethornell_console_last_error(char *text, size_t capacity);
+
+void ethornell_console_diagnostics(void *engine, char *text, size_t size);

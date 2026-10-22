@@ -359,7 +359,7 @@ impl HostRuntime {
     pub fn diagnostics(&self) -> String {
         let report = self.runtime.last_report.as_ref();
         format!(
-            "stop={:?} pc={} steps={} time_ms={} screen={}x{} surfaces={} textures={} renderer={} pending={}",
+            "stop={:?} pc={} steps={} time_ms={} screen={}x{} surfaces={} textures={} renderer={} pending={} program={:?} vm={:?} image_bytes={} blob_bytes={} program_cache={} cached_instructions={} vm_programs={} vm_instructions={}",
             report.map(|r| r.stop_reason),
             report.map_or(0, |r| r.pc),
             report.map_or(0, |r| r.steps),
@@ -370,6 +370,14 @@ impl HostRuntime {
             self.textures.len(),
             self.renderer.is_some(),
             self.runtime.api.host.pending.len(),
+            report.map(|r| r.program.as_str()),
+            self.runtime.vm.resource_usage(),
+            self.runtime.api.graph_images.values().map(|i|i.rgba.len()).sum::<usize>(),
+            self.runtime.api.graph_blob_cache.values().map(Vec::len).sum::<usize>(),
+            self.runtime.api.program_cache.len(),
+            self.runtime.api.program_cache.values().map(|p|p.instructions.len()).sum::<usize>(),
+            self.runtime.vm.programs.len(),
+            self.runtime.vm.programs.iter().map(|p|p.instructions.len()).sum::<usize>(),
         )
     }
     /// The game text font, for renderers the host builds itself.

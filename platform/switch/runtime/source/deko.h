@@ -87,3 +87,6 @@ void ethornell_deko_begin_pass(int32_t target, const float* clear_color, bool cl
 void ethornell_deko_clear_stencil(uint8_t value);
 void ethornell_deko_draw(const EthornellDekoDraw* draw);
 void ethornell_deko_end_frame(bool present);
+
+/* Copies the actual GPU-rendered display for CLI diagnostics. */
+bool ethornell_deko_display_read(uint8_t* rgba);

@@ -202,7 +202,7 @@ int main(void) {
   bool previous_left = false;
   bool quit = false;
   uint64_t request = 0;
-  uint64_t last = armGetSystemTick(), origin = last;
+  uint64_t last = armGetSystemTick(), origin = last, report_at = last;
   while (appletMainLoop() && !quit) {
     padUpdate(&pad);
     uint64_t down = padGetButtonsDown(&pad), up = padGetButtonsUp(&pad),
@@ -272,6 +272,13 @@ int main(void) {
       break;
     }
     pump_audio();
+    if (now - report_at >= 5 * armGetSystemTickFreq()) {
+      char status[2048];
+      ethornell_console_diagnostics(engine, status, sizeof(status));
+      ethornell_switch_log_message(status);
+      ethornell_switch_log_message("\n");
+      report_at = now;
+    }
     for (;;) {
       char text[2048];
       uint64_t id;
