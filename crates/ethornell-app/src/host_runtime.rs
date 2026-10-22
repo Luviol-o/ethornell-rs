@@ -155,6 +155,8 @@ pub struct HostRuntime {
     audio: Option<AudioSystem>,
     backend: u32,
     input_queue: VecDeque<RuntimeInputEvent>,
+    /// Scripted input for unattended runs (`set_input_script`).
+    input_script: Option<HeadlessInputScript>,
     generation: u64,
     paused: u32,
     last_tick: Option<u64>,
@@ -241,6 +243,7 @@ impl HostRuntime {
             audio,
             backend: config.backend,
             input_queue: VecDeque::new(),
+            input_script: None,
             generation: 0,
             paused: 0,
             last_tick: None,
@@ -457,6 +460,13 @@ impl HostRuntime {
         }
         self.runtime.api.finish_graph_knob_drag();
     }
+    /// Plays an `ETHORNELL_INPUT_SCRIPT` script (`wait:N,click:x:y,key:enter,...`,
+    /// game coordinates, one step per engine frame) for unattended runs on
+    /// hosts without environment variables.
+    pub fn set_input_script(&mut self, source: &str) -> Result<()> {
+        self.input_script = Some(HeadlessInputScript::parse(source).map_err(EthornellError::Other)?);
+        Ok(())
+    }
     pub fn input(&mut self, kind: u32, x: f32, y: f32, code: i32, value: f32) -> Result<()> {
         if kind == 7 {
             self.clear_input();
@@ -580,7 +590,7 @@ impl HostRuntime {
         let report = runtime_frontend::drive_runtime_frame_checked(
             &mut self.runtime,
             &mut self.input_queue,
-            &mut None,
+            &mut self.input_script,
             RuntimeFramePacing,
             elapsed,
             raw_elapsed,

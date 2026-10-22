@@ -57,6 +57,10 @@ pub unsafe extern "C" fn ethornell_console_create(
         let user = PathBuf::from(unsafe { string(saves) }?);
         let font = PathBuf::from(unsafe { string(font) }?);
         std::fs::create_dir_all(&user).map_err(|e| e.to_string())?;
+        // Unattended test runs: an input script beside the game directory.
+        let script = game
+            .parent()
+            .and_then(|dir| std::fs::read_to_string(dir.join("input.txt")).ok());
         #[cfg(any(target_os = "horizon", target_os = "vita"))]
         files::install(&game, &user).map_err(|e| e.to_string())?;
         let mut host = HostRuntime::create(HostConfig {
@@ -83,6 +87,9 @@ pub unsafe extern "C" fn ethornell_console_create(
         let renderer = Renderer::new_native(w, h, host.font(), gpu).map_err(|e| e.to_string())?;
         host.attach_renderer(renderer, w, h, 1)
             .map_err(|e| e.to_string())?;
+        if let Some(script) = script {
+            host.set_input_script(script.trim()).map_err(|e| e.to_string())?;
+        }
         Ok(Session { host })
     };
     match create() {
