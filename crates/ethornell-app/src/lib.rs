@@ -15685,6 +15685,32 @@ mod input_tests {
     }
 
     #[test]
+    fn graph92_91_from_a_cursor_in_mid_line_keeps_all_its_glyphs() {
+        let manager =
+            ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let mut api = super::RuntimeTraceApi::new(manager);
+        let window = 0xB000_0000_u32 as i32;
+        api.graph_surfaces
+            .insert(window, RuntimeSurface::display(window, 1128.0, 400.0));
+        api.reset_window_text_cursor(window);
+        let without_spaces =
+            |text: &str| text.chars().filter(|ch| !ch.is_whitespace()).collect::<String>();
+
+        // A skipped line extended in parts: the second part starts where
+        // the first one ends, near the right edge, goes on to the edge and
+        // wraps to the left edge (sub_435290 has no line limit).
+        let first = "Part one. ".repeat(7);
+        let second = "and then the rest of the line, ".repeat(12);
+        draw_at_once(&mut api, window, &first);
+        assert!(api.surface_text_states[&window].cursor_x > 600);
+        draw_at_once(&mut api, window, &second);
+
+        let both = without_spaces(&format!("{first}{second}"));
+        assert_eq!(without_spaces(&shown_message(&api)), both);
+        assert_eq!(without_spaces(&api.surface_text_buffers[&window]), both);
+    }
+
+    #[test]
     fn graph92_91_leaves_another_windows_message_where_it_is() {
         let manager =
             ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
@@ -25976,18 +26002,24 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                     // sub_486500 and the message procedure both enter
                     // sub_42B710, so direct formatted draws must preserve the
                     // same ruby spans and kinsoku wrapping as 92:90.
-                    let parsed = text::parse_and_wrap_styled_message(text, &state);
-                    self.surface_text_buffers
-                        .entry(target)
-                        .or_default()
-                        .push_str(&parsed.text);
                     if self.graph_surfaces.contains_key(&target)
                         && self.message_text_node_is_free_for(target)
                     {
                         // Into the window's text bitmap, at its cursor, as
-                        // a message draws.
-                        self.draw_window_text_at_once(target, text);
+                        // a message draws. It is laid out on the window's
+                        // page: from a cursor in mid-line it goes on to the
+                        // window's right edge and wraps to its left edge.
+                        let drawn = self.draw_window_text_at_once(target, text);
+                        self.surface_text_buffers
+                            .entry(target)
+                            .or_default()
+                            .push_str(&drawn);
                     } else {
+                        let parsed = text::parse_and_wrap_styled_message(text, &state);
+                        self.surface_text_buffers
+                            .entry(target)
+                            .or_default()
+                            .push_str(&parsed.text);
                         let x = state.x;
                         let y = state.y;
                         self.store_bitmap_text_run(
