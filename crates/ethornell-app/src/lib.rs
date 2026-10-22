@@ -26085,16 +26085,20 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                 let y = pop_int_value(stack).unwrap_or_default();
                 let x = pop_int_value(stack).unwrap_or_default();
                 // sub_47EE00: negative coordinates and a density above 256
-                // (signed) are fatal.
+                // (unsigned) are fatal; sub_433900 then ignores the call
+                // when x or y is above 100.
                 if x < 0 || y < 0 {
                     return Err(ethornell_vm::VmError::Runtime(format!(
                         "無効な座標 [ {x} , {y} ] が指定されました"
                     )));
                 }
-                if alpha > 0x100 {
+                if alpha as u32 > 0x100 {
                     return Err(ethornell_vm::VmError::Runtime(format!(
                         "無効な濃度 [ {alpha} ] が指定されました"
                     )));
+                }
+                if x > 100 || y > 100 {
+                    return Ok(ethornell_vm::Value::None);
                 }
                 self.graph_defaults.configure_shadow(x, y, alpha);
                 tracing::info!(x, y, alpha, "GraphSetTextShadowParameters");

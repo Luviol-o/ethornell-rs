@@ -128,7 +128,9 @@ impl NativeEffectState {
     }
 
     pub(super) fn create_spline(&mut self) -> i32 {
-        let handle = self.next_spline_handle;
+        // sub_495420: ids come from dword_503E18, which starts at
+        // 0x80000000 (the field counts from 0 here).
+        let handle = self.next_spline_handle.wrapping_add(i32::MIN);
         self.next_spline_handle = self.next_spline_handle.wrapping_add(1);
         self.splines.insert(
             handle,

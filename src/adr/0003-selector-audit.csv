@@ -361,8 +361,8 @@ selector,handler,symbol,status
 90:9A,47ED70,Graph90_9A_SetMessageCaretPosition,verified
 90:9B,47EDB0,Graph90_9B_SetMessageStartDelay,verified
 90:9C,47EDE0,Graph90_9C_SetTextShadowEnabled,verified
-90:9D,47EE00,Graph90_9D_SetTextShadowParameters,todo
-90:9E,47EEA0,Graph90_9E_RegisterFullwidthGlyphStrip,todo
+90:9D,47EE00,Graph90_9D_SetTextShadowParameters,verified
+90:9E,47EEA0,Graph90_9E_RegisterFullwidthGlyphStrip,verified
 90:9F,47EF60,Graph90_9F_SetMessageInputForcesCompletion,verified
 90:A0,47EF80,Graph90_A0_StartItemSelection,todo
 90:A1,47F0F0,Graph90_A1_DrawItemSelectionGrid,todo
@@ -644,7 +644,7 @@ B0:A3,479C00,UserB0_A3_PollModelessDialog,verified
 B0:C0,479C90,UserB0_C0_InternFontName,verified
 B0:C1,479CC0,UserB0_C1_InternFontNameWithOption,verified
 B0:C2,479CF0,UserB0_C2_RegisterFontResource,verified
-B0:C3,479D20,UserB0_C3_RegisterArchiveFontResource,todo
+B0:C3,479D20,UserB0_C3_RegisterArchiveFontResource,verified
 B0:C4,479D60,UserB0_C4_QueryFontAvailable,verified
 B0:C6,479D90,UserB0_C6_QueryFontCapability,verified
 B0:C7,479DC0,UserB0_C7_SetFontAlias,verified
@@ -689,11 +689,11 @@ C0:4C,4775B0,UserC0_4C_SetRainOrigin,verified
 C0:4D,477610,UserC0_4D_SetRainDirection,verified
 C0:4E,477670,UserC0_4E_SetRainLength,verified
 C0:4F,4776F0,UserC0_4F_SetRainStep,verified
-C0:C0,477760,UserC0_C0_CreateSpline,todo
+C0:C0,477760,UserC0_C0_CreateSpline,verified
 C0:C1,477780,UserC0_C1_ReleaseSpline,verified
 C0:C2,4777B0,UserC0_C2_ConfigureSpline,verified
 C0:C3,477800,UserC0_C3_SampleSpline,verified
-C0:F0,477840,UserC0_F0_LoadBwefTable,todo
+C0:F0,477840,UserC0_F0_LoadBwefTable,verified
 D0:00,477910,UnknownNativeCall,verified
 D0:01,477950,UnknownNativeCall,verified
 D0:04,477980,UnknownNativeCall,verified

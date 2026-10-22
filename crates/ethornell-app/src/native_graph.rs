@@ -4099,11 +4099,11 @@ impl RuntimeTraceApi {
                 ethornell_vm::Value::None
             }
             (0x90, 0x9E) => {
-                // BP declaration order is [bitmap, character_count]. The
-                // target slices one horizontal strip into private full-width
-                // glyph slots beginning at codepoint 0xFF01.
-                let character_count = pop_int_value(stack).unwrap_or_default();
+                // Script order is (character_count, bitmap): sub_47EEA0's
+                // second pop is the count it checks first (sub_433320). The
+                // strip becomes private full-width glyphs from U+FF01.
                 let bitmap = pop_int_value(stack).unwrap_or_default();
+                let character_count = pop_int_value(stack).unwrap_or_default();
                 // sub_433320: count > 0xFF (unsigned) (1), missing bitmap
                 // (2), width not divisible (3) are fatal; 0 clears.
                 let fail = |message: String| Some(Err(ethornell_vm::VmError::Runtime(message)));

@@ -1428,16 +1428,28 @@ impl RuntimeTraceApi {
                 ethornell_vm::Value::Int(i32::from(available))
             }
             0xC3 => {
-                let archive = pop_string_value(stack).unwrap_or_default();
+                // sub_479D20 -> sub_469130: script order (archive, font
+                // file). A font already registered under that name returns
+                // 1; with an archive the file is read from it
+                // (AddFontMemResourceEx), without one from the primary root
+                // (AddFontResourceA).
                 let name = pop_string_value(stack).unwrap_or_default();
-                let available = !name.is_empty()
-                    && (!archive.is_empty()
-                        && (self.manager.find(&name).is_some()
-                            || self.manager.find(&format!("{archive}:{name}")).is_some()));
-                if available {
-                    self.native_user
-                        .font_resources
-                        .insert(format!("{archive}:{name}"));
+                let archive = pop_string_value(stack).unwrap_or_default();
+                let key = if archive.is_empty() { name.clone() } else { format!("{archive}:{name}") };
+                let registered = self
+                    .native_user
+                    .font_resources
+                    .iter()
+                    .any(|entry| entry.rsplit(':').next() == Some(name.as_str()));
+                let available = registered
+                    || (!name.is_empty()
+                        && if archive.is_empty() {
+                            self.manager.find(&name).is_some()
+                        } else {
+                            self.manager.find(&key).is_some() || self.manager.find(&name).is_some()
+                        });
+                if available && !registered {
+                    self.native_user.font_resources.insert(key);
                 }
                 ethornell_vm::Value::Int(i32::from(available))
             }

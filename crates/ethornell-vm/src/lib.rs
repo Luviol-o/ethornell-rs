@@ -5752,14 +5752,14 @@ impl Vm {
                     };
                     Some(Value::Int(status))
                 } else if (code, id) == (0xc0, 0xf0) {
-                    // sub_476ED0 / sub_4066C0 loads a BWEF resource and writes
-                    // count pairs {base + offset, stride}. Native pop order is
-                    // base, resource, count_out, table_out, archive.
+                    // sub_477840 -> sub_4066C0 loads a BWEF resource and writes
+                    // count pairs {base + offset, stride}. Script order is
+                    // (table_out, count_out, archive, resource, base).
                     let base = self.pop_int()?;
                     let resource = self.pop_string_lossy()?;
+                    let archive = self.pop_string_lossy()?;
                     let count_out = self.pop_ptr()?;
                     let table_out = self.pop_ptr()?;
-                    let archive = self.pop_string_lossy()?;
                     let status = match api.load_file_bytes(&archive, &resource) {
                         None => i32::MIN + 1,
                         Some(bytes) if bytes.len() < 288 || &bytes[..8] != b"bwef    " => {
