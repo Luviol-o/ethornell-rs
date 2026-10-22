@@ -625,6 +625,8 @@ struct RuntimeTraceApi {
     /// otherwise a Graph92:14 preload followed by a real load silently falls
     /// back to format 2.
     graph_image_formats: BTreeMap<String, i32>,
+    /// Frames until the next unreferenced-archive-image sweep.
+    image_sweep_countdown: u32,
     /// Resource-keyed copy of target bitmap-registry DWORDs +0x28/+0x2C
     /// recovered from CBG embedded-point metadata. This must survive
     /// Graph92:14 preloading so a later real bitmap load receives the same
@@ -1106,6 +1108,7 @@ impl RuntimeTraceApi {
                 },
             )]),
             graph_image_formats: BTreeMap::new(),
+            image_sweep_countdown: 0,
             graph_image_auxiliary_pairs: BTreeMap::new(),
             graph_image_revisions: BTreeMap::new(),
             next_graph_image_revision: 1,
@@ -1439,6 +1442,49 @@ impl RuntimeTraceApi {
         let key = format!("{}#unblend:{color:06x}", resource.key);
         self.store_graph_image(key.clone(), image);
         self.graph_resources.insert(bitmap, RuntimeGraphResource { key, ..resource });
+    }
+
+    /// Decoded archive images stay cached after their bitmap slot is released
+    /// or reloaded; on consoles that alone exhausts memory within minutes.
+    /// Every 60 frames, drop the `archive:resource` images nothing refers to
+    /// (bitmap slots, layers, node sources, the current draw list); a later
+    /// load decodes them again. Generated `runtime:` images are never dropped.
+    fn sweep_unreferenced_archive_images(&mut self) {
+        if self.image_sweep_countdown > 0 {
+            self.image_sweep_countdown -= 1;
+            return;
+        }
+        self.image_sweep_countdown = 59;
+        let mut referenced: BTreeSet<String> = self
+            .graph_resources
+            .values()
+            .map(|resource| resource.key.clone())
+            .collect();
+        referenced.extend(self.graph_layers.values().map(|layer| layer.key.clone()));
+        referenced.extend(self.graph_node_sources.values().map(|(key, _)| key.clone()));
+        referenced.extend(self.graph_output_draw_items().into_iter().map(|item| item.key));
+        // The message-window frames are read by key, not through a slot.
+        referenced.extend([text::MESSAGE_WINDOW_KEY, text::MESSAGE_NAME_WINDOW_KEY].map(String::from));
+        let unreferenced = self
+            .graph_images
+            .keys()
+            .filter(|key| !key.starts_with("runtime:") && key.contains(':') && !referenced.contains(*key))
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut freed = 0usize;
+        for key in &unreferenced {
+            if let Some(image) = self.graph_images.remove(key) {
+                freed += image.rgba.len();
+            }
+            self.graph_image_revisions.remove(key);
+        }
+        tracing::debug!(
+            evicted = unreferenced.len(),
+            freed,
+            images = self.graph_images.len(),
+            image_bytes = self.graph_images.values().map(|image| image.rgba.len()).sum::<usize>(),
+            "archive image sweep"
+        );
     }
 
     fn store_graph_image(&mut self, key: String, image: DecodedImage) {
@@ -9140,6 +9186,7 @@ impl RuntimeEngine {
         self.api.refresh_aux_masked_sprites();
         self.api.refresh_native_sprite_filters();
         self.api.refresh_native_filters();
+        self.api.sweep_unreferenced_archive_images();
         report
     }
 }
@@ -9653,7 +9700,7 @@ mod input_tests {
             script_name: Some("system.arc:ipl._bp".into()),
             functions: Vec::new(),
             strings: Vec::new(),
-            instructions: vec![
+            instructions: std::sync::Arc::new(vec![
                 game_id_instruction("push_string", None, vec![BpOperand::String("decoy".into())]),
                 game_id_instruction("sys1", Some("GetGameId"), Vec::new()),
                 game_id_instruction("push_base_offset", None, Vec::new()),
@@ -9663,11 +9710,11 @@ mod input_tests {
                     vec![BpOperand::String("AmairoChocolate".into())],
                 ),
                 game_id_instruction("streq", None, Vec::new()),
-            ],
-            labels: std::collections::HashMap::new(),
+            ]),
+            labels: std::sync::Arc::new(std::collections::HashMap::new()),
             warnings: Vec::new(),
             module_size: 0,
-            code: Vec::new(),
+            code: std::sync::Arc::new(Vec::new()),
         };
 
         assert_eq!(
@@ -19158,7 +19205,7 @@ fn empty_bp_program(name: String) -> ethornell_script::BpProgram {
         script_name: Some(name),
         functions: Vec::new(),
         strings: Vec::new(),
-        instructions: vec![ethornell_script::BpInstruction {
+        instructions: std::sync::Arc::new(vec![ethornell_script::BpInstruction {
             offset: 0x10,
             opcode: ethornell_script::BpOpcode::Known {
                 code: 0x17,
@@ -19170,11 +19217,11 @@ fn empty_bp_program(name: String) -> ethornell_script::BpProgram {
             known_call: None,
             raw: vec![0x17],
             warning: Some("generated empty program after runtime load failure".into()),
-        }],
-        labels,
+        }]),
+        labels: std::sync::Arc::new(labels),
         warnings: vec!["generated empty program after runtime load failure".into()],
         module_size: 0,
-        code: Vec::new(),
+        code: std::sync::Arc::new(Vec::new()),
     }
 }
 

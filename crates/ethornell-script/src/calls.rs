@@ -174,7 +174,7 @@ fn is_generic_native_name(key: CallKey) -> bool {
 pub fn infer_program_call_arg_counts(program: &BpProgram) -> Vec<CallSiteArgCount> {
     let mut state = StackEffectState::default();
     let mut observations = Vec::new();
-    for instruction in &program.instructions {
+    for instruction in program.instructions.iter() {
         state.visit(program, instruction, &mut observations);
     }
     observations

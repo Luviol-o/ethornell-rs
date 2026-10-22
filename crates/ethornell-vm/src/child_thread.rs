@@ -16,7 +16,7 @@
 //! table and borrows the owner's local window (`LOCAL_MEMORY_BASE..
 //! HEAP_MEMORY_BASE`) while it runs (`lend_local_window`).
 
-use crate::{HEAP_MEMORY_BASE, LOCAL_MEMORY_BASE, Value, Vm, VmError, VmResult};
+use crate::{Value, Vm, VmError, VmResult};
 use std::sync::Arc;
 
 /// One block of sub_445710's lists: (owner tag, start, size).
@@ -112,13 +112,8 @@ impl RegionReservations {
 
 /// Swaps the local windows of two VMs: a child runs in its owner's.
 pub(crate) fn lend_local_window(owner: &mut Vm, child: &mut Vm) {
-    let local = LOCAL_MEMORY_BASE as usize..HEAP_MEMORY_BASE;
-    for vm in [&mut *owner, &mut *child] {
-        if vm.memory.len() < HEAP_MEMORY_BASE {
-            vm.memory.resize(HEAP_MEMORY_BASE, 0);
-        }
-    }
-    owner.memory[local.clone()].swap_with_slice(&mut child.memory[local]);
+    let owner_window = crate::async_program::local_window_mut(owner);
+    owner_window.swap_with_slice(crate::async_program::local_window_mut(child));
 }
 
 impl Vm {
