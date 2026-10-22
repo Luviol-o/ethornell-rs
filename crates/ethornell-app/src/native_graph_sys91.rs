@@ -466,6 +466,18 @@ impl RuntimeTraceApi {
             0x1f => {
                 let args = Self::graph91_source_ints(stack, 2);
                 if let [destination, source] = args.as_slice() {
+                    // sub_4823D0 -> sub_403450: a missing source (2), a
+                    // destination that cannot be created (1) are fatal.
+                    if self.graph_bitmap_image(*source).is_none() {
+                        return Some(Err(ethornell_vm::VmError::Runtime(format!(
+                            "指定された複写元ビットマップ [ {source} ] は無効です"
+                        ))));
+                    }
+                    if !(0..0x4000).contains(destination) {
+                        return Some(Err(ethornell_vm::VmError::Runtime(format!(
+                            "指定された出力先ビットマップ [ {destination} ] は無効です"
+                        ))));
+                    }
                     let cloned = self.clone_graph_bitmap(*source, *destination);
                     if cloned {
                         self.effects.clone_bitmap(*destination, *source);
@@ -1189,10 +1201,81 @@ impl RuntimeTraceApi {
             if let Err(error)=self.validate_native_backml_call(id,&values){return Some(Err(error));}
         }
         let stack = call.args_mut();
+        // sub_4829C0..sub_482F30: not in multi-layer mode (1) and a layer
+        // outside 0..8 (2) are fatal for 91:41..4A, after the handler's own
+        // mode (44), level (45) and bitmap (46) checks.
+        if (0x41..=0x4a).contains(&id) {
+            let args: Vec<i32> = stack.iter().map(value_to_i32).collect();
+            let count = match id {
+                0x41 => 1,
+                0x42 | 0x44 | 0x45 => 2,
+                0x43 | 0x48 | 0x49 => 3,
+                0x46 | 0x4a => 4,
+                _ => 5,
+            };
+            let source = &args[args.len().saturating_sub(count)..];
+            let layer = source.first().copied().unwrap_or_default();
+            let precheck = match id {
+                0x44 => target_checks::effect_mode(source[1]),
+                0x45 => target_checks::effect_level(source[1]),
+                0x46 if source[1] != -1 => target_checks::bitmap(source[1]),
+                _ => Ok(()),
+            };
+            if let Err(error) = precheck {
+                return Some(Err(error));
+            }
+            if !self.graph91_multilayer_background.active {
+                return Some(Err(ethornell_vm::VmError::Runtime(
+                    "背景表示モードがマルチレイヤモードではありません".into(),
+                )));
+            }
+            if !(0..8).contains(&layer) {
+                return Some(Err(ethornell_vm::VmError::Runtime(format!(
+                    "指定されたレイヤー [ {layer} ] は無効です"
+                ))));
+            }
+            if id == 0x46 && source[1] != -1 && !self.graph_resources.contains_key(&source[1]) {
+                return Some(Err(ethornell_vm::VmError::Runtime(format!(
+                    "指定されたビットマップ [ {} ] は無効です",
+                    source[1]
+                ))));
+            }
+            if id == 0x47 && (source[2] == 0 || source[3] == 0) {
+                return Some(Err(ethornell_vm::VmError::Runtime(format!(
+                    "無効な伸縮倍率 [ {} , {} ] が指定されました",
+                    source[2], source[3]
+                ))));
+            }
+        }
+        if id == 0x40 {
+            let args: Vec<i32> = stack.iter().map(value_to_i32).collect();
+            let source = &args[args.len().saturating_sub(9)..];
+            if source.len() == 9 {
+                if let Err(error) = target_checks::bitmap(source[2]) {
+                    return Some(Err(error));
+                }
+                if !self.graph_resources.contains_key(&source[2]) {
+                    return Some(Err(ethornell_vm::VmError::Runtime(format!(
+                        "指定されたビットマップ [ {} ] は無効です",
+                        source[2]
+                    ))));
+                }
+                if source[6] == 0 || source[7] == 0 {
+                    return Some(Err(ethornell_vm::VmError::Runtime(format!(
+                        "無効な伸縮倍率 [ {} , {} ] が指定されました",
+                        source[6], source[7]
+                    ))));
+                }
+            }
+        }
         let value = match id {
             0x31 => {
                 let args = Self::graph91_source_ints(stack, 2);
                 if let [object, suppressed] = args.as_slice() {
+                    // sub_482460 -> sub_462490: unknown object fatal.
+                    if !self.graph_handle_exists(*object) {
+                        return Some(Err(ethornell_vm::VmError::Runtime("無効なオブジェクトハンドルが指定されました".into())));
+                    }
                     self.graph91_set_object_suppressed(*object, *suppressed != 0);
                 }
                 ethornell_vm::Value::None
@@ -1202,9 +1285,7 @@ impl RuntimeTraceApi {
                 if let [object, x, y, z] = args.as_slice() {
                     // A missing object is a script error (byte_4E8BC0).
                     if !self.graph_handle_exists(*object) {
-                        return Some(Err(ethornell_vm::VmError::Runtime(format!(
-                            "Graph91:33 #{object} is not a display object"
-                        ))));
+                        return Some(Err(ethornell_vm::VmError::Runtime("無効なオブジェクトハンドルが指定されました".into())));
                     }
                     self.graph91_set_object_fixed_position(*object, *x, *y, *z);
                 }
@@ -1215,9 +1296,7 @@ impl RuntimeTraceApi {
                 if let [object, x, y, z] = args.as_slice() {
                     // A missing object is a script error (byte_4E8BC0).
                     if !self.graph_handle_exists(*object) {
-                        return Some(Err(ethornell_vm::VmError::Runtime(format!(
-                            "Graph91:36 #{object} is not a display object"
-                        ))));
+                        return Some(Err(ethornell_vm::VmError::Runtime("無効なオブジェクトハンドルが指定されました".into())));
                     }
                     self.graph91_set_object_secondary_vector(*object, *x, *y, *z);
                 }
@@ -1228,9 +1307,7 @@ impl RuntimeTraceApi {
                 if let [object, x, y, z] = args.as_slice() {
                     // A missing object is a script error (byte_4E8BC0).
                     if !self.graph_handle_exists(*object) {
-                        return Some(Err(ethornell_vm::VmError::Runtime(format!(
-                            "Graph91:37 #{object} is not a display object"
-                        ))));
+                        return Some(Err(ethornell_vm::VmError::Runtime("無効なオブジェクトハンドルが指定されました".into())));
                     }
                     self.graph91_set_object_primary_vector(*object, *x, *y, *z);
                 }
@@ -1242,6 +1319,21 @@ impl RuntimeTraceApi {
             0x3e => {
                 let args = Self::graph91_source_ints(stack, 4);
                 if let [master, slave, x, y] = args.as_slice() {
+                    // sub_482690 -> sub_462660: master (255), slave (6),
+                    // itself (7), slave with an owner (8) are fatal.
+                    let fatal = |message: &str| Some(Err(ethornell_vm::VmError::Runtime(message.into())));
+                    if !self.graph_handle_exists(*master) {
+                        return fatal("無効なマスターオブジェクトハンドルが指定されました");
+                    }
+                    if !self.graph_handle_exists(*slave) {
+                        return fatal("無効なスレーブオブジェクトハンドルが指定されました");
+                    }
+                    if master == slave {
+                        return fatal("指定されたスレーブオブジェクトはマスターオブジェクト自身です");
+                    }
+                    if self.graph_native_owners.contains_key(slave) {
+                        return fatal("指定されたスレーブオブジェクトにはオーナーが存在します");
+                    }
                     self.graph91_attach_child(*master, *slave, *x, *y);
                 }
                 ethornell_vm::Value::None
@@ -1249,6 +1341,18 @@ impl RuntimeTraceApi {
             0x3f => {
                 let args = Self::graph91_source_ints(stack, 2);
                 if let [master, slave] = args.as_slice() {
+                    // sub_482830 -> sub_462680: master (255), slave (6), not
+                    // attached to this master (9) are fatal.
+                    let fatal = |message: &str| Some(Err(ethornell_vm::VmError::Runtime(message.into())));
+                    if !self.graph_handle_exists(*master) {
+                        return fatal("無効なマスターオブジェクトハンドルが指定されました");
+                    }
+                    if !self.graph_handle_exists(*slave) {
+                        return fatal("無効なスレーブオブジェクトハンドルが指定されました");
+                    }
+                    if self.graph_native_owners.get(slave) != Some(master) {
+                        return fatal("指定されたスレーブオブジェクトは従属していません");
+                    }
                     self.graph91_detach_child(*master, *slave);
                 }
                 ethornell_vm::Value::None

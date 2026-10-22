@@ -4503,9 +4503,19 @@ impl Vm {
                     let values = api
                         .query_graph91_object_property(object, parameter, input)
                         .map_err(|status| {
-                            VmError::Runtime(format!(
-                                "Graph91:38 object #{object} parameter {parameter:#x} failed (status {status})"
-                            ))
+                            // sub_482590: 5 unsupported, 254 bad argument,
+                            // 255 unknown object.
+                            VmError::Runtime(match status {
+                                5 => format!(
+                                    "サポートされていないパラメータ番号 [ 0x{:08X} ] が設定されました",
+                                    parameter as u32
+                                ),
+                                255 => "無効なオブジェクトハンドルが指定されました".to_string(),
+                                _ => format!(
+                                    "取得対象パラメータ [ 0x{:08X} ] に渡された引数 [ {input} ( 0x{:08X} ) ] に誤りがあります",
+                                    parameter as u32, input as u32
+                                ),
+                            })
                         })?;
                     for (index, value) in values.iter().enumerate() {
                         let address = destination.wrapping_add((index * 4) as u32);
@@ -4519,11 +4529,15 @@ impl Vm {
                     // coordinate DWORDs through that pointer.
                     let object = self.pop_int()?;
                     let destination = self.pop_ptr()?;
-                    if let Some(position) = api.query_graph91_object_composite_position(object) {
-                        self.write_int(destination, 2, position[0] as u32)?;
-                        self.write_int(destination.wrapping_add(4), 2, position[1] as u32)?;
-                        self.clear_shadow_values(destination, 8);
-                    }
+                    let Some(position) = api.query_graph91_object_composite_position(object) else {
+                        // sub_482650 -> sub_462650: 255 is fatal.
+                        return Err(VmError::Runtime(
+                            "無効なオブジェクトハンドルが指定されました".into(),
+                        ));
+                    };
+                    self.write_int(destination, 2, position[0] as u32)?;
+                    self.write_int(destination.wrapping_add(4), 2, position[1] as u32)?;
+                    self.clear_shadow_values(destination, 8);
                     Value::None
                 } else if (code, id) == (0x91, 0x73) {
                     // sub_482DA0 pops alpha-test mode and landscape, then

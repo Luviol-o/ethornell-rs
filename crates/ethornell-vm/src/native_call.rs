@@ -17150,7 +17150,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_CLONE_BITMAP_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_4818D0 calls sub_403450 and clones the complete source dimensions, format, metadata and backing pixels into the destination.",
+        notes: "BGI 1.622 sub_4823D0 -> sub_403450: clone (format, size, embedded point); missing source (2) or a destination that cannot be created (1) fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_SET_OBJECT_SUPPRESSED,
@@ -17158,7 +17158,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_OBJECT_BOOLEAN_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_481960 reaches sub_41ADA0 and writes CDspObj+0x0C, which sub_41AE30 tests inversely before drawing.",
+        notes: "sub_482460 -> sub_462490: draw suppression; unknown object fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_SET_OBJECT_FIXED_POSITION,
@@ -17166,7 +17166,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_OBJECT_FIXED_POSITION_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_4819A0 -> vtable+60 (sub_41B370 and the Sprite/BackML overrides): missing object fatal; optional whole-pixel rounding, fixed x/y/z stored, integer position mirrored when +0x7C is set, members moved by the same delta; projected sprites are rebuilt.",
+        notes: "sub_4824A0 -> sub_4624C0: fixed position; unknown object fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_SET_OBJECT_SECONDARY_VECTOR,
@@ -17174,7 +17174,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_OBJECT_VECTOR_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_4819F0 -> sub_41B580: missing object fatal; stores the secondary vector recursively on members, then re-applies the object's own primary vector (vtable+68), which overwrites every member's primary vector.",
+        notes: "sub_4824F0 -> sub_462550: secondary vector; unknown object fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_SET_OBJECT_PRIMARY_VECTOR,
@@ -17182,7 +17182,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_OBJECT_VECTOR_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_481A40 -> vtable+68 (sub_41B520 / Sprite sub_428310): missing object fatal; stores the primary vector and copies it to every member; projected sprites are rebuilt.",
+        notes: "sub_482540 -> sub_462530: primary vector; unknown object fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_GET_OBJECT_PROPERTY,
@@ -17190,7 +17190,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_GET_OBJECT_PROPERTY_PARAMETERS,
         returns: "void; target reports invalid object/output or unsupported parameter",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_481A90 pops parameter, object, BP pointer; the class GetProperty (vtable +0x60) writes 1-5 DWORDs. Ported: CDspObj sub_41BAE0 (0 position, 1 blit mode, 2 alpha, 3 priority, 32 fixed x/y/z, 0x7FFFFFFF user slot indexed by the buffer's first DWORD, -2 sort key, -1 +0x104) and Sprite sub_4288F0 0x41 / 0x10000000 / 0x10000100 for modes 2 and 5; errors are script errors. Open: mode-6 values (sub_429BF0) until Graph90:5D is ported.",
+        notes: "sub_482590 -> sub_462590: property getter into the DWORD; 5 unsupported, 254 bad argument, 255 unknown object with the 1.622 texts.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_GET_OBJECT_COMPOSITE_POSITION,
@@ -17198,7 +17198,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_GET_OBJECT_POSITION_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_481B50 converts the first BP argument and sub_41B260 writes exactly two resolved coordinate DWORDs.",
+        notes: "sub_482650 -> sub_462650: composite position into two DWORDs; unknown object fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_ATTACH_CHILD_OBJECT,
@@ -17206,7 +17206,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_ATTACH_OBJECT_PARAMETERS,
         returns: "void; target emits script errors for invalid/self/already-owned objects",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_481B90 validates master and slave then sub_41AB40 creates a 0x10 member record containing slave/local-X/local-Y/next. This is eager state propagation, not a renderer-time scene-graph transform. In the ordinary branch the master raw CDspObj +0x30/+0x34 position plus the supplied local offsets is written immediately to the slave. Only when both objects' vtable+0x70 reports the projected Sprite coordinate domain (modes 5/6) does the fixed branch use the master's raw base 16.16 +0x4C/+0x50/+0x54 vector, add local X/Y in that domain, inherit Z, and write the slave through vtable+0x3C. Detach preserves the last materialized slave coordinates.",
+        notes: "sub_482690 -> sub_462660: attach slave; master (255), slave (6), itself (7), slave owner (8) fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_DETACH_CHILD_OBJECT,
@@ -17214,7 +17214,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_DETACH_OBJECT_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_481D30 calls sub_41AC40 and requires the slave to be a current dependent of the supplied master.",
+        notes: "sub_482830 -> sub_462680: detach; master, slave, not subordinate (9) fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_INITIALIZE_MULTILAYER_BACKGROUND,
@@ -17222,7 +17222,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_MULTILAYER_INITIALIZE_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "482890 ->43E070 ->41E4B0: configure layer0 in an eight-layer private compositor; reuse other existing records. All anchors are16.16 and final operand is sampling flag.",
+        notes: "sub_482890 -> sub_4627B0: multi-layer background; bitmap check, invalid bitmap (3), zero scale (4).",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_SELECT_MULTILAYER_LAYER,
@@ -17230,7 +17230,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_MULTILAYER_INDEX_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "4829C0 ->41E2C0 selects record0..7 used by virtual position/alpha/property setters.",
+        notes: "sub_4829C0 -> sub_4627E0: selects a layer; not multi-layer mode (1), layer (2) fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_SET_MULTILAYER_LAYER_ENABLED,
@@ -17238,7 +17238,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_MULTILAYER_ENABLED_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_481F30 writes the layer-record enable field and requests redraw when successful.",
+        notes: "sub_482A30 -> sub_4627F0: layer enable; mode and layer checks.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_SET_MULTILAYER_LAYER_POSITION,
@@ -17246,7 +17246,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_MULTILAYER_PAIR_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "482AB0 ->41DF90 writes the chosen private destination anchor in16.16, independent of other layers.",
+        notes: "sub_482AB0 -> sub_462800: layer position; mode and layer checks.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_SET_MULTILAYER_LAYER_BLEND_MODE,
@@ -17254,7 +17254,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_MULTILAYER_SCALAR_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_482040 validates the native blend selector and writes record offset +16.",
+        notes: "sub_482B40 -> sub_462810: blend mode check, mode and layer checks.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_SET_MULTILAYER_LAYER_BLEND_PARAMETER,
@@ -17262,7 +17262,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_MULTILAYER_SCALAR_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "482BD0 ->41E070 stores native per-layer composition strength; also addressed by selected-layer alpha setter.",
+        notes: "sub_482BD0 -> sub_462820: level check, mode and layer checks.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_SET_MULTILAYER_LAYER_BITMAP,
@@ -17270,7 +17270,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_MULTILAYER_BITMAP_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "482C60 ->41E0D0 captures bitmap generation and source16.16 anchors, resetting source deltas.",
+        notes: "sub_482C60 -> sub_462830: bitmap check, mode, layer, bitmap errors.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_SET_MULTILAYER_LAYER_TRANSFORM,
@@ -17278,7 +17278,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_MULTILAYER_TRANSFORM_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "482D30 ->41E190 stores rotation/scales/sampling flag and clears transform coefficients.",
+        notes: "sub_482D30 -> sub_462840: mode, layer, zero scale errors.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_SET_MULTILAYER_LAYER_AUXILIARY_PAIR,
@@ -17286,7 +17286,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_MULTILAYER_PAIR_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "482E10 ->41E200 sets independent rotation and reciprocal-scale curve selectors, consumed at draw.",
+        notes: "sub_482E10 -> sub_462860: auxiliary pair; mode and layer checks.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_SET_MULTILAYER_LAYER_SOURCE_VELOCITY,
@@ -17294,7 +17294,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_MULTILAYER_PAIR_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "482EA0 ->41E230 stores16.16 source-anchor coefficients evaluated against unsigned8.24 fixed progress; not per-frame velocity.",
+        notes: "sub_482EA0 -> sub_462870: source velocity; mode and layer checks.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_SET_MULTILAYER_LAYER_TRANSFORM_VELOCITY,
@@ -17302,7 +17302,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_MULTILAYER_TRANSFORM_VELOCITY_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "482F30 ->41E260/41E290 stores rotation and reciprocal-scale interpolation coefficients.",
+        notes: "sub_482F30 -> sub_462880: transform velocity; mode and layer checks.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_SET_SPRITE_RELATION,
@@ -20133,6 +20133,18 @@ const PORTABLE_EQUIVALENT_OPCODES: &[NativeOpcode] = &[
     opcodes::GRAPH91_GENERATE_CURVATURE_DISPLACEMENT_MAP,
     opcodes::GRAPH91_GENERATE_SINE_DISPLACEMENT_MAP,
     opcodes::GRAPH91_GENERATE_RADIAL_WARP_DISPLACEMENT_MAP,
+    opcodes::GRAPH91_GET_OBJECT_PROPERTY,
+    opcodes::GRAPH91_INITIALIZE_MULTILAYER_BACKGROUND,
+    opcodes::GRAPH91_SELECT_MULTILAYER_LAYER,
+    opcodes::GRAPH91_SET_MULTILAYER_LAYER_ENABLED,
+    opcodes::GRAPH91_SET_MULTILAYER_LAYER_POSITION,
+    opcodes::GRAPH91_SET_MULTILAYER_LAYER_BLEND_MODE,
+    opcodes::GRAPH91_SET_MULTILAYER_LAYER_BLEND_PARAMETER,
+    opcodes::GRAPH91_SET_MULTILAYER_LAYER_BITMAP,
+    opcodes::GRAPH91_SET_MULTILAYER_LAYER_TRANSFORM,
+    opcodes::GRAPH91_SET_MULTILAYER_LAYER_AUXILIARY_PAIR,
+    opcodes::GRAPH91_SET_MULTILAYER_LAYER_SOURCE_VELOCITY,
+    opcodes::GRAPH91_SET_MULTILAYER_LAYER_TRANSFORM_VELOCITY,
 ];
 
 const PARTIAL_IMPLEMENTATION_OPCODES: &[NativeOpcode] = &[
@@ -20226,18 +20238,6 @@ const PARTIAL_IMPLEMENTATION_OPCODES: &[NativeOpcode] = &[
     opcodes::GRAPH91_SET_LANDSCAPE_CELL_COLUMN,
     opcodes::GRAPH91_GET_LANDSCAPE_CELL_VALUE,
     opcodes::GRAPH91_COPY_LANDSCAPE_CELL_IMAGE,
-    opcodes::GRAPH91_GET_OBJECT_PROPERTY,
-    opcodes::GRAPH91_INITIALIZE_MULTILAYER_BACKGROUND,
-    opcodes::GRAPH91_SELECT_MULTILAYER_LAYER,
-    opcodes::GRAPH91_SET_MULTILAYER_LAYER_ENABLED,
-    opcodes::GRAPH91_SET_MULTILAYER_LAYER_POSITION,
-    opcodes::GRAPH91_SET_MULTILAYER_LAYER_BLEND_MODE,
-    opcodes::GRAPH91_SET_MULTILAYER_LAYER_BLEND_PARAMETER,
-    opcodes::GRAPH91_SET_MULTILAYER_LAYER_BITMAP,
-    opcodes::GRAPH91_SET_MULTILAYER_LAYER_TRANSFORM,
-    opcodes::GRAPH91_SET_MULTILAYER_LAYER_AUXILIARY_PAIR,
-    opcodes::GRAPH91_SET_MULTILAYER_LAYER_SOURCE_VELOCITY,
-    opcodes::GRAPH91_SET_MULTILAYER_LAYER_TRANSFORM_VELOCITY,
     opcodes::GRAPH90_SET_DISPLAY_OPTIONS,
     opcodes::GRAPH90_UPLOAD_MAP_TILE_DATA,
     opcodes::GRAPH90_IMPORT_EXTERNAL_IMAGE,
