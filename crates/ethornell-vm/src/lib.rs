@@ -7206,8 +7206,16 @@ impl Vm {
         }
     }
 
+    /// sub_48E8C0's fatal error for an address no segment maps.
+    fn invalid_pointer(ptr: u32) -> VmError {
+        VmError::Runtime(format!("無効なポインタ [ ${ptr:08X} ] にアクセスしようとしました"))
+    }
+
     fn resolve_range(&self, ptr: u32, size: usize) -> VmResult<std::ops::Range<usize>> {
         let addr = self.memory_addr(ptr);
+        if addr == u32::MAX {
+            return Err(Self::invalid_pointer(ptr));
+        }
         let start = addr as usize;
         let end = start
             .checked_add(size)
@@ -7224,6 +7232,9 @@ impl Vm {
         size: usize,
     ) -> VmResult<std::ops::Range<usize>> {
         let addr = self.memory_addr(ptr);
+        if addr == u32::MAX {
+            return Err(Self::invalid_pointer(ptr));
+        }
         let start = addr as usize;
         let end = start
             .checked_add(size)
@@ -17761,7 +17772,7 @@ mod tests {
             .unwrap_err();
         // Reading past the window is an invalid pointer before the
         // terminator check can run.
-        assert!(matches!(error, crate::VmError::MemoryOutOfBounds { .. }), "{error}");
+        assert!(error.to_string().contains("無効なポインタ"), "{error}");
     }
 
     #[test]
@@ -18752,9 +18763,10 @@ mod tests {
                 Value::Ptr(source),
                 Value::Int(length),
             ]);
+            // Past the global window (invalid pointer) or a huge length.
             assert!(matches!(
                 vm.dispatch(&instruction, &mut api),
-                Err(super::VmError::MemoryOutOfBounds { .. })
+                Err(super::VmError::MemoryOutOfBounds { .. } | super::VmError::Runtime(_))
             ));
             assert!(vm.stack.is_empty());
         }
