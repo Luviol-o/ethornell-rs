@@ -39,6 +39,14 @@ impl Default for RuntimeEffects {
 impl RuntimeEffects {
     /// System92:00 receives the target wrapper's reverse-pop order:
     /// [block_count, block_height, amplitude, quarter_period, slot].
+    pub(crate) fn rain_exists(&self, handle: i32) -> bool {
+        self.rain.contains_key(&handle)
+    }
+
+    pub(crate) fn rain_count(&self) -> usize {
+        self.rain.len()
+    }
+
     pub(crate) fn configure_compact_wave_table(&mut self, popped: &[Value]) -> bool {
         self.vector_revision = self.vector_revision.wrapping_add(1);
         let values = popped.iter().map(value_to_i32).collect::<Vec<_>>();
@@ -107,9 +115,11 @@ impl RuntimeEffects {
             }
             0x43 => effect.texture = payload.first().copied().unwrap_or(-1),
             0x44 => effect.enabled = payload.first().copied().unwrap_or_default() != 0,
+            // sub_477280: (x, y, blend mode, level, priority); stored as
+            // [x, y, priority, mode, level].
             0x45 => {
-                if let [x, y, z, blend, alpha] = payload.as_slice() {
-                    effect.display = [*x, *y, *z, *blend, *alpha];
+                if let [x, y, mode, level, priority] = payload.as_slice() {
+                    effect.display = [*x, *y, *priority, *mode, *level];
                 }
             }
             0x46 => copy_values(&mut effect.volume_bounds, &payload),

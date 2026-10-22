@@ -1881,13 +1881,16 @@ pub trait SoundApi {
         None
     }
 
+    /// sub_4417A0 statuses: 0, 7 (layer count), 8 (relative priority), 255
+    /// (handle). The tables are empty when `count` is outside 1..=16.
     fn configure_particle_frame_tables(
         &mut self,
         _handle: i32,
+        _count: i32,
         _first: &[i32],
         _second: &[i32],
-    ) -> bool {
-        false
+    ) -> i32 {
+        255
     }
 
     fn user_spline_exists(&self, _handle: i32) -> bool {
@@ -5624,9 +5627,11 @@ impl Vm {
                     let first_source = self.pop_ptr()?;
                     let count = self.pop_int()?;
                     let handle = self.pop_int()?;
-                    if !(1..=16).contains(&count) {return Err(VmError::Runtime("C0:06: depth plane count must be 1..16".into()));}
-                    let count=count as usize;
-                    let (first, second) = if count == 1 && first_source == 0 {
+                    let layers = count;
+                    let count = if (1..=16).contains(&count) { count as usize } else { 0 };
+                    let (first, second) = if count == 0 {
+                        (Vec::new(), Vec::new())
+                    } else if count == 1 && first_source == 0 {
                         (vec![0x7fff], vec![0])
                     } else {
                         let mut first = Vec::with_capacity(count);
@@ -5646,8 +5651,25 @@ impl Vm {
                         }
                         (first, second)
                     };
-                    if !api.configure_particle_frame_tables(handle, &first, &second) {
-                        return Err(VmError::Runtime("C0:06: invalid particle frame table configuration".into()));
+                    // sub_4760C0: handle (255), count 1..=16 (7), each
+                    // relative priority plus the screen's within 0xFFFF (8).
+                    match api.configure_particle_frame_tables(handle, layers, &first, &second) {
+                        0 => {}
+                        7 => {
+                            return Err(VmError::Runtime(format!(
+                                "無効なレイヤー数 [ {layers} ] が指定されました"
+                            )));
+                        }
+                        8 => {
+                            return Err(VmError::Runtime(
+                                "指定された相対プライオリティの中に無効なものが存在します".into(),
+                            ));
+                        }
+                        _ => {
+                            return Err(VmError::Runtime(
+                                "無効なパーティクルスクリーンハンドルが指定されました".into(),
+                            ));
+                        }
                     }
                     Some(Value::None)
                 } else if code == 0xc0 && matches!(id, 0x25 | 0x2d) {
@@ -5664,17 +5686,17 @@ impl Vm {
                     let mut call = NativeCallFrame::new(NativeOpcode {group: code, id}, args);
                     Some(api.call_user(&mut call)?.unwrap_or(Value::None))
                 } else if (code, id) == (0xc0, 0xc2) {
-                    // sub_476E40 / sub_494A60: [handle, duration,
-                    // point_record_ptr, point_count]. Every point occupies
-                    // four DWORDs; x/y/z are the first three and the fourth is
-                    // target padding.
-                    let count = self.pop_int()?;
-                    let source = self.pop_ptr()?;
+                    // sub_4777B0 -> sub_495550: [handle, point_count,
+                    // point_record_ptr, duration]; count and duration are
+                    // compared unsigned (2, 3) before the handle (1). Every
+                    // point occupies four DWORDs; x/y/z are the first three.
                     let duration = self.pop_int()?;
+                    let source = self.pop_ptr()?;
+                    let count = self.pop_int()?;
                     let handle = self.pop_int()?;
-                    let status = if count < 2 {
+                    let status = if (count as u32) < 2 {
                         2
-                    } else if duration < 2 {
+                    } else if (duration as u32) < 2 {
                         3
                     } else if !api.user_spline_exists(handle) {
                         1

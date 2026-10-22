@@ -18625,7 +18625,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: USER_C0_00_PARAMETERS,
         returns: "particle-screen handle",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_4755B0 -> sub_490CD0 -> sub_441130 allocates one of eight CDspObjPrtclScrn slots and returns a 0xC0000000-tagged handle.",
+        notes: "sub_475F20 -> sub_4414F0: eight screens first, then the size; target texts.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::USER2_RELEASE_PARTICLE_SCREEN,
@@ -18633,7 +18633,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: USER_C0_01_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_475650 -> sub_490CE0 -> sub_441280 releases one particle-screen slot.",
+        notes: "sub_475FC0: unknown screen fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::USER2_SET_PARTICLE_SCREEN_ENABLED,
@@ -18641,7 +18641,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: USER_C0_04_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_475680 -> sub_490CF0 -> sub_441300 changes the particle display-object enable state.",
+        notes: "sub_475FF0: unknown screen fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::USER2_CONFIGURE_PARTICLE_SCREEN_DISPLAY,
@@ -18649,7 +18649,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: USER_C0_05_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "BGI 1.622 sub_476030 -> sub_424A10 applies x/y, blend, inverse alpha and priority. Per-plane priority offsets are installed by C0:06.",
+        notes: "sub_476030: priority, level, mode validators, then the screen.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::USER2_CONFIGURE_PARTICLE_FRAME_TABLES,
@@ -18657,7 +18657,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: USER_C0_06_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_475750 -> sub_490D20 -> sub_4413E0/sub_4246E0 builds the particle frame tables; VM mediation owns both raw DWORD arrays.",
+        notes: "sub_4760C0 -> sub_4417A0 -> sub_424A50/sub_425010: screen 255, 1..=16 layers 7, relative priority + screen priority <= 0xFFFF 8; one layer defaults to 0x7FFF.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::USER2_COMMIT_PARTICLE_SCREEN,
@@ -18665,7 +18665,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: USER_C0_08_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_475800 -> sub_490D40 -> sub_441480 commits/resets the particle-screen native state.",
+        notes: "sub_476170: unknown screen fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::USER2_SET_PARTICLE_AUTO_UPDATE,
@@ -18673,7 +18673,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: USER_C0_09_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_475830 -> sub_490C30 maintains the target automatic particle-update linked list.",
+        notes: "sub_4761A0: unknown screen fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::USER2_SET_PARTICLE_CAPACITY,
@@ -18681,7 +18681,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: USER_C0_0A_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "BGI 1.622 sub_4761E0 -> sub_441870 -> sub_424C00 writes the dirty-rectangle redraw threshold (+368), not particle capacity. The portable renderer redraws the full frame.",
+        notes: "sub_4761E0: unknown screen fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::USER2_CONFIGURE_PARTICLE_EMITTER_TRANSFORM,
@@ -18689,7 +18689,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: USER_C0_0B_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_4758B0 -> sub_490D60 -> sub_4414E0/sub_424A10 forwards the recovered ten-value emitter transform/layout contract.",
+        notes: "sub_476220 -> sub_4418A0: screen, then the scale (3).",
     },
     NativeOpcodeSpec {
         opcode: opcodes::USER2_SET_PARTICLE_EMISSION_PERCENT,
@@ -18697,7 +18697,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: USER_C0_0C_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "BGI 1.622 sub_476330 -> sub_424DD0 sets simulation interval 0..100ms, not emission percentage; zero suspends advancement. It recomputes air-field segment durations.",
+        notes: "sub_476330 -> sub_441900: screen, then the interval (4).",
     },
     NativeOpcodeSpec {
         opcode: opcodes::USER2_ADVANCE_PARTICLE_SCREEN,
@@ -18705,7 +18705,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: USER_C0_0D_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_475A40 -> sub_490DA0 -> sub_441580 advances the particle simulation.",
+        notes: "sub_4763B0: unknown screen fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::USER2_RESET_PARTICLE_SCREEN,
@@ -18713,7 +18713,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: USER_C0_0F_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_475A80 -> sub_490DB0 -> sub_4415B0 resets the particle generator.",
+        notes: "sub_4763F0: unknown screen fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::USER2_CONFIGURE_PARTICLE_EMITTER,
@@ -18721,7 +18721,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: USER_C0_10_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_475AB0 -> sub_490DC0 -> sub_4415E0/sub_424A70 configures the target particle emitter with eleven fields plus handle.",
+        notes: "sub_476420: unknown screen fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::USER2_CONFIGURE_PARTICLE_ANIMATION_BANK,
@@ -18729,7 +18729,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: USER_C0_18_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_475B80 configures the target particle animation/resource bank and preserves its positional ABI.",
+        notes: "sub_4764F0 -> sub_491900: bitmaps exist, type, pattern, count <= 32, one RGB/ARGB size, target texts.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::USER2_LOAD_PARTICLE_ANIMATION_FRAMES,
@@ -18737,7 +18737,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: USER_C0_1A_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_475CD0 loads a particle animation frame range/resource configuration.",
+        notes: "sub_476640 -> sub_491A60: mixing ratio, bitmaps, type 1, pattern, count, suitability.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::USER2_COMMIT_PARTICLE_ANIMATION_FRAMES,
@@ -18745,7 +18745,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: USER_C0_1B_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_475E40 commits one particle animation frame configuration.",
+        notes: "sub_4767B0 -> sub_491BC0: mixing ratio, type, pattern, secondary image present.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::USER2_SET_PARTICLE_INTERPOLATION_MODE,
@@ -18753,7 +18753,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: USER_C0_1F_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_475F20 -> sub_4910E0 accepts exactly interpolation modes 0, 1, and 2.",
+        notes: "sub_476890 -> sub_491BE0: control mode <= 2.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::USER2_SET_PARTICLE_STYLE0,
@@ -18761,7 +18761,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: USER_C0_20_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_475F80 -> sub_491100/sub_441640 configures one target particle style path and maps target status codes.",
+        notes: "sub_4768F0 -> sub_441A00: screen, pattern (10), maximum count (6).",
     },
     NativeOpcodeSpec {
         opcode: opcodes::USER2_DEFINE_PARTICLE_STYLE0,
@@ -18769,7 +18769,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: USER_C0_24_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_476040 defines one particle style/resource selector.",
+        notes: "sub_4769B0 -> sub_491900(0, ...): bitmap, pattern, particle-suitable bitmap.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::USER2_CONFIGURE_PARTICLE_STYLE0,
@@ -18777,7 +18777,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: USER_C0_25_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_476110 dereferences the top target pointer and configures the first extended particle style.",
+        notes: "sub_476A80 -> sub_491C20: pattern < 64.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::USER2_SET_PARTICLE_STYLE1,
@@ -18785,7 +18785,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: USER_C0_28_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_476240 -> sub_491160/sub_4416A0 configures the second target particle style path.",
+        notes: "sub_476BB0 -> sub_441A60: screen, pattern, maximum count.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::USER2_CONFIGURE_PARTICLE_STYLE1,
@@ -18793,7 +18793,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: USER_C0_29_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_476300 -> sub_491180/sub_441700 forwards the recovered sixteen-value style contract.",
+        notes: "sub_476C70 -> sub_441AC0: screen, pattern.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::USER2_DEFINE_PARTICLE_STYLE1,
@@ -18801,7 +18801,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: USER_C0_2C_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_476490 defines the second particle style/resource selector.",
+        notes: "sub_476E00 -> sub_491900(1, ...): as 24.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::USER2_CONFIGURE_PARTICLE_ADVANCED_STYLE,
@@ -18809,7 +18809,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: USER_C0_2D_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_476560 dereferences its fourth native pop and forwards the eighteen-value advanced particle style contract.",
+        notes: "sub_476ED0 -> sub_491CD0: pattern < 64.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::USER2_CREATE_RAIN_SCREEN,
@@ -18817,7 +18817,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: USER_C0_40_PARAMETERS,
         returns: "rain-screen handle",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_476720 -> sub_492150 -> sub_4418B0 allocates one of eight CDspObjRainScrn slots and returns a 0xC1000000-tagged handle.",
+        notes: "sub_477090 -> sub_441C70: eight screens, then the size.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::USER2_RELEASE_RAIN_SCREEN,
@@ -18825,7 +18825,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: USER_C0_41_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_4767C0 -> sub_492160 -> sub_441A00 releases one rain-screen slot.",
+        notes: "sub_477130: unknown screen fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::USER2_INITIALIZE_RAIN_SCREEN,
@@ -18833,7 +18833,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: USER_C0_42_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_4767F0 -> sub_492170 -> sub_441A80/sub_424F80 creates and initializes the native rain generator.",
+        notes: "sub_477160: unknown screen fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::USER2_SET_RAIN_TEXTURE,
@@ -18841,7 +18841,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: USER_C0_43_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_476830 -> sub_492180 -> sub_441AB0/sub_425620 validates and assigns a type-3 graph resource.",
+        notes: "sub_4771A0 -> sub_4259A0: screen, -1 clears, missing (4), not a screen-sized grayscale mask (5).",
     },
     NativeOpcodeSpec {
         opcode: opcodes::USER2_SET_RAIN_ENABLED,
@@ -18849,7 +18849,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: USER_C0_44_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_4768D0 -> sub_492190 -> sub_441B30 changes the rain display-object enable state.",
+        notes: "sub_477240: unknown screen fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::USER2_CONFIGURE_RAIN_DISPLAY,
@@ -18857,7 +18857,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: USER_C0_45_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_476910 -> sub_4921A0 -> sub_441BA0 configures the rain display transform and composition state.",
+        notes: "sub_477280: priority (p5), level (p4), blend mode (p3) validators then the screen; (x, y, mode, level, priority).",
     },
     NativeOpcodeSpec {
         opcode: opcodes::USER2_SET_RAIN_VOLUME_BOUNDS,
@@ -18865,7 +18865,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: USER_C0_46_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_4769B0 -> sub_4921C0 -> sub_441C20/sub_425160 updates CDspObjRainScrn fields 77..82.",
+        notes: "sub_477320: unknown screen fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::USER2_SET_RAIN_DROP_WIDTH,
@@ -18873,7 +18873,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: USER_C0_47_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_476A40 -> sub_4921E0 -> sub_441CB0/sub_4251D0 stores width << 8.",
+        notes: "sub_4773B0 -> sub_425550: screen, zero fall distance per stage.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::USER2_SET_RAIN_DROP_HEIGHT,
@@ -18881,7 +18881,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: USER_C0_48_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_476AC0 -> sub_4921F0 -> sub_441D30/sub_425220 stores height << 8.",
+        notes: "sub_477430 -> sub_4255A0: screen, zero rain length.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::USER2_SET_RAIN_COLOR,
@@ -18889,7 +18889,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: USER_C0_49_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_476B40 -> sub_492200 -> sub_441DB0/sub_425270 updates CDspObjRainScrn field 88.",
+        notes: "sub_4774B0: unknown screen fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::USER2_SET_RAIN_DENSITY,
@@ -18897,7 +18897,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: USER_C0_4A_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_476B80 -> sub_492210 -> sub_441E30/sub_4252C0 updates CDspObjRainScrn field 90.",
+        notes: "sub_4774F0: unknown screen fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::USER2_SET_RAIN_SPEED,
@@ -18905,7 +18905,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: USER_C0_4B_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_476BC0 -> sub_492220 -> sub_441EB0/sub_425310 updates CDspObjRainScrn field 91.",
+        notes: "sub_477530 -> sub_425690: screen, zero time per stage.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::USER2_SET_RAIN_ORIGIN,
@@ -18913,7 +18913,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: USER_C0_4C_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_476C40 -> sub_492230 -> sub_441F30/sub_425360 updates CDspObjRainScrn fields 93..95.",
+        notes: "sub_4775B0: unknown screen fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::USER2_SET_RAIN_DIRECTION,
@@ -18921,7 +18921,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: USER_C0_4D_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_476CA0 -> sub_492250 -> sub_441FB0/sub_4253B0 updates CDspObjRainScrn fields 96..98.",
+        notes: "sub_477610: unknown screen fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::USER2_SET_RAIN_LENGTH,
@@ -18929,7 +18929,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: USER_C0_4E_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_476D00 -> sub_492270 -> sub_442030/sub_425400 updates CDspObjRainScrn field 99.",
+        notes: "sub_477670 -> sub_425780: screen, zero projection.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::USER2_SET_RAIN_STEP,
@@ -18937,7 +18937,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: USER_C0_4F_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_476D80 -> sub_492280 resets the global rain timer, stores the update interval, applies the native step, and wakes the renderer.",
+        notes: "sub_4776F0 -> sub_492D80: frame rate 1..=1000.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::USER2_CREATE_SPLINE,
@@ -18945,7 +18945,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: NO_PARAMETERS,
         returns: "spline handle",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_476DF0 -> sub_494930 allocates a stable CSpline registry handle.",
+        notes: "sub_477760 -> sub_495420: new spline id.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::USER2_RELEASE_SPLINE,
@@ -18953,7 +18953,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: USER_C0_C1_PARAMETERS,
         returns: "0 success, 1 missing",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_476E10 -> sub_4949E0 removes one CSpline registry entry.",
+        notes: "sub_477780 -> sub_4954D0: 1 when unknown.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::USER2_CONFIGURE_SPLINE,
@@ -18961,7 +18961,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: USER_C0_C2_PARAMETERS,
         returns: "0 success, 1 missing, 2 count, 3 duration",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_476E40 -> sub_494A60 builds independent natural cubic splines for x/y/z; VM mediation reads 16-byte records.",
+        notes: "sub_4777B0 -> sub_495550: [handle, count, points, duration]; count < 2 (2), duration < 2 (3) unsigned, then handle (1).",
     },
     NativeOpcodeSpec {
         opcode: opcodes::USER2_SAMPLE_SPLINE,
@@ -18969,7 +18969,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: USER_C0_C3_PARAMETERS,
         returns: "0 success, 1 missing, 4 range, -1 failure",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_476E90 -> sub_494AE0 samples the natural cubic spline and writes one XYZ triple through VM memory.",
+        notes: "sub_477800 -> sub_4955D0: handle 1, time beyond duration 4, -1 on sampling failure.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::USER2_LOAD_BWEF_TABLE,
@@ -18977,7 +18977,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: USER_C0_F0_PARAMETERS,
         returns: "target BWEF status",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_476ED0 -> sub_4066C0 validates the exact bwef magic/length and writes the table and count; VM mediation owns caller memory.",
+        notes: "sub_477840 -> sub_4066C0: BWEF table load.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH_SET_PERSISTENT_TEXT_STYLE,
@@ -20262,9 +20262,6 @@ const PORTABLE_EQUIVALENT_OPCODES: &[NativeOpcode] = &[
     opcodes::USER_QUERY_FONT_CAPABILITY,
     opcodes::USER_SET_FONT_ALIAS,
     opcodes::USER_SET_DESKTOP_WALLPAPER,
-];
-
-const PARTIAL_IMPLEMENTATION_OPCODES: &[NativeOpcode] = &[
     opcodes::USER2_CREATE_PARTICLE_SCREEN,
     opcodes::USER2_RELEASE_PARTICLE_SCREEN,
     opcodes::USER2_SET_PARTICLE_SCREEN_ENABLED,
@@ -20305,6 +20302,9 @@ const PARTIAL_IMPLEMENTATION_OPCODES: &[NativeOpcode] = &[
     opcodes::USER2_SET_RAIN_DIRECTION,
     opcodes::USER2_SET_RAIN_LENGTH,
     opcodes::USER2_SET_RAIN_STEP,
+];
+
+const PARTIAL_IMPLEMENTATION_OPCODES: &[NativeOpcode] = &[
     opcodes::SYS_GET_SPECIAL_FOLDER,
     opcodes::SYS_OPEN_FILE_DIALOG,
     opcodes::SYS81_SHOW_RESOURCE_FILE_DIALOG,
@@ -20805,7 +20805,7 @@ mod tests {
         assert_eq!(frame.recovery_level(), NativeRecoveryLevel::TargetConfirmed);
         assert_eq!(
             frame.implementation_level(),
-            NativeImplementationLevel::Partial
+            NativeImplementationLevel::PortableEquivalent
         );
     }
 

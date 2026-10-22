@@ -9481,7 +9481,7 @@ mod rain_screen_tests {
     fn rain_drops(api: &RuntimeTraceApi) -> Vec<(f32, i32)> {
         api.graph_draw_items()
             .iter()
-            .filter(|item| item.key == "test:rain-drop")
+            .filter(|item| Some(item.key.as_str()) == api.resolve_resource_key(30_001))
             .map(|item| (item.opacity, item.z))
             .collect()
     }
@@ -9503,13 +9503,21 @@ mod rain_screen_tests {
                 rgba: vec![255; 4 * 16 * 4],
             },
         );
-        api.graph_resources.insert(
+        // C0:43 takes a screen-sized grayscale mask (sub_4259A0).
+        let (width, height) = crate::snapshot::runtime_frame_size(&api);
+        api.store_runtime_bitmap(
             30_001,
-            RuntimeGraphResource::whole("test:rain-drop".to_string()),
+            DecodedImage {
+                width,
+                height,
+                rgba: vec![255; width as usize * height as usize * 4],
+            },
+            3,
         );
 
-        // As `rainfall._bp`: create, initialise, drop size, texture, enable,
-        // then ConfigureRainDisplay(x, y, z, blend, alpha) fully transparent.
+        // As `rainfall._bp`: create, initialise, fall distance, length,
+        // mask, enable, then ConfigureRainDisplay(x, y, blend mode, level,
+        // priority) fully transparent.
         let rain = match call(&mut api, 0xC0, 0x40, &[1280, 960]).unwrap() {
             Some(Value::Int(handle)) => handle,
             other => panic!("rain screen not created: {other:?}"),
@@ -9520,7 +9528,7 @@ mod rain_screen_tests {
         call(&mut api, 0xC0, 0x48, &[rain, 16]).unwrap();
         call(&mut api, 0xC0, 0x43, &[rain, 30_001]).unwrap();
         call(&mut api, 0xC0, 0x44, &[rain, 1]).unwrap();
-        call(&mut api, 0xC0, 0x45, &[rain, 0, 0, 40, 1, 256]).unwrap();
+        call(&mut api, 0xC0, 0x45, &[rain, 0, 0, 1, 256, 40]).unwrap();
         assert!(rain_drops(&api).is_empty(), "transparent rain is not drawn");
 
         call(&mut api, 0x90, 0x3A, &[rain, 70]).unwrap();
@@ -26654,14 +26662,17 @@ impl ethornell_vm::SoundApi for RuntimeTraceApi {
     fn configure_particle_frame_tables(
         &mut self,
         handle: i32,
+        count: i32,
         first: &[i32],
         second: &[i32],
-    ) -> bool {
-        let mut state=std::mem::take(&mut self.native_effect);
-        let valid=state.configure_particle_frame_tables(handle,first,second);
-        if valid {self.render_native_particle_screen(&mut state,handle,self.engine_time_ms as u32,false);}
-        self.native_effect=state;
-        valid
+    ) -> i32 {
+        let mut state = std::mem::take(&mut self.native_effect);
+        let status = state.configure_particle_frame_tables(handle, count, first, second);
+        if status == 0 {
+            self.render_native_particle_screen(&mut state, handle, self.engine_time_ms as u32, false);
+        }
+        self.native_effect = state;
+        status
     }
 
     fn user_spline_exists(&self, handle: i32) -> bool {

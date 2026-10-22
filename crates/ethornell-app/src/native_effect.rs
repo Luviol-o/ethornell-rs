@@ -34,6 +34,8 @@ struct NativeParticleScreen {
     layers: Vec<i32>,
 }
 
+const PARTICLE_SCREEN_HANDLE: &str = "無効なパーティクルスクリーンハンドルが指定されました";
+
 impl NativeParticleScreen {
     fn new(handle: i32, width: i32, height: i32) -> Self {
         Self {
@@ -93,23 +95,25 @@ impl NativeEffectState {
         self.particle_screens.get_mut(&handle)
     }
 
+    /// sub_4417A0 -> sub_424A50 / sub_425010.
     pub(super) fn configure_particle_frame_tables(
         &mut self,
         handle: i32,
+        count: i32,
         first: &[i32],
         second: &[i32],
-    ) -> bool {
+    ) -> i32 {
         let Some(screen) = self.particle_screens.get_mut(&handle) else {
-            return false;
+            return 255;
         };
-        if first.is_empty()
-            || first.len() > 16
-            || first.len() != second.len()
-            || second
-                .iter()
-                .any(|offset| !(0..=65535).contains(&screen.display[2].wrapping_add(*offset)))
+        if (count as u32).wrapping_sub(1) > 0xF || first.len() != count as usize {
+            return 7;
+        }
+        if second
+            .iter()
+            .any(|offset| (offset.wrapping_add(screen.display[2]) as u32) > 0xFFFF)
         {
-            return false;
+            return 8;
         }
         screen.frame_count = first.len();
         screen.frame_tables = [
@@ -120,7 +124,7 @@ impl NativeEffectState {
                 second.to_vec()
             },
         ];
-        true
+        0
     }
 
     pub(super) fn create_spline(&mut self) -> i32 {
@@ -310,23 +314,34 @@ impl RuntimeTraceApi {
             .collect::<Vec<_>>();
         a.reverse();
         let mut state = std::mem::take(&mut self.native_effect);
-        let fail = |reason: &str| VmError::Runtime(format!("C0:{id:02X}: {reason}"));
+        // Target texts of sub_475F20..sub_476ED0.
+        let fail = |text: String| VmError::Runtime(text);
+        let handle_error = || VmError::Runtime(PARTICLE_SCREEN_HANDLE.into());
         let now = self.engine_time_ms as u32;
         let result = (|| -> ethornell_vm::VmResult<Value> {
             let mut render = None;
             match id {
+                // sub_4414F0: the eight slots before the size.
                 0 => {
+                    if state.particle_screens.len() >= 8 {
+                        return Err(fail(
+                            "これ以上、パーティクルスクリーンオブジェクトを生成することはできません".into(),
+                        ));
+                    }
                     if a[0] <= 0
                         || a[1] <= 0
                         || (a[0] as usize)
                             .checked_mul(a[1] as usize)
                             .is_none_or(|n| n > 16 * 1024 * 1024)
                     {
-                        return Err(fail("invalid screen dimensions"));
+                        return Err(fail(format!(
+                            "無効なスクリーンサイズ [ {} , {} ] が指定されました",
+                            a[0], a[1]
+                        )));
                     }
-                    let handle = state
-                        .allocate_particle_screen(a[0], a[1])
-                        .ok_or_else(|| fail("all eight particle screens are occupied"))?;
+                    let handle = state.allocate_particle_screen(a[0], a[1]).ok_or_else(|| {
+                        fail("これ以上、パーティクルスクリーンオブジェクトを生成することはできません".into())
+                    })?;
                     state.particle_screens.get_mut(&handle).unwrap().world.clock = now;
                     self.display_tree.register_inferred(handle);
                     self.graph_object_enabled.insert(handle, true);
@@ -339,7 +354,7 @@ impl RuntimeTraceApi {
                 }
                 1 => {
                     if !state.release_particle_screen(a[0]) {
-                        return Err(fail("invalid particle screen"));
+                        return Err(handle_error());
                     }
                     self.remove_graph_object(a[0]);
                 }
@@ -347,18 +362,18 @@ impl RuntimeTraceApi {
                     let s = state
                         .particle_screens
                         .get_mut(&a[0])
-                        .ok_or_else(|| fail("invalid particle screen"))?;
+                        .ok_or_else(handle_error)?;
                     s.enabled = a[1] != 0;
                     self.set_graph_object_enabled(a[0], s.enabled);
                 }
                 5 => {
-                    if !is_native_blend_mode(a[3]) || a[4] as u32 > 256 || a[5] as u32 >= 65536 {
-                        return Err(fail("invalid blend, transparency or priority"));
-                    }
+                    target_checks::priority(a[5])?;
+                    target_checks::effect_level(a[4])?;
+                    target_checks::effect_mode(a[3])?;
                     let s = state
                         .particle_screens
                         .get_mut(&a[0])
-                        .ok_or_else(|| fail("invalid particle screen"))?;
+                        .ok_or_else(handle_error)?;
                     s.display = [a[1], a[2], a[5], a[3], a[4]];
                     let p = self.graph_object_properties.entry(a[0]).or_default();
                     p.blend_mode = a[3];
@@ -374,7 +389,7 @@ impl RuntimeTraceApi {
                     let s = state
                         .particle_screens
                         .get_mut(&a[0])
-                        .ok_or_else(|| fail("invalid particle screen"))?;
+                        .ok_or_else(handle_error)?;
                     s.commit();
                     render = Some((a[0], false));
                 }
@@ -382,7 +397,7 @@ impl RuntimeTraceApi {
                     let s = state
                         .particle_screens
                         .get_mut(&a[0])
-                        .ok_or_else(|| fail("invalid particle screen"))?;
+                        .ok_or_else(handle_error)?;
                     if s.auto_update_interval_ms == 0 && a[1] != 0 {
                         s.auto_update_deadline = now;
                     }
@@ -392,17 +407,18 @@ impl RuntimeTraceApi {
                     let s = state
                         .particle_screens
                         .get_mut(&a[0])
-                        .ok_or_else(|| fail("invalid particle screen"))?;
+                        .ok_or_else(handle_error)?;
                     s.native_field_340 = a[1];
                 }
+                // sub_4418A0: handle, then sub_424D90 refuses the scale.
                 11 => {
-                    if a[7] <= 0 {
-                        return Err(fail("perspective distance must be positive"));
-                    }
                     let s = state
                         .particle_screens
                         .get_mut(&a[0])
-                        .ok_or_else(|| fail("invalid particle screen"))?;
+                        .ok_or_else(handle_error)?;
+                    if a[7] <= 0 {
+                        return Err(fail(format!("無効な縮尺 [ {} ] が指定されました", a[7])));
+                    }
                     s.emitter_layout = a[1..].to_vec();
                     s.world.camera = [a[1] >> 8, a[2] >> 8, a[3] >> 8];
                     s.world.rotation =
@@ -410,14 +426,15 @@ impl RuntimeTraceApi {
                     s.world.focal = a[7];
                     s.world.center = [a[8], a[9]];
                 }
+                // sub_441900: handle, then the interval.
                 12 => {
-                    if a[1] as u32 > 100 {
-                        return Err(fail("simulation interval exceeds 100"));
-                    }
                     let s = state
                         .particle_screens
                         .get_mut(&a[0])
-                        .ok_or_else(|| fail("invalid particle screen"))?;
+                        .ok_or_else(handle_error)?;
+                    if a[1] as u32 > 100 {
+                        return Err(fail(format!("無効な処理間隔 [ {} ] が指定されました", a[1])));
+                    }
                     s.emission_percent = a[1];
                     s.world.interval = a[1] as u32;
                     s.world.retime_environment();
@@ -426,7 +443,7 @@ impl RuntimeTraceApi {
                     let s = state
                         .particle_screens
                         .get_mut(&a[0])
-                        .ok_or_else(|| fail("invalid particle screen"))?;
+                        .ok_or_else(handle_error)?;
                     let mut rng = |n| self.native_particle_random(n);
                     s.world
                         .warm_up(a[1] as u32, now, &state.particle_banks, &mut rng);
@@ -436,7 +453,7 @@ impl RuntimeTraceApi {
                     let s = state
                         .particle_screens
                         .get_mut(&a[0])
-                        .ok_or_else(|| fail("invalid particle screen"))?;
+                        .ok_or_else(handle_error)?;
                     s.world.reset();
                     s.commit_count = 0;
                     s.advance_count = 0;
@@ -445,7 +462,7 @@ impl RuntimeTraceApi {
                     let s = state
                         .particle_screens
                         .get_mut(&a[0])
-                        .ok_or_else(|| fail("invalid particle screen"))?;
+                        .ok_or_else(handle_error)?;
                     s.emitter_configuration = a[1..].to_vec();
                     s.world
                         .configure_environment(&a, &mut |n| self.native_particle_random(n));
@@ -499,32 +516,57 @@ impl RuntimeTraceApi {
                             (id == 26).then(|| a[7]),
                         )
                     };
-                    if kind as u32 >= 2 || bank as u32 >= 64 || id == 26 && kind != 1 {
-                        return Err(fail("invalid particle kind or animation bank"));
+                    // sub_491900 / sub_491A60: every bitmap exists (4), then
+                    // the type (1), the pattern (2), at most 32 frames (6),
+                    // one RGB/ARGB format and size (5).
+                    if id == 26 {
+                        target_checks::mixing_ratio(a[7])?;
                     }
-                    if frames as u32 > 32 {
-                        return Err(fail("animation bank exceeds 32 frames"));
-                    }
+                    let single = id == 36 || id == 44;
+                    let range = |first: i32, frames: i32| {
+                        format!("{first} ～{}", first.wrapping_add(frames).wrapping_sub(1))
+                    };
                     let mut images = Vec::new();
                     let mut format = 0;
-                    let mut dimensions = None;
+                    let mut shapes = Vec::new();
                     if frames != 0 && first != -1 {
-                        for offset in 0..frames {
+                        for offset in 0..frames.clamp(0, 64) {
                             let resource = first.wrapping_add(offset);
-                            let image = self
-                                .graph_bitmap_image(resource)
-                                .ok_or_else(|| fail("missing animation bitmap"))?;
+                            let Some(image) = self.graph_bitmap_image(resource) else {
+                                return Err(fail(format!(
+                                    "指定されたビットマップ [ {first} ] は存在しません"
+                                )));
+                            };
                             let f = self.bitmap_formats.get(&resource).copied().unwrap_or(2);
-                            let shape = (image.width, image.height, f);
-                            if !matches!(f, 1 | 2) || dimensions.is_some_and(|d| d != shape) {
-                                return Err(fail(
-                                    "animation frames must share RGB/ARGB format and dimensions",
-                                ));
-                            }
-                            format = f;
-                            dimensions = Some(shape);
+                            shapes.push((image.width, image.height, f));
                             images.push(image);
                         }
+                    }
+                    if kind as u32 >= 2 || id == 26 && kind != 1 {
+                        return Err(fail(format!("無効なパーティクルタイプ [ {kind} ] が指定されました")));
+                    }
+                    if bank as u32 >= 64 {
+                        return Err(fail(if single {
+                            format!("無効なパターン番号 [ {bank} ] が指定されました")
+                        } else {
+                            format!("無効なオブジェクトパターン [ {bank} ] が指定されました")
+                        }));
+                    }
+                    if frames as u32 > 32 {
+                        return Err(fail(format!("無効なビットマップ数 [ {frames} ] が指定されました")));
+                    }
+                    if let Some(&shape) = shapes.first() {
+                        if !matches!(shape.2, 1 | 2) || shapes.iter().any(|other| *other != shape) {
+                            return Err(fail(if single {
+                                format!("指定されたビットマップ [ {first} ] はパーティクルには使用できません")
+                            } else {
+                                format!(
+                                    "指定されたビットマップ [ {} ] の中に適合しないものが含まれています",
+                                    range(first, frames)
+                                )
+                            }));
+                        }
+                        format = shape.2;
                     }
                     let animation = native_particle::ParticleBank::new(images, format, speed);
                     if let Some(mix) = mix {
@@ -542,21 +584,30 @@ impl RuntimeTraceApi {
                     }
                 }
                 27 => {
-                    if a[0] != 1
-                        || a[1] as u32 >= 64
-                        || !state
-                            .particle_banks
-                            .secondary
-                            .get(&a[1])
-                            .is_some_and(|b| !b.frames.is_empty())
+                    // sub_4767B0: mixing ratio, then sub_491BC0.
+                    target_checks::mixing_ratio(a[2])?;
+                    if a[0] != 1 {
+                        return Err(fail(format!("無効なパーティクルタイプ [ {} ] が指定されました", a[0])));
+                    }
+                    if a[1] as u32 >= 64 {
+                        return Err(fail(format!("無効なオブジェクトパターン [ {} ] が指定されました", a[1])));
+                    }
+                    if !state
+                        .particle_banks
+                        .secondary
+                        .get(&a[1])
+                        .is_some_and(|b| !b.frames.is_empty())
                     {
-                        return Err(fail("secondary animation bank is absent"));
+                        return Err(fail(format!(
+                            "パーティクルタイプ [ {} ] のオブジェクトパターン [ {} ] には別イメージが設定されていません",
+                            a[0], a[1]
+                        )));
                     }
                     state.particle_banks.mix.insert(a[1], a[2]);
                 }
                 31 => {
                     if a[0] as u32 > 2 {
-                        return Err(fail("invalid interpolation mode"));
+                        return Err(fail(format!("無効な制御モード [ {} ] が指定されました", a[0])));
                     }
                     state.particle_interpolation_mode = a[0];
                 }
@@ -564,21 +615,23 @@ impl RuntimeTraceApi {
                     let s = state
                         .particle_screens
                         .get_mut(&a[0])
-                        .ok_or_else(|| fail("invalid particle screen"))?;
+                        .ok_or_else(handle_error)?;
+                    // sub_424E30 / sub_424E50: pattern (10), then count (6).
+                    if a[1] as u32 >= 64 {
+                        return Err(fail(format!("無効なパターン番号 [ {} ] が指定されました", a[1])));
+                    }
                     if !s.world.configure_count(
                         usize::from(id == 40),
                         a[1] as usize,
                         a[2],
                         a[3] as u32,
                     ) {
-                        return Err(fail(
-                            "invalid emitter bank or aggregate count exceeds 32768",
-                        ));
+                        return Err(fail(format!("無効な最大オブジェクト数 [ {} ] が指定されました", a[2])));
                     }
                 }
                 37 => {
                     if a[0] as u32 >= 64 {
-                        return Err(fail("invalid snow style bank"));
+                        return Err(fail(format!("無効なパターン番号 [ {} ] が指定されました", a[0])));
                     }
                     let mut style = [0i32; 11];
                     style[0] = 1;
@@ -596,9 +649,9 @@ impl RuntimeTraceApi {
                     let s = state
                         .particle_screens
                         .get_mut(&a[0])
-                        .ok_or_else(|| fail("invalid particle screen"))?;
+                        .ok_or_else(handle_error)?;
                     if a[1] as u32 >= 64 {
-                        return Err(fail("invalid firefly emitter bank"));
+                        return Err(fail(format!("無効なパターン番号 [ {} ] が指定されました", a[1])));
                     }
                     let e = &mut s.world.emitter[a[1] as usize];
                     e.copy_from_slice(&a[2..16]);
@@ -614,7 +667,7 @@ impl RuntimeTraceApi {
                 }
                 45 => {
                     if a[0] as u32 >= 64 {
-                        return Err(fail("invalid firefly style bank"));
+                        return Err(fail(format!("無効なパターン番号 [ {} ] が指定されました", a[0])));
                     }
                     let mut s = [0i32; 18];
                     s[0] = 1;
@@ -762,6 +815,9 @@ impl RuntimeTraceApi {
                     _ => unreachable!(),
                 };
                 let args = pop_args(stack, count);
+                if let Err(error) = self.check_rain_call(id, &args) {
+                    return Some(Err(error));
+                }
                 let result = match self.effects.call(group, id, &args) {
                     crate::effects::EffectCall::Handled(result) => result,
                     crate::effects::EffectCall::Unhandled => None,
@@ -796,6 +852,87 @@ impl RuntimeTraceApi {
         Some(Ok(value))
     }
 
+    /// sub_477090..sub_4776F0 and their cores, in target order. `popped`
+    /// is in pop order (last source argument first).
+    fn check_rain_call(&mut self, id: u16, popped: &[ethornell_vm::Value]) -> ethornell_vm::VmResult<()> {
+        use ethornell_vm::VmError;
+        let mut a = popped.iter().map(value_to_i32).collect::<Vec<_>>();
+        a.reverse();
+        let fail = |text: String| Err(VmError::Runtime(text));
+        let handle_error = || Err(VmError::Runtime("無効なレインスクリーンハンドルが指定されました".into()));
+        match id {
+            // sub_441C70: eight screens, then the size (sub_4253D0).
+            0x40 => {
+                if self.effects.rain_count() >= 8 {
+                    return fail("これ以上、レインスクリーンオブジェクトを生成することはできません".into());
+                }
+                if a[0] <= 0
+                    || a[1] <= 0
+                    || (a[0] as usize).checked_mul(a[1] as usize).is_none_or(|n| n > 16 * 1024 * 1024)
+                {
+                    return fail(format!("無効なスクリーンサイズ [ {} , {} ] が指定されました", a[0], a[1]));
+                }
+            }
+            // sub_4259A0: -1 clears; else a screen-sized format-3 bitmap.
+            0x43 => {
+                if !self.effects.rain_exists(a[0]) {
+                    return handle_error();
+                }
+                if a[1] != -1 {
+                    let Some(info) = ethornell_vm::GraphApi::query_bitmap_info(self, a[1]) else {
+                        return fail(format!(
+                            "指定されたマスキング用ビットマップ [ {} ] は存在しません",
+                            a[1]
+                        ));
+                    };
+                    let (width, height) = snapshot::runtime_frame_size(self);
+                    if info.format != 3 || info.width != width || info.height != height {
+                        return fail(format!(
+                            "指定されたマスキング用ビットマップ [ {} ] はグレイスケールではない、或いはレインスクリーンとサイズが一致しません",
+                            a[1]
+                        ));
+                    }
+                }
+            }
+            0x45 => {
+                crate::target_checks::priority(a[5])?;
+                crate::target_checks::effect_level(a[4])?;
+                crate::target_checks::effect_mode(a[3])?;
+                if !self.effects.rain_exists(a[0]) {
+                    return handle_error();
+                }
+            }
+            // sub_425550 / sub_4255A0 / sub_425690 / sub_425780: zero refused.
+            0x47 | 0x48 | 0x4B | 0x4E => {
+                if !self.effects.rain_exists(a[0]) {
+                    return handle_error();
+                }
+                if a[1] == 0 {
+                    let what = match id {
+                        0x47 => "ステージ当たりの落下距離",
+                        0x48 => "雨の長さ",
+                        0x4B => "ステージ当たりの時間",
+                        _ => "プロジェクション値",
+                    };
+                    return fail(format!("無効な{what} [ {} ] が指定されました", a[1]));
+                }
+            }
+            // sub_492D80: 1..=1000.
+            0x4F => {
+                if (a[1] as u32).wrapping_sub(1) > 999 {
+                    return fail(format!("無効なフレームレート [ {} ] が指定されました", a[1]));
+                }
+            }
+            0x41 | 0x42 | 0x44 | 0x46 | 0x49 | 0x4A | 0x4C | 0x4D => {
+                if !self.effects.rain_exists(a[0]) {
+                    return handle_error();
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     /// A rain screen (UserC0:40, tag 0xC1) is a display object like a
     /// particle screen (UserC0:00): scripts fade it with Graph90:22 and
     /// reorder it with Graph90:3A, so it is registered with the display tree
@@ -828,10 +965,7 @@ impl RuntimeTraceApi {
             }
             0x45 => {
                 let values = popped.iter().rev().map(value_to_i32).collect::<Vec<_>>();
-                if let [_, _, _, z, blend, alpha] = values.as_slice()
-                    && is_native_blend_mode(*blend)
-                    && (0..=256).contains(alpha)
-                {
+                if let [_, _, _, blend, alpha, z] = values.as_slice() {
                     let properties = self.graph_object_properties.entry(handle).or_default();
                     properties.blend_mode = *blend;
                     properties.set_alpha_parameter(*alpha);
@@ -879,12 +1013,10 @@ mod tests {
             .insert(1, RuntimeGraphResource::whole("test:snow".into()));
         api.bitmap_formats.insert(1, 2);
         let handle = call(&mut api, 0, &[64, 64]).as_i32();
-        assert!(SoundApi::configure_particle_frame_tables(
-            &mut api,
-            handle,
-            &[1, 32767],
-            &[0, 1]
-        ));
+        assert_eq!(
+            SoundApi::configure_particle_frame_tables(&mut api, handle, 2, &[1, 32767], &[0, 1]),
+            0
+        );
         call(&mut api, 0x0B, &[handle, 0, 0, 0, 0, 0, 0, 256, 32, 32]);
         call(&mut api, 0x24, &[0, 1]);
         call(&mut api, 0x25, &[0, 0, 0, 0, 65536, 0, 0, 0, 0, 0, 0]);

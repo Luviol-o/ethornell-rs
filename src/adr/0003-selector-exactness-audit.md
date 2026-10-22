@@ -293,6 +293,11 @@ drawing is not yet the target's; do these as one renderer pass):
   every draw, while sub_435640 adds it only with its ruby argument set.
 * 91:55 links: a sprite masked by another sprite (Sprite+0x160) is stored
   but not drawn as a mask.
+* Rain (C0:40..4F): the API is the target's, the drawing is not. C0:43
+  is a screen-sized grayscale mask that the app still draws as the drop
+  image, and the drop field from 46..4E is a guess; CDspObjRain's draw
+  needs reversing. Particle layers of C0:06 are stored and used for the
+  raster split only.
 * 91:18..1E: checks, texts and argument order are the target's; the
   kernels are not. 91:18/19 (sub_416B60 / sub_4179B0) are rotate-zoom
   blits: p1/p2 destination and p4/p5 source positions in 16.16, p6 the
