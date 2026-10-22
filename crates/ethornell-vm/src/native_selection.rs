@@ -50,11 +50,8 @@ impl Vm {
         let items = matches!(opcode.id, 0xA0 | 0xA2 | 0xA3);
         let limit = if items { 16 } else { 64 };
         let fatal = |message: String| Err(VmError::Runtime(message));
-        // sub_47EF80 / sub_47F540: the window first, then the procedure's
-        // count / initial item / column / focus-mode codes.
-        if !api.graph_window_exists(window) {
-            return fatal("無効なウィンドウハンドルが指定されました".into());
-        }
+        // sub_491F30 / sub_492370 check count, initial item, columns or
+        // the focus mode before the window is looked up (sub_440A80).
         if count.wrapping_sub(1) as u32 >= limit {
             return fatal(if items {
                 format!("無効な項目数 [ {count} ] が指定されました")
@@ -66,12 +63,17 @@ impl Vm {
             if a[6] < 0 || a[6] >= count {
                 return fatal(format!("無効な初期選択項目番号 [ {} ] が指定されました", a[6]));
             }
-            // The target accepts zero and subsequently divides by zero.
+            // sub_491F30 only rejects more than 16 (unsigned); zero passes
+            // and the target then divides by zero, which is reported here
+            // with the same text instead.
             if !(1..=16).contains(&a[3]) {
                 return fatal(format!("無効な縦列数 [ {} ] が指定されました", a[3]));
             }
         } else if a[4] as u32 > 3 {
             return fatal(format!("無効なフォーカスモード [ {} ] が指定されました", a[4]));
+        }
+        if !api.graph_window_exists(window) {
+            return fatal("無効なウィンドウハンドルが指定されました".into());
         }
         let data = if items {
             let text = self.read_counted_string_pointer_list(a[2] as u32, count as usize)?;

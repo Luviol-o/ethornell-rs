@@ -3577,13 +3577,18 @@ impl RuntimeTraceApi {
                     )
                 {
                     self.graph90_begin_sprite_configuration(args[0], 4);
+                    // sub_427490 -> sub_427C30: p7 goes to vtable+72
+                    // (SetAlpha, no range check), p8 to sub_41B9C0 (the
+                    // +196 mask alpha checked by sub_4989C0), p5 is the
+                    // maximum distance and p6 the ripple number.
                     self.graph90_set_common_state(
                         args[0],
                         Some((args[1], args[2])),
                         Some(1),
-                        Some(args[7]),
+                        None,
                         Some(args[9]),
                     );
+                    self.set_graph_object_alpha_recursive_raw(args[0], args[7]);
                     let properties = self.graph_object_properties.entry(args[0]).or_default();
                     properties.format_resource = Some(args[3]);
                     properties.mask_alpha = args[8];
@@ -4357,6 +4362,11 @@ impl RuntimeTraceApi {
                 let name = pop_string_value(stack).unwrap_or_default();
                 let namespace = pop_string_value(stack).unwrap_or_default();
                 let bitmap = pop_int_value(stack).unwrap_or_default();
+                // sub_47FF80 checks the bitmap number (sub_4986D0) before
+                // sub_401CE0 looks anything up.
+                if let Err(error) = target_checks::bitmap(bitmap) {
+                    return Some(Err(error));
+                }
                 let key = (namespace.to_ascii_lowercase(), name.to_ascii_lowercase());
                 // sub_401CE0: the BG registry first, then the DCCache.
                 let bytes = if consume {
@@ -4370,9 +4380,6 @@ impl RuntimeTraceApi {
                         .as_mut()
                         .and_then(|cache| cache.lookup(Some(&namespace), Some(&name), now))
                 });
-                if let Err(error) = target_checks::bitmap(bitmap) {
-                    return Some(Err(error));
-                }
                 // sub_402330: the BG's own pixel format (sub_401C10).
                 let loaded = bytes
                     .and_then(|bytes| {

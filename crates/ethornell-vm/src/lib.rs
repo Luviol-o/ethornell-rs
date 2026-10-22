@@ -10284,10 +10284,21 @@ impl Vm {
                         descriptors.push(descriptor);
                     }
                     if !terminated {
-                        return Err(VmError::Runtime(
-                            "Sys80:1B input descriptor list exceeds 15 entries".into(),
-                        ));
+                        // sub_46E500 counts the list first (-2).
+                        return Err(VmError::Runtime(format!(
+                            "指定されたキー配列は長過ぎます\n\nキー配列の長さは [ {} ] エレメント以内でなければなりません",
+                            15
+                        )));
                     }
+                }
+                // Then the class must be one of sub_46E500's ten tables (-1).
+                const CLASSES: [u32; 10] =
+                    [0x40, 0x80, 0x100, 0x200, 0x1000, 0x2000, 0x4000, 0x8000, 0x4000_0000, 0x8000_0000];
+                if !CLASSES.contains(&(class_mask as u32)) {
+                    return Err(VmError::Runtime(format!(
+                        "無効なスタンダードキー [ ${:08X} ] が指定されました",
+                        class_mask as u32
+                    )));
                 }
                 api.register_input_class_descriptors(class_mask, &descriptors);
                 Value::None
