@@ -2871,6 +2871,7 @@ impl Vm {
                     break;
                 }
                 Err(err) => {
+                    self.report_script_error(api, program_index, inst.offset as u32, inst.raw.first().copied().unwrap_or(0), &err);
                     self.push_trace(format!("error: {err}"));
                     tracing::error!(
                         vm = self.trace_id,
@@ -7365,6 +7366,57 @@ impl Vm {
         self.clear_shadow_values(ptr, size);
         self.trace_watch_write(ptr, size, value, "write_int");
         Ok(())
+    }
+
+    /// sub_464C50 -> sub_464AD0 / sub_464A80: the error text with the
+    /// thread, module, IP, instruction and SP header and the call chain,
+    /// written to BGIError.txt; the first error is shown (MB_ICONHAND) and,
+    /// while Sys81:6A capture is on, kept for Sys81:6B.
+    fn report_script_error<A: SysApi>(
+        &mut self,
+        api: &mut A,
+        program_index: usize,
+        parser_offset: u32,
+        opcode: u8,
+        error: &VmError,
+    ) {
+        let mut message = format!(
+            "Thread [ {} ] , Program [ {} ] , IP [ ${:08X} ] , Instruction [ ${:X} ] , SP [ ${:08X} ]\n\n",
+            self.thread.thread_id(),
+            self.program_name(program_index),
+            self.code_offset_of(program_index, parser_offset),
+            opcode,
+            FRAME_SEGMENT | self.mem_ptr,
+        );
+        let frames = self.call_stack.clone();
+        for &(program, pc, _) in frames.iter().rev() {
+            let offset = self
+                .programs
+                .get(program)
+                .and_then(|module| module.instructions.get(pc))
+                .map_or(0, |instruction| self.code_offset_of(program, instruction.offset as u32));
+            let base = self.program_code_bases.get(program).copied().unwrap_or_default();
+            message.push_str(&format!("( {} - ${:08X} )\n", self.program_name(program), offset.wrapping_sub(base)));
+        }
+        if !frames.is_empty() {
+            message.push('\n');
+        }
+        message.push_str(&error.to_string());
+        let root = self
+            .validated_file_root
+            .clone()
+            .unwrap_or_else(|| self.resource_primary_root(api));
+        let (bytes, _, _) = encoding_rs::SHIFT_JIS.encode(&message);
+        api.write_file_bytes(&format!("{root}BGIError.txt"), &bytes);
+        let mut shared = self.system81_shared.lock().expect("system81 state poisoned");
+        if shared.captured_error.is_none() {
+            let capture = shared.error_capture_mode != 0;
+            drop(shared);
+            api.message_box("", &message);
+            if capture {
+                self.system81_shared.lock().expect("system81 state poisoned").captured_error = Some(message);
+            }
+        }
     }
 
     fn write_return_addr(&mut self, program_index: usize, next_pc: usize) -> VmResult<()> {
@@ -18287,6 +18339,31 @@ mod tests {
             .extend([Value::Str("Main".into()), Value::Str(":".into())]);
         vm.dispatch(&instruction, &mut TraceApi).unwrap();
         assert_eq!(vm.stack, [Value::Int(2), Value::Int(-1)]);
+    }
+
+    #[test]
+    fn script_errors_are_captured_with_the_target_header() {
+        let program = BpProgram {
+            script_name: Some("err-test".into()),
+            functions: Vec::new(),
+            strings: Vec::new(),
+            instructions: vec![
+                test_instruction(0x10, 0x00, "push_byte", vec![0x00, 0x00], vec![BpOperand::U8(0)]),
+                test_instruction(0x12, 0x14, "jmp", vec![0x14], Vec::new()),
+            ],
+            labels: [(0x10, 0), (0x12, 1)].into_iter().collect(),
+            warnings: Vec::new(),
+            module_size: 0,
+            code: Vec::new(),
+        };
+        let mut vm = Vm::new();
+        vm.system81_shared.lock().unwrap().error_capture_mode = 1;
+        let report = vm.run(&program, &mut SchedulingApi::default(), &VmRunOptions::default());
+        assert_eq!(report.stop_reason, VmStopReason::Error);
+        let captured = vm.system81_shared.lock().unwrap().captured_error.clone().unwrap();
+        assert!(captured.starts_with("Thread [ "), "{captured}");
+        assert!(captured.contains("Program [ err-test ] , IP [ $00000002 ] , Instruction [ $14 ]"), "{captured}");
+        assert!(captured.contains("jmp to null target"), "{captured}");
     }
 
     #[test]

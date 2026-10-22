@@ -20384,7 +20384,14 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
     }
 
     fn message_box(&mut self, caption: &str, text: &str) {
-        host_dialog::show_message(host_dialog::MessageDialogKind::Information, caption, text, true);
+        // An empty caption is sub_46BC80's default (sub_46C1E0 with no
+        // caption), as for script errors.
+        let caption = if caption.is_empty() {
+            self.native_user.message_box_caption()
+        } else {
+            caption.to_string()
+        };
+        host_dialog::show_message(host_dialog::MessageDialogKind::Information, &caption, text, true);
     }
 
     fn retry_or_quit_prompt(&mut self, caption: &str, text: &str) -> bool {

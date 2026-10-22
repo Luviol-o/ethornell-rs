@@ -226,8 +226,8 @@ selector,handler,symbol,status
 81:65,48CCB0,Sys81_65_SetWindowPositionOverride,verified
 81:68,48CCD0,Sys81_68_SwapPauseOnDeactivate,verified
 81:69,48CD00,Sys81_69_SetPrintScreenHotkeyCapture,verified
-81:6A,48CD20,Sys81_6A_SetErrorCaptureMode,deferred
-81:6B,48CD40,Sys81_6B_CopyCapturedError,deferred
+81:6A,48CD20,Sys81_6A_SetErrorCaptureMode,verified
+81:6B,48CD40,Sys81_6B_CopyCapturedError,verified
 81:6D,48CD70,Sys81_6D_QueryPixelShaderVersion,verified
 81:6E,48CD90,Sys81_6E_UncaughtExceptionActive,verified
 81:6F,48CDB0,Sys81_6F_SetBicubicShader,verified
