@@ -2,7 +2,9 @@
 
 The engine is the same Rust code everywhere. Desktop systems run it as the
 `ethornell` program with its own window (winit); the mobile apps drive it
-through the host-driven C ABI of `crates/ethornell-mobile`.
+through the host-driven C ABI of `crates/ethornell-mobile`, and the web page
+through the same host-driven runtime compiled to WebAssembly
+(`crates/ethornell-web`).
 
 | Platform | Directory | Package | Build |
 | --- | --- | --- | --- |
@@ -11,8 +13,9 @@ through the host-driven C ABI of `crates/ethornell-mobile`.
 | macOS | `macos/` | `Ethornell.app` (universal) | `macos/package.sh` |
 | Android | `android/` | APK | `android/build.sh` |
 | iOS | `ios/` | app / IPA | `ios/build.sh` |
+| Web | `wasm/` | static page (zip) | `wasm/build.sh` |
 
-CI builds all five (`.github/workflows/release.yml`) and publishes them on
+CI builds all six (`.github/workflows/release.yml`) and publishes them on
 the releases page.
 
 ## Desktop
@@ -28,7 +31,7 @@ Open.
 
 ## Mobile
 
-`android/README.md` and `ios/README.md`. Both apps keep a list of imported
+`android/README.md` and `ios/README.md` (the web page: `wasm/README.md`). Both apps keep a list of imported
 games, store saves apart from the game files, and map touches to the mouse:
 a tap is a left click, a two-finger tap a right click, a two-finger drag the
 wheel.

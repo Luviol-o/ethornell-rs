@@ -11,14 +11,14 @@ fn elapsed_ms_with_carry(delta_ns: u64, remainder: &mut u64) -> u64 {
 }
 
 // A bounded admission profile, not a process RSS limit. Real Amairo bootstrap
-// measured 648,441,292 retained VM/shared/journal bytes at 14 VMs. Preserve the
+// measured 648,441,292 retained VM/shared/journal bytes at 14 VMs (before
+// threads handed one heap around instead of copying it). Preserve the
 // conservative profile on lower-memory or unknown Android hardware; >=4GiB
 // devices admit that measured workload with ~24% headroom, never without a cap.
 fn host_vm_budget(physical_bytes: Option<u64>) -> ethornell_vm::VmResourceBudget {
     ethornell_vm::VmResourceBudget {
         max_vm_count: 64,
         max_memory_capacity_bytes: if physical_bytes.is_some_and(|bytes|bytes>=4*1024*1024*1024) {768*1024*1024} else {512*1024*1024},
-        max_journal_entries: 1_000_000,
     }
 }
 fn host_physical_memory() -> Option<u64> {
@@ -50,6 +50,9 @@ pub struct HostConfig {
     pub resource_root: PathBuf,
     pub user_root: PathBuf,
     pub font_path: Option<PathBuf>,
+    /// Font file bytes, for hosts without font files (the web); takes
+    /// precedence over `font_path`.
+    pub font_data: Option<Vec<u8>>,
     pub font_face_index: u32,
     pub gbk: bool,
     pub backend: u32,
@@ -69,6 +72,10 @@ pub(super) struct HostServices {
     pub(super) enabled: bool,
     events: VecDeque<HostEvent>,
     pub(super) pending: BTreeMap<u64, usize>,
+    /// Pending UserB0 input dialogs, answered with a JSON response.
+    pub(super) dialogs: BTreeMap<u64, ethornell_vm::UserDialogRequest>,
+    /// Pending Sys80:3C prompts: the message and the file they wait for.
+    retries: BTreeMap<u64, (String, String)>,
     fatal: Option<String>,
     pub(super) input_trace: bool,
     input_trace_count: u32,
@@ -95,9 +102,34 @@ impl HostServices {
             "unsupported or denied host capability: {capability}"
         ));
     }
-    pub(super) fn request(&mut self, text: String, outputs: usize) -> u64 {
+    /// Event kind 5 names the dialog type; the host fetches the JSON payload
+    /// with `HostRuntime::request_payload` and answers with JSON text.
+    pub(super) fn request_dialog(&mut self, request: ethornell_vm::UserDialogRequest) -> u64 {
+        let id = Self::next_request_id();
+        self.pending.insert(id, 1);
+        self.events.push_back(HostEvent {
+            kind: 5,
+            request_id: id,
+            code: 1,
+            text: super::dialog_protocol::dialog_kind(&request).to_string(),
+        });
+        self.dialogs.insert(id, request);
+        id
+    }
+    /// Sys80:3C's Retry/Quit prompt for a missing required file: a kind-2
+    /// confirmation (1 = Retry). Retry rechecks the file and, if it is still
+    /// missing, asks again under the same id.
+    pub(super) fn request_retry(&mut self, message: String, file: String) -> u64 {
+        let id = self.request(message.clone(), 1);
+        self.retries.insert(id, (message, file));
+        id
+    }
+    fn next_request_id() -> u64 {
         static NEXT: AtomicU64 = AtomicU64::new(1);
-        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    }
+    pub(super) fn request(&mut self, text: String, outputs: usize) -> u64 {
+        let id = Self::next_request_id();
         self.pending.insert(id, outputs);
         self.events.push_back(HostEvent {
             kind: 2,
@@ -112,7 +144,7 @@ impl HostServices {
 pub struct HostRuntime {
     runtime: RuntimeEngine,
     policy: file_policy::FilePolicy,
-    _writer_lock: std::fs::File,
+    _writer_lock: file_policy::WriterLock,
     renderer: Option<Renderer<'static>>,
     textures: BTreeMap<String, CachedGraphTexture>,
     font: FontArc,
@@ -135,9 +167,10 @@ impl HostRuntime {
         let policy = file_policy::FilePolicy::new(&config.resource_root, &config.user_root)?;
         let writer_lock = policy.lock_writer()?;
         policy.validate_resource_tree().map_err(|e| EthornellError::Other(format!("host_policy:301:{}",e.raw_os_error().unwrap_or(0))))?;
-        let font = match config.font_path.as_deref() {
-            Some(path) => ethornell_render::FontProvider::load_file(path, config.font_face_index)?,
-            None => ethornell_render::FontProvider::load_system_for_text(if config.gbk {"A日本語中文简体繁體"} else {"A日本語中文"})?,
+        let font = match (config.font_data, config.font_path.as_deref()) {
+            (Some(bytes), _) => ethornell_render::FontProvider::load_bytes(bytes, config.font_face_index)?,
+            (None, Some(path)) => ethornell_render::FontProvider::load_file(path, config.font_face_index)?,
+            (None, None) => ethornell_render::FontProvider::load_system_for_text(if config.gbk {"A日本語中文简体繁體"} else {"A日本語中文"})?,
         };
         let manager = policy.open_manager()?;
         let bytes = manager.read_decoded_from_archive("system.arc", "ipl._bp")?;
@@ -165,6 +198,7 @@ impl HostRuntime {
                 Ok(runtime)
             })
         })?;
+        runtime.use_host_clock();
         runtime.api.host.enabled = true;
         runtime.api.host.input_trace = config.trace;
         runtime.api.native_dialog_presentation = false;
@@ -252,7 +286,7 @@ impl HostRuntime {
         self.last_tick = None;
         self.tick_remainder_ns = 0;
         #[cfg(target_os = "android")]
-        let mut renderer = {
+        let renderer = {
             let backend = match self.backend {
                 1 => wgpu::Backends::VULKAN,
                 2 => wgpu::Backends::GL,
@@ -263,13 +297,84 @@ impl HostRuntime {
             })?
         };
         #[cfg(target_os = "ios")]
-        let mut renderer =
+        let renderer =
             pollster::block_on(unsafe { Renderer::new_ios(ptr, w, h, self.font.clone()) })?;
+        self.install_renderer(renderer, w, h, generation)
+    }
+    #[cfg(not(any(target_os = "android", target_os = "ios", target_arch = "wasm32")))]
+    pub unsafe fn set_surface(
+        &mut self,
+        _: *mut std::ffi::c_void,
+        _: u32,
+        _: u32,
+        _: u64,
+    ) -> Result<()> {
+        Err(EthornellError::Other(
+            "no host surface on this target".into(),
+        ))
+    }
+    /// The web host creates its renderer asynchronously (see
+    /// `Renderer::new_web`, with `HostRuntime::font`) and hands it over here.
+    #[cfg(target_arch = "wasm32")]
+    pub fn attach_renderer(
+        &mut self,
+        renderer: Renderer<'static>,
+        w: u32,
+        h: u32,
+        generation: u64,
+    ) -> Result<()> {
+        if generation <= self.generation || w == 0 || h == 0 {
+            return Err(EthornellError::Other("invalid/stale surface".into()));
+        }
+        self.renderer = None;
+        self.textures.clear();
+        self.last_tick = None;
+        self.tick_remainder_ns = 0;
+        self.install_renderer(renderer, w, h, generation)
+    }
+    /// The attached surface changed size (the web canvas follows the page).
+    pub fn resize_surface(&mut self, w: u32, h: u32) -> Result<()> {
+        if let Some(renderer) = self.renderer.as_mut() {
+            renderer.try_resize(w, h)?;
+            self.runtime.api.window_surface_width = w.min(i32::MAX as u32) as i32;
+            self.runtime.api.window_surface_height = h.min(i32::MAX as u32) as i32;
+        }
+        Ok(())
+    }
+    /// One line of state for host-side debugging: the last VM stop, the
+    /// engine clock and what the presenter has to draw.
+    pub fn diagnostics(&self) -> String {
+        let report = self.runtime.last_report.as_ref();
+        format!(
+            "stop={:?} pc={} steps={} time_ms={} screen={}x{} surfaces={} textures={} renderer={} pending={}",
+            report.map(|r| r.stop_reason),
+            report.map_or(0, |r| r.pc),
+            report.map_or(0, |r| r.steps),
+            self.runtime.api.engine_time_ms,
+            self.runtime.api.screen_width,
+            self.runtime.api.screen_height,
+            self.runtime.api.graph_surfaces.len(),
+            self.textures.len(),
+            self.renderer.is_some(),
+            self.runtime.api.host.pending.len(),
+        )
+    }
+    /// The game text font, for renderers the host builds itself.
+    pub fn font(&self) -> FontArc {
+        self.font.clone()
+    }
+    #[cfg(any(target_os = "android", target_os = "ios", target_arch = "wasm32"))]
+    fn install_renderer(
+        &mut self,
+        mut renderer: Renderer<'static>,
+        w: u32,
+        h: u32,
+        generation: u64,
+    ) -> Result<()> {
         renderer.set_virtual_size(
             self.runtime.api.screen_width.max(1) as f32,
             self.runtime.api.screen_height.max(1) as f32,
         );
-        self.runtime.api.graphics_memory_metric = renderer.graphics_memory_metric();
         self.runtime.api.window_surface_width = w.min(i32::MAX as u32) as i32;
         self.runtime.api.window_surface_height = h.min(i32::MAX as u32) as i32;
         let should_suspend =
@@ -291,18 +396,6 @@ impl HostRuntime {
         })?;
         self.generation = generation;
         Ok(())
-    }
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    pub unsafe fn set_surface(
-        &mut self,
-        _: *mut std::ffi::c_void,
-        _: u32,
-        _: u32,
-        _: u64,
-    ) -> Result<()> {
-        Err(EthornellError::Other(
-            "no host surface on this target".into(),
-        ))
     }
     pub fn detach_surface(&mut self, generation: u64) -> Result<()> {
         if generation == self.generation {
@@ -379,6 +472,16 @@ impl HostRuntime {
             6 => Some(RuntimeInputEvent::MouseWheel { delta_y: value }),
             _ => return Err(EthornellError::Other("unknown input kind".into())),
         };
+        // The engine-drawn UserB0:A0 dialog takes its own clicks, as on desktop.
+        let event = event.filter(|event| match *event {
+            RuntimeInputEvent::MousePress { x, y } => {
+                !self.runtime.api.handle_user_modeless_pointer(x, y, true)
+            }
+            RuntimeInputEvent::MouseRelease { x, y } => {
+                !self.runtime.api.handle_user_modeless_pointer(x, y, false)
+            }
+            _ => true,
+        });
         // Deliver edges in FIFO call order, including down/up in one frame.
         if let Some(event) = event {
             if self.input_queue.len() >= 4096 {
@@ -441,7 +544,7 @@ impl HostRuntime {
         }
         self.last_tick = Some(now);
         let raw_elapsed = elapsed_ms_with_carry(now - last, &mut self.tick_remainder_ns);
-        let elapsed = normalize_engine_elapsed_ms(raw_elapsed);
+        let elapsed = raw_elapsed;
         self.runtime
             .vm
             .check_resource_budget(self.vm_budget)
@@ -506,18 +609,27 @@ impl HostRuntime {
             self.runtime.api.screen_width.max(1) as f32,
             self.runtime.api.screen_height.max(1) as f32,
         );
-        let commands =
-            frame_presenter::prepare_frame(renderer, &self.runtime.api, &mut self.textures)?;
-        renderer.submit(&commands);
+        // sub_462100: present a newly composed frame only when one is due.
+        if self.runtime.api.take_present_due() {
+            self.runtime.api.performance_profile.begin();
+            let commands =
+                frame_presenter::prepare_frame(renderer, &self.runtime.api, &mut self.textures)?;
+            renderer.submit(&commands);
+            self.runtime.api.performance_profile.end(true);
+        }
         renderer.render()?;
-        self.runtime.api.presentation_state =
-            self.runtime.api.engine_time_ms.min(i32::MAX as u64) as i32;
+        self.runtime.api.presentation_state = self.runtime
+                .api
+                .clock_base_ms
+                .wrapping_add(self.runtime.api.engine_time_ms as u32) as i32;
         self.sync_audio()
     }
     fn close(&mut self) {
         self.closed = true;
         self.runtime.vm.cancel_host_requests();
         self.runtime.api.host.pending.clear();
+        self.runtime.api.host.dialogs.clear();
+        self.runtime.api.host.retries.clear();
         self.runtime.api.host.events.push_back(HostEvent {
             kind: 3,
             request_id: 0,
@@ -543,7 +655,43 @@ impl HostRuntime {
     pub fn poll_event(&mut self) -> Option<HostEvent> {
         self.runtime.api.host.events.pop_front()
     }
+    /// The JSON description of a kind-5 dialog request.
+    pub fn request_payload(&self, id: u64) -> Option<String> {
+        self.runtime
+            .api
+            .host
+            .dialogs
+            .get(&id)
+            .map(super::dialog_protocol::request_json)
+    }
+    /// Answer a kind-5 dialog request with its JSON response.
+    pub fn complete_dialog(&mut self, id: u64, response: &str) -> Result<()> {
+        let request = self
+            .runtime
+            .api
+            .host
+            .dialogs
+            .get(&id)
+            .ok_or_else(|| EthornellError::Other("unknown/stale request".into()))?;
+        let response = super::dialog_protocol::response_from_json(request, response)
+            .map_err(EthornellError::Other)?;
+        self.runtime
+            .vm
+            .complete_user_dialog(id, response)
+            .map_err(|e| EthornellError::Other(e.to_string()))?;
+        self.runtime.api.host.dialogs.remove(&id);
+        self.runtime.api.host.pending.remove(&id);
+        self.last_tick = None;
+        self.tick_remainder_ns = 0;
+        self.clear_input();
+        self.sync_audio()
+    }
     pub fn complete_request(&mut self, id: u64, result: i32) -> Result<()> {
+        if self.runtime.api.host.dialogs.contains_key(&id) {
+            return Err(EthornellError::Other(
+                "dialog request needs a JSON response".into(),
+            ));
+        }
         let outputs = *self
             .runtime
             .api
@@ -551,6 +699,20 @@ impl HostRuntime {
             .pending
             .get(&id)
             .ok_or_else(|| EthornellError::Other("unknown/stale request".into()))?;
+        let mut result = result;
+        if let Some((message, file)) = self.runtime.api.host.retries.get(&id).cloned() {
+            if result != 0 && !self.runtime.api.required_file_present(&file) {
+                self.runtime.api.host.events.push_back(HostEvent {
+                    kind: 2,
+                    request_id: id,
+                    code: 1,
+                    text: message,
+                });
+                return Ok(());
+            }
+            result = i32::from(result != 0);
+            self.runtime.api.host.retries.remove(&id);
+        }
         self.runtime
             .vm
             .complete_host_request(
@@ -613,6 +775,27 @@ mod tests {
         api
     }
     #[test]
+    fn user_dialog_requests_become_kind_five_events_with_json_payloads() {
+        let mut api = api();
+        let request = ethornell_vm::UserDialogRequest::Selection {
+            title: "Route".into(),
+            prompt: "Pick one".into(),
+            options: vec!["A".into(), "B".into()],
+        };
+        let id = api
+            .begin_host_request(&HostRequest::UserDialog(request.clone()))
+            .unwrap()
+            .unwrap();
+        let event = api.host.events.pop_front().unwrap();
+        assert_eq!((event.kind, event.request_id, event.text.as_str()), (5, id, "select"));
+        assert_eq!(api.host.pending.get(&id), Some(&1));
+        let payload: serde_json::Value =
+            serde_json::from_str(&super::super::dialog_protocol::request_json(&api.host.dialogs[&id]))
+                .unwrap();
+        assert_eq!(payload["options"][1], "B");
+    }
+
+    #[test]
     fn input_route_trace_is_opt_in_numeric_bounded_and_does_not_enable_vm_trace() {
         let mut h=HostServices::default();h.enabled=true;
         h.input_route([u32::MAX;7],[true;5]);assert!(h.events.is_empty());
@@ -632,11 +815,11 @@ mod tests {
         assert_eq!(host_vm_budget(Some(u64::MAX)).max_memory_capacity_bytes,normal.max_memory_capacity_bytes);
         assert!(normal.max_memory_capacity_bytes>648_441_292);
         assert!(low.max_memory_capacity_bytes<648_441_292);
-        assert_eq!(normal.max_vm_count,64);assert_eq!(normal.max_journal_entries,1_000_000);
+        assert_eq!(normal.max_vm_count,64);
         let vm=Vm::new();let usage=vm.resource_usage();
-        let capacity=usage.memory_capacity_bytes+usage.shared_heap_capacity_bytes+usage.journal_capacity_bytes;
-        assert!(vm.check_resource_budget(ethornell_vm::VmResourceBudget {max_vm_count:64,max_memory_capacity_bytes:capacity-1,max_journal_entries:1_000_000}).is_err());
-        assert!(vm.check_resource_budget(ethornell_vm::VmResourceBudget {max_vm_count:64,max_memory_capacity_bytes:capacity,max_journal_entries:1_000_000}).is_ok());
+        let capacity=usage.memory_capacity_bytes;
+        assert!(vm.check_resource_budget(ethornell_vm::VmResourceBudget {max_vm_count:64,max_memory_capacity_bytes:capacity-1}).is_err());
+        assert!(vm.check_resource_budget(ethornell_vm::VmResourceBudget {max_vm_count:64,max_memory_capacity_bytes:capacity}).is_ok());
         assert!(vm.check_resource_budget(ethornell_vm::VmResourceBudget {max_vm_count:0,..normal}).is_err());
     }
     #[test]
@@ -648,7 +831,7 @@ mod tests {
         let user = std::env::temp_dir().join(format!("ethornell-restricted-repro-user-{}", std::process::id()));
         std::fs::create_dir(&user).unwrap();
         let outcome = (|| -> Result<()> {
-            let mut host = HostRuntime::create(HostConfig {resource_root:resource,user_root:user.clone(),font_path:None,font_face_index:0,gbk:true,backend:0,strict:false,trace:false,silent:true})?;
+            let mut host = HostRuntime::create(HostConfig {resource_root:resource,user_root:user.clone(),font_path:None,font_data:None,font_face_index:0,gbk:true,backend:0,strict:false,trace:false,silent:true})?;
             // CPU-only VM/host-policy reproduction, not a Surface/GPU test.
             // It invokes the exact shared checked frontend under the same
             // scoped policy/font, with an explicit silent audio-free backend.
@@ -666,13 +849,13 @@ mod tests {
                     if frame==2010 && std::env::var_os("ETHORNELL_RESTRICTED_TRACE").is_some(){for (&id,obj) in &host.runtime.api.graph_input_objects {eprintln!("local-only INPUT object={id} layer={} running={} desc={:?} hover={:?} savehit={:?}",obj.layer,obj.is_running(),obj.descriptor,obj.hovered,host.runtime.api.hit_test_graph_input_object(id,(650.0,705.0)));}}
                     if frame==2010 && std::env::var_os("ETHORNELL_RESTRICTED_TRACE").is_some(){for (&id,obj) in &host.runtime.api.graph_input_objects {eprintln!("local-only SURFACE object={id} world={:?} surface={:?}",host.runtime.api.surface_world_position(obj.layer),host.runtime.api.graph_surfaces.get(&obj.layer));for y in (550..720).step_by(10){for x in (0..1280).step_by(20){if let Some((r,_,_))=host.runtime.api.hit_test_graph_input_object(id,(x as f32,y as f32)){if r.index==0 {eprintln!("local-only SAVEHIT {id} x={x} y={y}");}}}}}}
                     if frame==2010 && std::env::var_os("ETHORNELL_RESTRICTED_TRACE").is_some(){for (&id,obj) in &host.runtime.api.graph_input_objects {for (&lid,layer) in &host.runtime.api.graph_layers {if layer.target_surface==Some(obj.layer) && host.runtime.api.surface_controls.contains_layer_for_owner(SurfaceControlOwner::InputObject(id),lid) {eprintln!("local-only INPUTLAYER obj={id} layer={lid} hit={} xywh=({},{} {}x{}) transform={:?} enabled={} key={}",layer.hit_id,layer.x,layer.y,layer.width,layer.height,host.runtime.api.layer_world_transform(lid,layer),layer.enabled,layer.key);}}}}
-                    if frame==2010 && std::env::var_os("ETHORNELL_RESTRICTED_TRACE").is_some(){for (&id,obj) in &host.runtime.api.graph_input_objects {if let Some(r)=obj.descriptor.regions.first(){eprintln!("local-only HITFACT obj={id} eligible={} mask={} visible={} configure_size={:?}",obj.pointer_hit_eligible(*r),host.runtime.api.graph_input_item_mask_accepts(*r,22,14),host.runtime.api.graph_surfaces.get(&obj.layer).is_some_and(|s|host.runtime.api.surface_display_chain_visible(obj.layer,s)),host.runtime.api.resource_image_region(native_surface_control_configure_resource(r)).map(|(_,r)|(r.width,r.height)));}}}
+                    if frame==2010 && std::env::var_os("ETHORNELL_RESTRICTED_TRACE").is_some(){for (&id,obj) in &host.runtime.api.graph_input_objects {if let Some(r)=obj.descriptor.regions.first(){eprintln!("local-only HITFACT obj={id} eligible={} mask={} visible={} configure_size={:?}",obj.pointer_hit_eligible(*r),host.runtime.api.graph_input_item_mask_accepts(id,*r,22,14),host.runtime.api.graph_surfaces.get(&obj.layer).is_some_and(|s|host.runtime.api.surface_display_chain_visible(obj.layer,s)),host.runtime.api.resource_image_region(native_surface_control_configure_resource(r)).map(|(_,r)|(r.width,r.height)));}}}
                     if frame==2010 && std::env::var_os("ETHORNELL_RESTRICTED_TRACE").is_some(){for (&id,obj) in &host.runtime.api.graph_input_objects {eprintln!("local-only VISFACT obj={id} drawable={} opacity={} props={:?}",host.runtime.api.display_tree.chain_drawable(obj.layer),host.runtime.api.surface_display_opacity(obj.layer),host.runtime.api.graph_object_properties.get(&obj.layer));}}
-                    let budget=if measure_only {ethornell_vm::VmResourceBudget {max_vm_count:64,max_memory_capacity_bytes:2*1024*1024*1024,max_journal_entries:1_000_000}} else {host.vm_budget};
+                    let budget=if measure_only {ethornell_vm::VmResourceBudget {max_vm_count:64,max_memory_capacity_bytes:2*1024*1024*1024}} else {host.vm_budget};
                     host.runtime.vm.check_resource_budget(budget).map_err(|_|EthornellError::Other(format!("restricted budget failed before frame={frame} usage={:?}",host.runtime.vm.resource_usage())))?;
                     let report = runtime_frontend::drive_runtime_frame_checked(&mut host.runtime,&mut host.input_queue,&mut input,RuntimeFramePacing,16,16,None,"restricted-repro",false)?;
-                    host.runtime.vm.check_resource_budget(budget).map_err(|_|EthornellError::Other(format!("restricted budget failed after frame={frame} usage={:?}",host.runtime.vm.resource_usage())))?;
-                    let usage=host.runtime.vm.resource_usage();peak_capacity=peak_capacity.max(usage.memory_capacity_bytes+usage.shared_heap_capacity_bytes+usage.journal_capacity_bytes);peak_vms=peak_vms.max(usage.vm_count);
+                    host.runtime.vm.check_resource_budget(budget).map_err(|_|EthornellError::Other(format!("restricted budget failed after frame={frame} root_memory={} usage={:?} tasks={:#?}",host.runtime.vm.memory.len(),host.runtime.vm.resource_usage(),host.runtime.vm.task_memory_breakdown())))?;
+                    let usage=host.runtime.vm.resource_usage();peak_capacity=peak_capacity.max(usage.memory_capacity_bytes);peak_vms=peak_vms.max(usage.vm_count);
                     if let Some(message)=host.runtime.api.host.fatal.take() {return Err(EthornellError::Other(format!("restricted host failure at frame={frame}; opcode={:?}; category={}",host.runtime.api.last_native_call,if message.contains("missing BP program") {"missing_program"} else {"host_denied"})));}
                     if let Some(report)=report.last_report.as_ref().filter(|r|r.stop_reason.is_fatal()) {
                         let unsupported=report.recent_trace.iter().any(|t|t.contains("unsupported"));
@@ -685,10 +868,10 @@ mod tests {
                         let save_failure=event.text.contains("保存") || event.text.contains("書き込み");
                         return Err(EthornellError::Other(format!("restricted sample blocked host_request frame={frame} save_failure={save_failure} opcode={:?} user_files={:?}",host.runtime.api.last_native_call,host.policy.enumerate("*",true,0,false).unwrap_or_default())));
                     }
-                    if frame%300==0 {if let Some(r)=report.last_report.as_ref(){eprintln!("local-only restricted frame={frame} program={} pc={} stop={:?} procedure={:?} native={:?}",r.program,r.pc,r.stop_reason,r.thread.current_procedure,host.runtime.api.last_native_call);}}
+                    if frame%300==0 {if let Some(r)=report.last_report.as_ref(){eprintln!("local-only restricted frame={frame} program={} pc={} stop={:?} procedure={:?} native={:?} usage={:?}",r.program,r.pc,r.stop_reason,r.thread.current_procedure,host.runtime.api.last_native_call,host.runtime.vm.resource_usage());}}
                 }
                 let files=host.policy.enumerate("*",true,0,false)?;
-                let saved=files.iter().find(|name|name.to_ascii_lowercase().ends_with("amairochocolate101.sud")).ok_or_else(||EthornellError::Other("restricted sample produced no expected user save".into()))?;
+                let saved=files.iter().find(|name|name.to_ascii_lowercase().ends_with("amairochocolate101.sud")).ok_or_else(||EthornellError::Other(format!("restricted sample produced no expected user save; user files={files:?}")))?;
                 let bytes=host.policy.read_user(saved)?;
                 if bytes.is_empty() {return Err(EthornellError::Other("restricted sample save is empty".into()));}
                 if let Some(path)=std::env::var_os("ETHORNELL_RESTRICTED_REPRO_SNAPSHOT") {snapshot::write_runtime_snapshot(&host.runtime.api,Path::new(&path))?;}
@@ -738,7 +921,7 @@ mod tests {
             assert!(passes <= 600);
             assert!(carry < 1_000_000);
         }
-        assert_eq!(normalize_engine_elapsed_ms(501), 0);
+        assert_eq!(normalize_engine_elapsed_ms(501, 500), 0);
     }
     #[test]
     fn native_host_routing_is_group_specific_and_nonhost_queries_fall_through() {
@@ -755,8 +938,7 @@ mod tests {
         }
         for (group, id) in [
             (0x80, 0x3B),
-            (0x80, 0x3C),
-            (0x80, 0xE3),
+            (0x80, 0xE1),
             (0x80, 0xF2),
             (0x81, 0x38),
             (0xB0, 0xF0),
@@ -782,6 +964,45 @@ mod tests {
                 "normalized SJIS string"
             );
         }
+    }
+    #[test]
+    #[cfg(unix)]
+    fn required_file_prompt_rechecks_on_retry_and_skips_when_present() {
+        let (root, mut host) = minimal_host("retry");
+        let program = ethornell_script::parse_bp_program(Some("retry".into()), &[0x80, 0x3C]);
+        let run = |host: &mut HostRuntime, file: &str| {
+            host.runtime.vm.start(&program);
+            host.runtime.vm.stack = vec![
+                Value::Str(file.into()),
+                Value::Str("unused".into()),
+                Value::Str("insert disc".into()),
+            ];
+            host.runtime.vm.run_loaded(&mut host.runtime.api, &VmRunOptions::default())
+        };
+        while host.poll_event().is_some() {}
+        assert_ne!(run(&mut host, "system.arc").stop_reason, VmStopReason::WaitingForHost);
+        let event = host.poll_event();
+        assert!(event.is_none(), "{event:?}");
+        assert_eq!(host.runtime.vm.stack, vec![Value::Int(1)]);
+
+        assert_eq!(run(&mut host, "late.dat").stop_reason, VmStopReason::WaitingForHost);
+        let event = host.poll_event().unwrap();
+        assert_eq!((event.kind, event.code, event.text.as_str()), (2, 1, "insert disc"));
+        host.complete_request(event.request_id, 1).unwrap();
+        let again = host.poll_event().unwrap();
+        assert_eq!((again.kind, again.request_id), (2, event.request_id));
+        std::fs::write(root.join("resource/late.dat"), b"x").unwrap();
+        host.complete_request(event.request_id, 1).unwrap();
+        host.runtime.vm.run_loaded(&mut host.runtime.api, &VmRunOptions::default());
+        assert_eq!(host.runtime.vm.stack, vec![Value::Int(1)]);
+
+        assert_eq!(run(&mut host, "never.dat").stop_reason, VmStopReason::WaitingForHost);
+        let event = host.poll_event().unwrap();
+        host.complete_request(event.request_id, 0).unwrap();
+        host.runtime.vm.run_loaded(&mut host.runtime.api, &VmRunOptions::default());
+        assert_eq!(host.runtime.vm.stack, vec![Value::Int(0)]);
+        drop(host);
+        std::fs::remove_dir_all(root).unwrap();
     }
     #[cfg(unix)]
     fn minimal_host(label: &str) -> (PathBuf, HostRuntime) {
@@ -809,6 +1030,7 @@ mod tests {
             resource_root: resource,
             user_root: user,
             font_path: None,
+            font_data: None,
             font_face_index: 0,
             gbk: true,
             backend: 0,

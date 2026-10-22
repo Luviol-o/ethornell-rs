@@ -15,14 +15,19 @@ use std::sync::{
 };
 
 mod async_program;
+mod child_thread;
+pub mod cpu_record;
 mod debug;
 mod extended_opcodes;
 mod host_request;
 mod input;
+mod logic;
 pub mod native_call;
 pub mod native_input;
 pub mod native_motion;
 pub mod native_ownership;
+pub mod native_selection;
+mod native_strings;
 pub mod native_thread;
 mod procedure_class_map;
 mod profile;
@@ -35,8 +40,10 @@ mod scheduler;
 mod system80_state;
 mod system81_state;
 pub mod target_thread;
+mod target_heap;
 mod time;
 mod user_data;
+mod user_dialog;
 
 pub use host_request::{
     HostMemoryWrite, HostRequest, HostResponse, VmResourceBudget, VmResourceUsage,
@@ -49,14 +56,20 @@ pub use native_call::{
     scheduling_effect,
 };
 
-const SYSTEM_PROGRAM_TABLE: u32 = 273_280;
-const SYSTEM_PROGRAM_SLOTS: usize = 32;
-const SYSTEM_PROGRAM_STRIDE: u32 = 16;
-const SYSTEM_PROGRAM_DESCRIPTOR_BASE: u32 = 0x4000_0000;
 const ADDRESS_MASK: u32 = 0x01ff_ffff;
 const AUX_MEMORY_TAG_BASE: u32 = 0x20;
 const AUX_MEMORY_SEGMENT_SIZE: u32 = ADDRESS_MASK + 1;
 const LOCAL_MEMORY_BASE: u32 = 0x0080_0000;
+/// Segment 2 of sub_48E8C0: the thread's data region (frames). Opcode 0x04
+/// pushes `(base - offset) | FRAME_SEGMENT`.
+pub(crate) const FRAME_SEGMENT: u32 = 0x0800_0000;
+/// Segment 1: the thread's code region (BP modules appended, string
+/// literals and function addresses point into it).
+pub(crate) const CODE_SEGMENT: u32 = 0x0400_0000;
+/// Where the code region sits in the thread's local window (after the data
+/// region), and its largest size.
+const CODE_WINDOW_OFFSET: u32 = 0x0010_0000;
+const CODE_WINDOW_SIZE: u32 = HEAP_OFFSET_BASE - CODE_WINDOW_OFFSET;
 const HEAP_OFFSET_BASE: u32 = 0x0020_0000;
 const HEAP_MEMORY_BASE: usize = (LOCAL_MEMORY_BASE + HEAP_OFFSET_BASE) as usize;
 const INITIAL_MEMORY_SIZE: usize = 16 * 1024 * 1024;
@@ -117,27 +130,9 @@ impl Value {
     }
 }
 
-fn measure_text_width_value(value: &Value, font_size: i32, max_width: i32) -> i32 {
-    let text = match value {
-        Value::Str(text) => text.as_str(),
-        Value::Int(0) | Value::Ptr(0) | Value::None => "",
-        Value::Int(_) | Value::Ptr(_) | Value::Func { .. } | Value::Program(_) => {
-            return max_width.max(font_size);
-        }
-    };
-    let mut width = 0i32;
-    for ch in text.chars() {
-        width += if ch.is_ascii() {
-            (font_size + 1) / 2
-        } else {
-            font_size
-        };
-    }
-    if max_width > 0 {
-        width.min(max_width)
-    } else {
-        width
-    }
+/// _ismbblead for code page 932.
+fn is_sjis_lead_byte(byte: u8) -> bool {
+    matches!(byte, 0x81..=0x9F | 0xE0..=0xFC)
 }
 
 #[derive(Debug, Clone)]
@@ -318,11 +313,14 @@ pub struct VmRunReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Sys80:F0 (sub_472510, dialog 108/122): install-folder dialog with the
+/// folder field, Browse (which appends `default_subfolder` to the chosen
+/// folder) and two check boxes.
 pub struct SystemInputDialogRequest {
     pub initial_text: String,
     pub option_value1: i32,
     pub option_value2: i32,
-    pub mode: i32,
+    pub default_subfolder: String,
     pub caption: String,
 }
 
@@ -442,16 +440,17 @@ pub trait SysApi {
         false
     }
 
-    /// Enable or disable the target render-performance accumulator. Enabling
-    /// also resets every counter, matching sub_401600.
-    fn set_performance_profiling(&mut self, _enabled: bool) {}
+    /// Store the raw Sys80:06 flag of the target frame-time accumulator; a
+    /// non-zero flag also resets every counter, matching sub_401600.
+    fn set_performance_profiling(&mut self, _enabled: i32) {}
 
     /// Read one target performance metric selected by Sys80:0x07.
     fn read_performance_metric(&mut self, _selector: i32) -> i32 {
         0
     }
 
-    /// Last successful native presentation timestamp/state (dword_565EC4).
+    /// Engine clock stored after the last successful Present (sub_460460,
+    /// dword_565ED8).
     fn presentation_state(&mut self) -> i32 {
         0
     }
@@ -461,7 +460,7 @@ pub trait SysApi {
         default_graphics_capability_record()
     }
 
-    /// Renderer-owned capacity field queried by Sys80:0x0B.
+    /// Object-manager cache budget queried by Sys80:0x0B (sub_46FB30).
     fn graphics_memory_metric(&mut self) -> i32 {
         0
     }
@@ -492,6 +491,34 @@ pub trait SysApi {
 
     fn load_file_bytes(&mut self, _archive: &str, _file: &str) -> Option<Vec<u8>> {
         None
+    }
+
+    /// Bytes of a file on disk only, no archive fallback; `path` is a
+    /// resolved BGI path (root + name, or absolute).
+    fn read_disk_file(&mut self, path: &str) -> Option<Vec<u8>> {
+        self.load_file_bytes("", path)
+    }
+
+    /// Whether `path` exists on disk as a non-directory.
+    fn disk_file_exists(&mut self, path: &str) -> bool {
+        self.file_exists("", path)
+    }
+
+    /// Undecoded bytes of `entry` in the archive file `archive` (relative to
+    /// the primary root); no other archive is searched.
+    fn read_archive_entry_raw(&mut self, archive: &str, entry: &str) -> Option<Vec<u8>> {
+        self.load_file_bytes(archive, entry)
+    }
+
+    /// Whether the archive file `archive` holds `entry`.
+    fn archive_entry_exists(&mut self, archive: &str, entry: &str) -> bool {
+        self.file_exists(archive, entry)
+    }
+
+    /// sub_465F80 once a media root exists: MessageBox(title, text,
+    /// OK|CANCEL); true retries, false means the player confirmed quitting.
+    fn media_prompt(&mut self, _title: &str, _text: &str) -> bool {
+        false
     }
 
     fn file_exists(&mut self, archive: &str, file: &str) -> bool {
@@ -555,17 +582,28 @@ pub trait SysApi {
         false
     }
 
-    /// Portable removable-media discovery used by Sys80:0x3F. On success the
-    /// returned directory becomes the target secondary resource root.
-    fn locate_removable_archive_root(
-        &mut self,
-        _archive_name: &str,
-        _prompt: &str,
-        _subdirectory: &str,
-        _retry: bool,
-    ) -> Option<String> {
-        None
+    /// Sys80:3F (sub_4652D0): the roots of the removable and CD-ROM drives
+    /// (GetDriveTypeA 2/5), each with its trailing separator, in drive order.
+    fn removable_drive_roots(&mut self) -> Vec<String> {
+        Vec::new()
     }
+
+    /// GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES: a file or a
+    /// directory.
+    fn path_exists(&mut self, _path: &str) -> bool {
+        false
+    }
+
+    /// MessageBox(caption, text, OK|CANCEL), and on Cancel the YES|NO quit
+    /// question (sub_466D00, sub_4652D0). True asks the caller to check
+    /// again; false means the player confirmed quitting (the caller returns
+    /// 0, nothing exits) or no dialog can be shown.
+    fn retry_or_quit_prompt(&mut self, _caption: &str, _text: &str) -> bool {
+        false
+    }
+
+    /// Sleep(ms) on the script thread.
+    fn sleep_ms(&mut self, _ms: u32) {}
 
     /// Final IO boundary: enforce the host's user-write root policy, commit via
     /// same-filesystem temporary file + flush/sync + atomic replacement, and
@@ -603,8 +641,22 @@ pub trait SysApi {
     /// Installs the target zero-terminated fullscreen-toggle descriptor list.
     fn configure_fullscreen_hotkeys(&mut self, _enabled: bool, _descriptors: &[i32]) {}
 
-    /// Status-5 bootstrap selection used by Sys80:0x6B.
-    fn select_bootstrap(&mut self, _root_or_archive_path: &str, _archive_namespace: &str) {}
+    /// GetWindowRect(hWndParent) left/top, saved into BGI.gdb by Sys80:81.
+    fn window_outer_position(&mut self) -> (i32, i32) {
+        (0, 0)
+    }
+
+    /// sub_46FE90 / sub_461B40: a stored window position stays when at
+    /// least 1/8 of the window would be on some monitor, else the window is
+    /// centred on its monitor ((0, 0) in full screen).
+    fn restore_window_position(&mut self, x: i32, y: i32) -> (i32, i32) {
+        (x, y)
+    }
+
+    /// Sys80:6B (sub_465650) with interpreter status 5: restart the engine
+    /// from `archive`:`file` with `root` as the primary root (`None`: the
+    /// startup default, sub_464F70).
+    fn select_bootstrap(&mut self, _root: Option<&str>, _archive: &str, _file: &str) {}
 
     /// Compares the host desktop aspect with the configured game/base aspect.
     fn display_aspect_mismatch(&mut self) -> bool {
@@ -640,6 +692,32 @@ pub trait SysApi {
         true
     }
 
+    /// The host's monotonic clock in nanoseconds (Sys80:05), or `None` to
+    /// derive it from the engine clock (deterministic replays).
+    fn performance_counter_ns(&mut self) -> Option<u64> {
+        None
+    }
+
+    /// D3DADAPTER_IDENTIFIER9 Description and DriverVersion words (product,
+    /// version, subversion, build); empty when the host has none.
+    fn display_adapter_identifier(&mut self) -> (String, [u16; 4]) {
+        (String::new(), [0; 4])
+    }
+
+    /// GetVersionExA: major, minor, build, platform id and szCSDVersion.
+    /// Hosts without Windows report the zeroed structure.
+    fn host_os_version(&mut self) -> ([u32; 4], String) {
+        ([0; 4], String::new())
+    }
+
+    /// The desktop display mode (GetAdapterDisplayMode, dword_5177C0/C4).
+    fn desktop_display_size(&mut self) -> (u32, u32) {
+        (0, 0)
+    }
+
+    /// dword_503E40[index]: the logical point of the last press of button
+    /// slot `index` (0 left, 1 right, 2 middle, 3 X1, 4 X2), (-1, -1) before
+    /// the first one.
     fn pointer_position(&mut self, _index: i32) -> Option<(i32, i32)> {
         None
     }
@@ -658,6 +736,11 @@ pub trait SysApi {
 
     fn set_window_monitor_adapter_mode(&mut self, mode: i32) -> bool {
         (0..=1).contains(&mode)
+    }
+
+    /// sub_45EDE0 (Sys81:61).
+    fn fullscreen_scale_mode(&mut self) -> i32 {
+        0
     }
 
     fn set_config_input_mode(&mut self, mode: i32) -> bool {
@@ -692,6 +775,10 @@ pub trait SysApi {
         false
     }
 
+    /// dword_507690 (Sys81:1F): the extra input bits CProcDspMsg and
+    /// CProcedure accept besides 0x80000181.
+    fn set_message_auxiliary_input_mask(&mut self, _mask: i32) {}
+
     /// Host touch-window registration used by Sys81:0x18.
     fn register_touch_input(&mut self, _enabled: bool) -> bool {
         false
@@ -704,16 +791,18 @@ pub trait SysApi {
 
     /// Process launch contract used by Sys81:0xE0. The portable default is an
     /// explicit unavailable result rather than a fabricated success.
-    fn launch_process_wait(
+    /// Sys81:E0 (sub_472A10 with a8 = 1): CreateProcessA, then wait for
+    /// the process while pumping window messages, the main window hidden
+    /// meanwhile when `hide_main_window`. `None` when it cannot start,
+    /// else the exit code.
+    fn launch_process_and_wait(
         &mut self,
-        _working_directory: &str,
-        _executable: &str,
-        _arguments: &str,
-        _error_message: &str,
+        _current_directory: &str,
+        _command_line: &str,
         _show_window: bool,
-        _exit_code: Option<&mut i32>,
-    ) -> bool {
-        false
+        _hide_main_window: bool,
+    ) -> Option<u32> {
+        None
     }
 
     /// Host validation/creation hook for the Win32 special-folder operation
@@ -732,9 +821,31 @@ pub trait SysApi {
         0
     }
 
+    /// CreateMutexA(NULL, TRUE, name): a token for the new mutex, `None`
+    /// when it already exists anywhere on the host (ERROR_ALREADY_EXISTS).
+    fn create_named_mutex(&mut self, _name: &str) -> Option<u64> {
+        Some(0)
+    }
+
+    fn release_named_mutex(&mut self, _token: u64) {}
+
+    /// Whether d3dx9_43.dll's D3DXCreateEffect is available (Sys81:6E).
+    fn d3dx_effects_available(&mut self) -> bool {
+        false
+    }
+
     fn delete_file(&mut self, _root: &str, _file: &str) -> bool {
         false
     }
+
+    /// Sys80:36: whether loose-file reads fall back to the Sys80:37 paths.
+    fn set_loose_search_fallback(&mut self, _enabled: bool) {}
+
+    /// Sys80:37: prepend a loose-file fallback directory.
+    fn prepend_loose_search_path(&mut self, _directory: &str) {}
+
+    /// Sys80:38: register a DCArchiveComplex name over member archives.
+    fn register_composite_archive(&mut self, _name: &str, _members: &[String]) {}
 
     fn user_data_root(&mut self, _kind: i32) -> Option<String> {
         None
@@ -766,9 +877,10 @@ pub trait SysApi {
         0
     }
 
-    /// Poll a Win32-style message posted after a `CProcWaitWndMsg` waiter was
-    /// registered. The returned pair is `(lParam, wParam)`, matching the target
-    /// procedure's two BP pushes.
+    /// The newest message `message_id` delivered after `registered_after_serial`
+    /// as `(wParam, lParam)`. The WndProc (sub_499930 -> sub_49AAE0) signals
+    /// every waiter for that number and overwrites earlier payloads, so the
+    /// latest message wins and polling must not consume it for other waiters.
     fn poll_window_message(
         &mut self,
         _message_id: i32,
@@ -875,25 +987,31 @@ pub trait SysApi {
 
     fn set_input_latched_state(&mut self, _value: i32) {}
 
-    /// Launches one target command line. Sys80:E0/E2 always wait for the child;
-    /// `wait_for_uninstaller` additionally waits for the target uninstaller mutex.
+    /// One CreateProcessA attempt of sub_472A10 (no application name, so the
+    /// command line names the program) with `working_directory` as current
+    /// directory; on success it waits for the child, hiding the window
+    /// meanwhile when `hide_window` and, with `wait_for_uninstaller`, for the
+    /// uninstaller mutex. False when the program could not be started.
     fn launch_process(
         &mut self,
         _working_directory: &str,
         _command_line: &str,
-        _error_message: &str,
-        _restore_parent_window: bool,
+        _hide_window: bool,
         _wait_for_uninstaller: bool,
     ) -> bool {
         false
     }
 
-    /// Stores the command executed by WinMain after the current engine window exits.
+    /// MessageBox(text, caption, MB_OK | MB_ICONINFORMATION).
+    fn message_box(&mut self, _caption: &str, _text: &str) {}
+
+    /// Sys80:E1: the command WinMain runs (once, without waiting) after the
+    /// main loop ends; `command_line` is already resolved like sub_472A10.
     fn schedule_restart(
         &mut self,
         _working_directory: &str,
         _command_line: &str,
-        _error_message: &str,
+        _error_message: Option<&str>,
     ) {
     }
 
@@ -1016,12 +1134,36 @@ pub struct GraphIconRecord {
 }
 
 pub trait GraphApi {
+    /// 90:78 / 424010 copies width*height native little-endian u16 tiles.
+    fn upload_map_tile_data(&mut self,_object:i32,_width:u32,_height:u32,_tiles:&[u16])->bool {false}
+
     fn call_graph(&mut self, call: &mut NativeCallFrame) -> VmResult<Value>;
+
+    /// Graph90:A1 (sub_492090 -> sub_43BA30): clear a Window's text layer
+    /// and draw `items` row by row across `columns` equal columns, centred
+    /// in each column or at its left edge, in packed RGB `color`. Returns
+    /// false when `window` is not a Window object.
+    fn draw_item_selection_grid(
+        &mut self,
+        _window: i32,
+        _items: &[String],
+        _columns: i32,
+        _centered: bool,
+        _color: i32,
+    ) -> bool {
+        false
+    }
 
     /// Returns the two DWORD globals written by target helper sub_434410
     /// when Graph92:9B is called with selector 256.
     fn system92_text_output_pair(&self) -> [i32; 2] {
         [0, 0]
+    }
+
+    /// dword_565D4C: the text colour the last layout ended with (92:9B
+    /// selector 257).
+    fn system92_text_colour(&self) -> i32 {
+        0
     }
 
     /// Drains the process-global fragment table copied by target helper
@@ -1139,6 +1281,19 @@ pub trait GraphApi {
         None
     }
 
+    fn configure_background_frames(&mut self,_frames:&[i32],_alpha:i32)->VmResult<()> {
+        Err(VmError::Runtime("BackD backend unavailable".into()))
+    }
+
+    fn start_native_selection(&mut self, _request: native_selection::NativeSelectionRequest) -> VmResult<u64> {
+        Err(VmError::Runtime("CProcSelect backend unavailable".into()))
+    }
+
+    fn poll_native_selection(&mut self, _selection_id: u64, _callbacks: &[[i32; 2]], _cancelled: bool)
+        -> Option<native_selection::NativeSelectionCompletion> {
+        None
+    }
+
     /// Reveal the current message and return whether any glyph state changed.
     fn reveal_native_message(&mut self) -> bool {
         false
@@ -1146,6 +1301,16 @@ pub trait GraphApi {
 
     /// Release host-side message-active state after the procedure completes.
     fn finish_native_message(&mut self) {}
+
+    /// sub_469110: whether a 0xB0 font number is registered.
+    fn native_font_registered(&self, _font: i32) -> bool {
+        true
+    }
+
+    /// dword_565BC0, the character spacing set by 91:98.
+    fn text_character_spacing(&self) -> i32 {
+        0
+    }
 
     fn register_graph_color_lut(&mut self, _id: i32, _points: [[i32; 2]; 3]) -> bool {
         false
@@ -1168,6 +1333,12 @@ pub trait GraphApi {
 
     fn query_movie_position(&self, _bitmap: i32) -> Result<i32, i32> {
         Err(4)
+    }
+
+    /// sub_407FA0 (91:F7): `None` for an invalid or empty bitmap slot; a
+    /// slot without a movie or a stopped movie reports -1.
+    fn query_movie_slot_position(&self, _bitmap: i32) -> Option<i32> {
+        None
     }
 
     /// Load and validate one target BF_Movie resource. The VM owns the two
@@ -1246,8 +1417,8 @@ pub trait GraphApi {
         &self,
         _landscape: i32,
         _alpha_test_mode: i32,
-    ) -> Option<[i32; 2]> {
-        None
+    ) -> VmResult<Option<[i32; 2]>> {
+        Ok(None)
     }
 
     fn configure_graph91_landscape_parts(
@@ -1259,18 +1430,20 @@ pub trait GraphApi {
         _part_spacing: i32,
         _column_count: i32,
         _column_words: &[i32],
-    ) -> bool {
-        false
+    ) -> VmResult<()> {
+        Ok(())
     }
 
+    /// `map` is empty when either dimension is outside 1..=256; the target
+    /// reads the table only after its pillar and size checks.
     fn configure_graph91_landscape_map(
         &mut self,
         _landscape: i32,
         _width: i32,
         _height: i32,
         _map: &[i32],
-    ) -> bool {
-        false
+    ) -> VmResult<()> {
+        Ok(())
     }
 
     fn configure_graph91_landscape_guides(
@@ -1279,8 +1452,8 @@ pub trait GraphApi {
         _bitmap: i32,
         _guide_count: i32,
         _guide_words: &[i32],
-    ) -> bool {
-        false
+    ) -> VmResult<()> {
+        Ok(())
     }
 
     fn set_graph91_landscape_cell_guides(
@@ -1290,8 +1463,8 @@ pub trait GraphApi {
         _layer: i32,
         _guide: i32,
         _value: i32,
-    ) -> bool {
-        false
+    ) -> VmResult<()> {
+        Ok(())
     }
 
     fn query_graph91_landscape_cell_value(
@@ -1299,8 +1472,8 @@ pub trait GraphApi {
         _landscape: i32,
         _line: i32,
         _column: i32,
-    ) -> Option<i32> {
-        None
+    ) -> VmResult<Option<i32>> {
+        Ok(None)
     }
 
     fn cache_graph_blob(&mut self, _namespace: &str, _name: &str, _bytes: &[u8]) -> bool {
@@ -1528,8 +1701,10 @@ impl Default for GraphInputDescriptor {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct GraphInputGroup {
+    /// Grid columns: compact count high word, extended group+4; zero uses item count.
+    pub navigation_columns: i32,
     pub index: i32,
     /// Configure-time current item: compact group+0x08, extended group+0x0C.
     /// -1 means no current item.
@@ -1715,13 +1890,16 @@ pub trait SoundApi {
         None
     }
 
+    /// sub_4417A0 statuses: 0, 7 (layer count), 8 (relative priority), 255
+    /// (handle). The tables are empty when `count` is outside 1..=16.
     fn configure_particle_frame_tables(
         &mut self,
         _handle: i32,
+        _count: i32,
         _first: &[i32],
         _second: &[i32],
-    ) -> bool {
-        false
+    ) -> i32 {
+        255
     }
 
     fn user_spline_exists(&self, _handle: i32) -> bool {
@@ -1883,7 +2061,24 @@ fn portable_physical_memory_mb() -> (u32, u32) {
     )
 }
 
-fn portable_local_system_time() -> [u16; 8] {
+pub(crate) fn portable_local_system_time() -> [u16; 8] {
+    // An installed clock (the web build) carries its own zone offset.
+    if let Some(time) = ethornell_core::clock::installed() {
+        let seconds = time.since_epoch.as_secs() as i64 + i64::from(time.utc_offset_minutes) * 60;
+        let days = seconds.div_euclid(86_400);
+        let second_of_day = seconds.rem_euclid(86_400);
+        let (year, month, day) = user_data::civil_from_days_for_save(days);
+        return [
+            year.clamp(0, u16::MAX as i32) as u16,
+            month as u16,
+            (days + 4).rem_euclid(7) as u16,
+            day as u16,
+            (second_of_day / 3_600) as u16,
+            (second_of_day / 60 % 60) as u16,
+            (second_of_day % 60) as u16,
+            time.since_epoch.subsec_millis() as u16,
+        ];
+    }
     #[cfg(target_os = "windows")]
     {
         #[repr(C)]
@@ -1942,19 +2137,16 @@ fn portable_local_system_time() -> [u16; 8] {
             zone: *const c_char,
         }
         unsafe extern "C" {
-            fn time(timer: *mut i64) -> i64;
             fn localtime_r(timer: *const i64, result: *mut Tm) -> *mut Tm;
         }
-        let mut seconds = 0i64;
-        // SAFETY: pointers refer to initialized writable storage and localtime_r is reentrant.
-        if unsafe { time(&mut seconds) } != -1 {
+        // One sample for both the calendar fields and the milliseconds.
+        if let Ok(now) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+            let seconds = now.as_secs() as i64;
+            let milliseconds = now.subsec_millis() as u16;
             let mut local = std::mem::MaybeUninit::<Tm>::uninit();
+            // SAFETY: pointers refer to initialized writable storage and localtime_r is reentrant.
             if !unsafe { localtime_r(&seconds, local.as_mut_ptr()) }.is_null() {
                 let local = unsafe { local.assume_init() };
-                let milliseconds = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|duration| duration.subsec_millis() as u16)
-                    .unwrap_or(0);
                 return [
                     local.year.saturating_add(1900).clamp(0, u16::MAX as i32) as u16,
                     local.mon.saturating_add(1).clamp(0, u16::MAX as i32) as u16,
@@ -1972,54 +2164,7 @@ fn portable_local_system_time() -> [u16; 8] {
 }
 
 pub fn default_graphics_capability_record() -> [u32; 16] {
-    let mut record = [0u32; 16];
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    {
-        #[cfg(target_arch = "x86")]
-        use std::arch::x86::{__cpuid, __cpuid_count};
-        #[cfg(target_arch = "x86_64")]
-        use std::arch::x86_64::{__cpuid, __cpuid_count};
-        let vendor = __cpuid(0);
-        let mut vendor_bytes = Vec::with_capacity(12);
-        vendor_bytes.extend_from_slice(&vendor.ebx.to_le_bytes());
-        vendor_bytes.extend_from_slice(&vendor.edx.to_le_bytes());
-        vendor_bytes.extend_from_slice(&vendor.ecx.to_le_bytes());
-        let vendor_name = String::from_utf8_lossy(&vendor_bytes);
-        record[3] = match vendor_name.as_ref() {
-            "GenuineIntel" => 0,
-            "AuthenticAMD" => 1,
-            "CentaurHauls" => 2,
-            "GenuineTMx86" => 3,
-            _ => 4,
-        };
-        let signature = __cpuid(1);
-        let base_family = (signature.eax >> 8) & 0x0f;
-        let ext_family = (signature.eax >> 20) & 0xff;
-        let base_model = (signature.eax >> 4) & 0x0f;
-        let ext_model = (signature.eax >> 16) & 0x0f;
-        record[1] = signature.eax & 0x0f;
-        record[4] = if base_family == 0x0f {
-            base_family + ext_family
-        } else {
-            base_family
-        };
-        record[0] = if matches!(base_family, 0x06 | 0x0f) {
-            base_model | (ext_model << 4)
-        } else {
-            base_model
-        };
-        record[2] = if record[3] == 0 {
-            signature.ebx & 0xff
-        } else if __cpuid(0x8000_0000).eax >= 0x8000_0001 {
-            __cpuid_count(0x8000_0001, 0).ebx & 0xffff
-        } else {
-            0
-        };
-    }
-    record[9] = std::thread::available_parallelism()
-        .map(|count| count.get().min(u32::MAX as usize) as u32)
-        .unwrap_or(1);
-    record
+    cpu_record::processor_record()
 }
 
 fn target_cpu_brand_string() -> Option<String> {
@@ -2046,30 +2191,10 @@ fn target_cpu_brand_string() -> Option<String> {
             .iter()
             .position(|byte| *byte == 0)
             .unwrap_or(bytes.len());
-        let text = String::from_utf8_lossy(&bytes[..end]);
-        return Some(text.split_whitespace().collect::<Vec<_>>().join(" "));
+        return Some(String::from_utf8_lossy(&bytes[..end]).into_owned());
     }
     #[allow(unreachable_code)]
     None
-}
-
-fn target_cpu_signature_words() -> [u32; 4] {
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    {
-        #[cfg(target_arch = "x86")]
-        use std::arch::x86::__cpuid;
-        #[cfg(target_arch = "x86_64")]
-        use std::arch::x86_64::__cpuid;
-        let result = __cpuid(1);
-        return [
-            result.eax & 0xffff,
-            (result.eax >> 16) & 0xffff,
-            result.edx & 0xffff,
-            (result.edx >> 16) & 0xffff,
-        ];
-    }
-    #[allow(unreachable_code)]
-    [0; 4]
 }
 
 fn native_file_hash(bytes: &[u8]) -> [u32; 2] {
@@ -2090,48 +2215,65 @@ fn native_file_hash_update(initial: [u32; 2], bytes: &[u8]) -> [u32; 2] {
     [hash, u32::from_le_bytes(tail)]
 }
 
-fn wide_string_similarity(left: &[u16], right: &[u16]) -> i32 {
-    // sub_495C50 has an asymmetric empty-string fast path: an empty second
-    // operand returns zero, while an empty first operand returns the second
-    // length through the normal len(left)+len(right)-LCS result.
-    if right.is_empty() {
+/// sub_496770: the grid walk where every step costs one and a diagonal is
+/// allowed only on equal units; the result is len(a1) + len(a2) minus the
+/// shortest walk, i.e. the longest common subsequence. An empty `a2`
+/// returns 0 before the walk.
+fn wide_string_similarity(a1: &[u16], a2: &[u16]) -> i32 {
+    if a2.is_empty() {
         return 0;
     }
-    let mut previous = vec![0usize; right.len() + 1];
-    let mut current = vec![0usize; right.len() + 1];
-    for &left_value in left {
-        for (index, &right_value) in right.iter().enumerate() {
-            current[index + 1] = if left_value == right_value {
-                previous[index] + 1
-            } else {
-                current[index].max(previous[index + 1])
-            };
+    let mut previous: Vec<i32> = (0..=a2.len() as i32).collect();
+    let mut current = vec![0i32; a2.len() + 1];
+    for (row, &unit) in a1.iter().enumerate() {
+        current[0] = row as i32 + 1;
+        for column in 1..=a2.len() {
+            let mut best = current[column - 1].min(previous[column]);
+            if a2[column - 1] == unit {
+                best = best.min(previous[column - 1]);
+            }
+            current[column] = best + 1;
         }
         std::mem::swap(&mut previous, &mut current);
-        current.fill(0);
     }
-    left.len()
-        .saturating_add(right.len())
-        .saturating_sub(previous[right.len()])
-        .min(i32::MAX as usize) as i32
+    (a1.len() + a2.len()) as i32 - previous[a2.len()]
 }
 
-fn adjusted_desktop_dimensions((width, height): (i32, i32)) -> (i32, i32) {
-    let width = width.max(1);
-    let height = height.max(1);
-    let adjusted_width = if 4_i64.saturating_mul(i64::from(width)) / i64::from(height) >= 10 {
-        width / 2
+/// sub_45EAE0(.., 1): a desktop of 2.5:1 or wider is two monitors side by
+/// side (half the width); one at most 1.25:1 tall is two stacked (half the
+/// height). Unsigned arithmetic; the target divides by zero on an empty
+/// mode, here an empty mode stays empty.
+fn adjusted_desktop_dimensions((width, height): (u32, u32)) -> (u32, u32) {
+    let adjusted_width = if height != 0 && 4u32.wrapping_mul(width) / height >= 10 {
+        width >> 1
     } else {
         width
     };
-    let adjusted_height = if height / width != 0
-        && 100_i64.saturating_mul(i64::from(height)) / i64::from(width) < 125
+    let adjusted_height = if width != 0
+        && height / width != 0
+        && 100u32.wrapping_mul(height) / width < 125
     {
-        height / 2
+        height >> 1
     } else {
         height
     };
-    (adjusted_width.max(1), adjusted_height.max(1))
+    (adjusted_width, adjusted_height)
+}
+
+/// sub_496650: drops leading spaces, folds each run of spaces into one and
+/// removes one trailing space.
+fn bgi_normalize_spaces(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.trim_start_matches(' ').chars() {
+        if ch == ' ' && out.ends_with(' ') {
+            continue;
+        }
+        out.push(ch);
+    }
+    if out.ends_with(' ') {
+        out.pop();
+    }
+    out
 }
 
 fn placeholder_loaded_program(
@@ -2161,6 +2303,7 @@ fn placeholder_loaded_program(
         labels,
         warnings: vec![warning.into()],
         module_size: 0,
+        code: Vec::new(),
     }
 }
 
@@ -2197,14 +2340,23 @@ pub struct Vm {
     pub mem_ptr: u32,
     pub heap_ptr: u32,
     heap_allocations: BTreeMap<u32, u32>,
+    /// Slot table of the target heap (ADR 0005): script-visible heap
+    /// addresses are sub_48E760's, mapped onto `heap_allocations` blocks.
+    pub(crate) target_heap: target_heap::TargetHeap,
     heap_free_blocks: Vec<(u32, u32)>,
-    shared_heap: Arc<Mutex<SharedHeapState>>,
-    shared_heap_generation: u64,
-    shared_heap_dirty: Vec<std::ops::Range<usize>>,
     pub halted: bool,
     pub calls: BTreeMap<String, usize>,
     pub stubs: BTreeMap<String, usize>,
     program_cache: BTreeMap<String, usize>,
+    /// sub_445710 / sub_445850 blocks in this thread's regions; a
+    /// DCTChildThread holds its ancestor's (Sys81:44, `child_thread.rs`).
+    region_reservations: Arc<std::sync::Mutex<child_thread::RegionReservations>>,
+    /// A DCTChildThread: its reservation tag (the thread id).
+    child_thread_tag: Option<i32>,
+    /// The thread whose local window (data and code regions) this one runs in.
+    local_window_owner: Option<i32>,
+    /// Lowest code offset a module is appended at (a child's code block).
+    code_used_floor: u32,
     program_free_stack: Vec<usize>,
     mediation_programs: BTreeMap<u8, BpProgram>,
     record_tables: BTreeMap<u32, records::RecordTableState>,
@@ -2220,7 +2372,6 @@ pub struct Vm {
     /// The native table assigns each distinct name a stable zero-based index.
     /// Keep it separate from the indexed string namespaces used by 0xDA..0xDD;
     /// the target executable stores these in different native tables.
-    resource_names: Vec<String>,
     /// Target dword_506BE0 and dword_566630 resource-search globals.
     additional_resource_search_enabled: bool,
     additional_resource_paths: Vec<String>,
@@ -2229,23 +2380,25 @@ pub struct Vm {
     /// Target primary/secondary process-global filesystem roots.
     primary_resource_root: Option<String>,
     secondary_resource_root: Option<String>,
+    /// dword_566028 / dword_566338: caption and text of the media prompt,
+    /// set by Sys80:3F.
+    media_prompt_title: String,
+    media_prompt_text: String,
     /// Independent validated directory stored by target sub_46B390.
     validated_file_root: Option<String>,
     /// Target process-global dword_507688 written by Sys80:0x50.
     system_wait_state: i32,
     string_hash_tables: BTreeMap<i32, Vec<String>>,
     read_flags: BTreeMap<String, ReadFlagBits>,
-    display_mode_slots: [Option<(i32, i32)>; 8],
-    window_monitor_adapter_mode: i32,
-    config_input_mode: i32,
-    shader_effect_enabled: bool,
     save_data_integrity_enabled: i32,
     /// Target dword_5668A0: one-shot selection of the next binary/BMV
     /// procedure path. The consuming selector always resets it.
     next_binary_or_bmv_async: bool,
     /// Target dword_566898/dword_56689C cooperative scheduling restriction.
     exclusive_thread_id: Option<i32>,
-    global_config: Vec<u8>,
+    /// Size of dword_56676C, the global segment (segment 0 of
+    /// sub_48E8C0): `memory[..global_size]` (Sys80:70).
+    pub(crate) global_size: usize,
     global_user_data: Vec<u8>,
     loaded_bcs_ranges: Vec<scenario::LoadedBcsRange>,
     async_tasks: Vec<async_program::AsyncProgramTask>,
@@ -2274,20 +2427,7 @@ pub struct Vm {
     next_thread_id: i32,
     collect_diagnostics: bool,
     extended_opcodes: extended_opcodes::ExtendedOpcodeState,
-}
-
-#[derive(Debug, Default)]
-struct SharedHeapState {
-    bytes: Vec<u8>,
-    values: BTreeMap<u32, Value>,
-    generation: u64,
-    journal: Vec<SharedHeapJournalEntry>,
-}
-
-#[derive(Debug, Clone)]
-struct SharedHeapJournalEntry {
-    generation: u64,
-    range: std::ops::Range<usize>,
+    logic: logic::LogicState,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -2452,12 +2592,23 @@ impl Vm {
             // script thread through sub_48D080 (id 1); 0x80:0x44 children
             // continue from 2.
             next_thread_id: MAIN_THREAD_ID + 1,
-            global_config: vec![0; user_data::GLOBAL_CONFIG_SIZE],
+            global_size: user_data::GLOBAL_CONFIG_SIZE,
             global_user_data: vec![0; user_data::GLOBAL_USER_DATA_SIZE],
             ..Self::default()
         };
         vm.thread.set_thread_id(MAIN_THREAD_ID);
         vm
+    }
+
+    /// Start the sub_499290 clock at `base_ms` (the host uptime for
+    /// interactive runs).
+    pub fn set_clock_base_ms(&mut self, base_ms: u32) {
+        self.timing.set_base(base_ms);
+    }
+
+    /// dword_503DE8 (Sys81:04): the largest clock step sub_499290 counts.
+    pub fn clock_jump_threshold_ms(&self) -> u32 {
+        self.system81_shared.lock().expect("system81 state poisoned").clock_jump_threshold_ms as u32
     }
 
     pub fn advance_time_ms(&mut self, milliseconds: u64) {
@@ -2498,6 +2649,7 @@ impl Vm {
         self.programs.push(program.clone());
         self.program_code_bases.clear();
         self.program_code_bases.push(0);
+        self.install_module_code(0, &program.code);
         self.program_active.clear();
         self.program_active.push(true);
         self.target_loaded_programs.clear();
@@ -2567,7 +2719,12 @@ impl Vm {
             }
         }
         let response_error = self.settle_ready_host_response().err();
-        let procedure_wait = if let Some(error) = response_error {
+        // 48D860 skips every non-owner before polling its CProcedure or
+        // executing BP instructions. Child pumping above still reaches the
+        // owner when the root itself is excluded.
+        let procedure_wait = if self.exclusive_thread_id.is_some_and(|owner| owner != self.thread.thread_id()) {
+            Some(VmStopReason::WaitingForProcedure)
+        } else if let Some(error) = response_error {
             self.push_trace(format!("host response failed: {error}"));
             self.halted = true;
             Some(VmStopReason::Error)
@@ -2724,6 +2881,7 @@ impl Vm {
                     break;
                 }
                 Err(err) => {
+                    self.report_script_error(api, program_index, inst.offset as u32, inst.raw.first().copied().unwrap_or(0), &err);
                     self.push_trace(format!("error: {err}"));
                     tracing::error!(
                         vm = self.trace_id,
@@ -2889,6 +3047,7 @@ impl Vm {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            code: Vec::new(),
         });
         self.current_program = self.programs.len() - 1;
         self.pc = 0;
@@ -2930,7 +3089,7 @@ impl Vm {
                 ..
             } => {
                 self.push_value(Value::Ptr(
-                    0x1200_0000u32 | self.mem_ptr.saturating_sub(read_op_u32(instruction)),
+                    FRAME_SEGMENT | self.mem_ptr.saturating_sub(read_op_u32(instruction)),
                 ));
             }
             BpOpcode::Known {
@@ -2938,19 +3097,44 @@ impl Vm {
                 ..
             } => {
                 if let Some(BpOperand::String(text)) = instruction.operands.first() {
-                    self.push_value(Value::Str(text.clone()));
+                    // Opcode 0x05 pushes the literal's code address,
+                    // `(pc_base + off) | 0x04000000`; the bytes are in the
+                    // thread's code region (`install_module_code`).
+                    let program = &self.programs[program_index];
+                    let relative = instruction
+                        .raw
+                        .get(1..3)
+                        .map(|bytes| i16::from_le_bytes([bytes[0], bytes[1]]) as i32);
+                    let start = Self::program_parser_code_start(program);
+                    let literal = relative
+                        .map(|relative| (instruction.offset as i64 + i64::from(relative)) as u32)
+                        .filter(|&target| {
+                            target
+                                .checked_sub(start)
+                                .is_some_and(|offset| (offset as usize) < program.code.len())
+                        });
+                    if let Some(target) = literal {
+                        let base = self.program_code_bases.get(program_index).copied().unwrap_or_default();
+                        self.push_value(Value::Ptr(CODE_SEGMENT | base.wrapping_add(target - start)));
+                    } else {
+                        self.push_value(Value::Str(text.clone()));
+                    }
                 } else if let Some(BpOperand::Offset(offset)) = instruction.operands.first() {
-                    self.push_value(Value::Ptr(0x1000_0000 | *offset));
+                    // Opcode 0x05: `(pc_base + off) | 0x04000000`.
+                    let program = &self.programs[program_index];
+                    let base = self.program_code_bases.get(program_index).copied().unwrap_or_default();
+                    let address = base.wrapping_add(offset.wrapping_sub(Self::program_parser_code_start(program)));
+                    self.push_value(Value::Ptr(CODE_SEGMENT | address));
                 }
             }
             BpOpcode::Known {
                 name: "push_offset",
                 ..
             } => {
-                self.push_value(Value::Func {
-                    program_index,
-                    offset: read_op_u32(instruction),
-                });
+                // Opcode 0x06 (sub_473650): the plain code-region offset
+                // `insn_start + disp`, without a segment tag.
+                let code = self.code_offset_of(program_index, read_op_u32(instruction));
+                self.push_value(Value::Int(code as i32));
             }
             BpOpcode::Known {
                 name: "load_base", ..
@@ -2980,7 +3164,7 @@ impl Vm {
                     // excerpt line), and stale bytes there decode as garbage
                     // text. See src/README.md "Open fidelity items".
                     let size = (next - previous) as usize;
-                    let ptr = 0x1200_0000u32 | previous;
+                    let ptr = FRAME_SEGMENT | previous;
                     let range = self.resolve_write_range(ptr, size)?;
                     self.memory[range].fill(0);
                     self.clear_shadow_values(ptr, size);
@@ -3095,7 +3279,9 @@ impl Vm {
                         self.program_name(program_index)
                     )));
                 }
-                next_pc = self.jump_target_index(program_index, dest)?;
+                let (target_program, parser_offset) = self.resolve_code_target(program_index, dest);
+                self.current_program = target_program;
+                next_pc = self.jump_target_index(target_program, parser_offset)?;
             }
             BpOpcode::Known { name: "jc", .. } => {
                 let kind = read_op_u8(instruction);
@@ -3127,7 +3313,9 @@ impl Vm {
                     );
                 }
                 if take {
-                    next_pc = self.jump_target_index(program_index, dest)?;
+                    let (target_program, parser_offset) = self.resolve_code_target(program_index, dest);
+                    self.current_program = target_program;
+                    next_pc = self.jump_target_index(target_program, parser_offset)?;
                 }
             }
             BpOpcode::Known { name: "call", .. } => match {
@@ -3144,7 +3332,7 @@ impl Vm {
                         _ => ("<non-function>", 0),
                     };
                     let command = self
-                        .read_int(0x1200_0000 | self.mem_ptr.saturating_sub(4), 2)
+                        .read_int(FRAME_SEGMENT | self.mem_ptr.saturating_sub(4), 2)
                         .unwrap_or_default();
                     let scenario_offset = self.read_int(314_072 + 416, 2).unwrap_or_default();
                     tracing::warn!(
@@ -3249,7 +3437,8 @@ impl Vm {
                 }
             },
             BpOpcode::Known { name: "ret", .. } => {
-                if self.mem_ptr == 0 {
+                // sub_474020: a frame stack at the region base ends the thread.
+                if self.mem_ptr <= self.thread.frame_region_base() {
                     self.halted = true;
                 } else if let Some((program_id, fallback_ret, stack_base)) = self.call_stack.pop() {
                     let ret_offset = self.read_return_addr()?;
@@ -3275,9 +3464,10 @@ impl Vm {
                             "VM ret"
                         );
                     }
-                    self.current_program = program_id;
+                    let (return_program, parser_offset) = self.resolve_code_target(program_id, ret_offset);
+                    self.current_program = return_program;
                     next_pc = self
-                        .jump_target_index(program_id, ret_offset)
+                        .jump_target_index(return_program, parser_offset)
                         .unwrap_or(fallback_ret);
                 } else {
                     self.halted = true;
@@ -3427,6 +3617,21 @@ impl Vm {
             } => {
                 self.execute_qword_arithmetic(code)?;
             }
+            BpOpcode::Known {
+                name: "fixed_mul" | "fixed_div",
+                ..
+            } => {
+                let value = self.execute_fixed_arithmetic(code)?;
+                self.push_value(Value::Int(value));
+            }
+            BpOpcode::Known {
+                name:
+                    "vec4_add" | "vec4_sub" | "vec4_mul" | "vec4_div" | "vec3_normalize"
+                    | "vec4_scale" | "vec4_div_scalar",
+                ..
+            } => {
+                self.execute_fixed_vector(code)?;
+            }
             BpOpcode::Known { name: "memcpy", .. } => {
                 let size = self.pop_int()?.max(0) as usize;
                 let src = self.pop_ptr()?;
@@ -3515,16 +3720,14 @@ impl Vm {
             BpOpcode::Known {
                 name: "strfind", ..
             } => {
-                let needle = self.pop_string_lossy()?;
-                let haystack = self.pop_string_lossy()?;
-                let needle=self.encode_native_string(&needle);
-                let haystack=self.encode_native_string(&haystack);
+                let needle = self.pop_native_string_bytes()?;
+                let haystack = self.pop_native_string_bytes()?;
                 let found = if needle.is_empty() {
                     0
                 } else {
                     haystack
                         .windows(needle.len())
-                        .position(|window| window == needle.as_ref())
+                        .position(|window| window == needle.as_slice())
                         .map(|offset| offset as i32)
                         .unwrap_or(-1)
                 };
@@ -3535,27 +3738,24 @@ impl Vm {
             } => {
                 // sub_474520 pops replacement, needle, haystack, destination,
                 // runs sub_495A80 and pushes the number of replacements.
-                let replacement = self.pop_string_lossy()?;
-                let needle = self.pop_string_lossy()?;
-                let haystack = self.pop_string_lossy()?;
+                let replacement = self.pop_native_string_bytes()?;
+                let needle = self.pop_native_string_bytes()?;
+                let haystack = self.pop_native_string_bytes()?;
                 let dst = self.pop_ptr()?;
-                let (replaced, count) = target_strreplace(
-                    &self.encode_native_string(&haystack),
-                    &self.encode_native_string(&needle),
-                    &self.encode_native_string(&replacement),
-                );
-                let text=if self.native_abi_profile==NativeAbiProfile::Amachoco {String::from_utf8_lossy(&replaced)} else {encoding_rs::SHIFT_JIS.decode(&replaced).0};
-                self.write_c_string(dst, &text)?;
+                let (replaced, count) = target_strreplace(&haystack, &needle, &replacement);
+                self.write_c_string_native_bytes(dst, &replaced)?;
                 self.push_value(Value::Int(count));
             }
             BpOpcode::Known { name: "strlen", .. } => {
-                let text = self.pop_string_lossy()?;
-                let encoded=self.encode_native_string(&text);
-                self.push_value(Value::Int(encoded.len() as i32));
+                // The target runs C strlen over the raw buffer, so bytes that
+                // do not survive a Shift-JIS round trip (GBK fan patches)
+                // must be counted as stored.
+                let bytes = self.pop_native_string_bytes()?;
+                self.push_value(Value::Int(bytes.len() as i32));
             }
             BpOpcode::Known { name: "streq", .. } => {
-                let right = self.pop_string_lossy()?;
-                let left = self.pop_string_lossy()?;
+                let right = self.pop_native_string_bytes()?;
+                let left = self.pop_native_string_bytes()?;
                 self.push_value(Value::Int((left == right) as i32));
             }
             BpOpcode::Known { name: "strcpy", .. } => {
@@ -3566,16 +3766,17 @@ impl Vm {
             BpOpcode::Known {
                 name: "strconcat", ..
             } => {
-                let right = self.pop_string_lossy()?;
-                let left = self.pop_string_lossy()?;
+                let right = self.pop_native_string_bytes()?;
+                let mut joined = self.pop_native_string_bytes()?;
                 let dst = self.pop_ptr()?;
-                self.write_c_string(dst, &format!("{left}{right}"))?;
+                joined.extend_from_slice(&right);
+                self.write_c_string_native_bytes(dst, &joined)?;
             }
             BpOpcode::Known {
                 name: "getchar", ..
             } => {
                 let ptr = self.pop_ptr()?;
-                let start = Self::memory_addr(ptr) as usize;
+                let start = self.memory_addr(ptr) as usize;
                 let first = self.memory.get(start).copied().unwrap_or_default();
                 let is_two_byte = matches!(first, 0x81..=0x9f | 0xe0..=0xfc);
                 let ch = if is_two_byte {
@@ -3754,6 +3955,9 @@ impl Vm {
                     return Err(VmError::UnknownDispatch { group: code, id });
                 }
                 let opcode = NativeOpcode { group: code, id };
+                if (code, id) == (0x80, 0x3c) {
+                    self.resolve_sys80_3c_file(api)?;
+                }
                 if api.host_requests_enabled() {
                     if self.intercept_native_host_request(api, opcode)? {
                         self.pc = next_pc;
@@ -3779,92 +3983,32 @@ impl Vm {
                 } else if (code, id) == (0x80, 0x31) {
                     self.sys80_31_read_file_range(api)?
                 } else if (code, id) == (0x80, 0x32) {
-                    // Arguments are pushed as path, source, then byte count.
-                    let length = self.pop_int()? as u32 as usize;
-                    let source = self.pop_ptr()?;
-                    let path = self.pop_string_lossy()?;
-                    let range = self.resolve_range(source, length)?;
-                    Value::Int(i32::from(api.write_file_bytes(&path, &self.memory[range])))
+                    self.sys80_32_write_file(api)?
                 } else if (code, id) == (0x80, 0x34) {
-                    // Target 0x4888C0 pops file first and archive/root second,
-                    // then passes both to sub_4665C0 (ECX=file, stack=archive).
-                    let raw_file = self.pop_value()?;
-                    let raw_archive = self.pop_value()?;
-                    let file = self.value_as_native_string_lossy(raw_file.clone())?;
-                    let archive = self.value_as_native_string_lossy(raw_archive.clone())?;
-                    let found = self.resource_file_exists_with_search(api, &archive, &file);
-                    // sub_466550 rejects an entry name of 0x60 bytes or more
-                    // before it searches the archive (sub_464520 is fatal).
-                    if !found
-                        && !archive.is_empty()
-                        && encoding_rs::SHIFT_JIS.encode(&file).0.len() >= 0x60
-                    {
-                        return Err(VmError::Runtime(format!(
-                            "Sys80:34 resource name {file} is longer than 95 bytes"
-                        )));
-                    }
-                    tracing::debug!(
-                        archive,
-                        file,
-                        ?raw_archive,
-                        ?raw_file,
-                        found,
-                        "Sys80_34_FileExistsWithConfiguredRoots"
-                    );
-                    Value::Int(i32::from(found))
+                    self.sys80_34_file_exists(api)?
                 } else if (code, id) == (0x80, 0x35) {
-                    // Target 0x488900 pops file first and archive/root second,
-                    // then calls sub_4662E0 with ECX=archive and stack=file.
-                    let file = self.pop_string_lossy()?;
-                    let archive = self.pop_string_lossy()?;
-                    let size = self
-                        .resource_file_size_with_search(api, &archive, &file)
-                        .max(0);
-                    tracing::info!(archive, file, size, "Sys80_35_FileSizeWithConfiguredRoots");
-                    Value::Int(size)
+                    self.sys80_35_file_size(api)?
                 } else if (code, id) == (0x80, 0x3e) {
+                    // sub_489650: an existing directory becomes ::Buffer as
+                    // sprintf("%s\\"), which appends even after a separator.
                     let path = self.pop_string_lossy()?;
                     let valid = api.directory_exists(&path);
                     if valid {
-                        self.primary_resource_root = Some(ensure_trailing_separator(&path));
+                        self.primary_resource_root = Some(format!("{path}\\"));
                     }
                     Value::Int(i32::from(valid))
                 } else if (code, id) == (0x80, 0x3f) {
-                    let retry = self.pop_int()? != 0;
-                    let prompt = self.pop_string_lossy()?;
-                    let subdirectory = self.pop_string_lossy()?;
-                    let archive_name = self.pop_string_lossy()?;
-                    let root = api.locate_removable_archive_root(
-                        &archive_name,
-                        &prompt,
-                        &subdirectory,
-                        retry,
-                    );
-                    if let Some(root) = root {
-                        let configured_root = ensure_trailing_separator(&root);
-                        tracing::info!(
-                            archive_name,
-                            subdirectory,
-                            root = %configured_root,
-                            "Sys80_3F_ConfiguredSecondaryResourceRoot"
-                        );
-                        self.secondary_resource_root = Some(configured_root);
-                        Value::Int(1)
-                    } else {
-                        tracing::warn!(
-                            archive_name,
-                            subdirectory,
-                            "Sys80_3F_SecondaryResourceRootNotFound"
-                        );
-                        Value::Int(0)
-                    }
+                    self.sys80_3f_find_media(api)?
                 } else if (code, id) == (0x80, 0x45) {
                     // The target table points at __RTC_NumErrors, but the
                     // dispatch ABI exposes no result; this selector is a
                     // BP-visible no-op in the shipped release image.
                     Value::None
                 } else if (code, id) == (0x80, 0x50) {
+                    // sub_489B30 stores dword_507688 and returns interpreter
+                    // status 1: the thread's slice ends like Sys80:5F.
                     self.system_wait_state = self.pop_int()?;
+                    self.scheduler_signal = Some(SchedulerSignal::Yield);
                     tracing::debug!(
                         value = self.system_wait_state,
                         "Sys80_50_SetSystemWaitState"
@@ -4059,7 +4203,7 @@ impl Vm {
             BpOpcode::Known {
                 name: "script_ret", ..
             } => {
-                if self.mem_ptr == 0 {
+                if self.mem_ptr <= self.thread.frame_region_base() {
                     self.halted = true;
                 } else if let Some((program_id, fallback_ret, stack_base)) = self.call_stack.pop() {
                     let ret_offset = self.read_return_addr()?;
@@ -4136,7 +4280,75 @@ impl Vm {
                     self.note_stub("graph", code, id);
                     return Err(VmError::UnknownDispatch { group: code, id });
                 }
-                let result = if (code, id) == (0x90, 0xbc) {
+                let result = if (code, id) == (0x90, 0xa1) {
+                    // sub_47F0F0 pops colour, layout, column count, the item
+                    // string table, item count and the Window. sub_491F30
+                    // checks the count (1..=16) before the column count (at
+                    // most 16); every failure is a script error. A column
+                    // count below 1 makes sub_43BA30 divide by zero.
+                    let color = self.pop_int()?;
+                    let layout = self.pop_int()?;
+                    let columns = self.pop_int()?;
+                    let table = self.pop_ptr()?;
+                    let count = self.pop_int()?;
+                    let window = self.pop_int()?;
+                    if !(1..=16).contains(&count) {
+                        return Err(VmError::Runtime(format!(
+                            "無効な項目数 [ {count} ] が指定されました"
+                        )));
+                    }
+                    if !(1..=16).contains(&columns) {
+                        return Err(VmError::Runtime(format!(
+                            "無効な縦列数 [ {columns} ] が指定されました"
+                        )));
+                    }
+                    let items = self.read_counted_string_pointer_list(table, count as usize)?;
+                    if !api.draw_item_selection_grid(window, &items, columns, layout != 0, color) {
+                        return Err(VmError::Runtime(
+                            "無効なウィンドウハンドルが指定されました".into(),
+                        ));
+                    }
+                    Value::None
+                } else if (code,id)==(0x90,0x78) {
+                    let pointer=self.pop_ptr()?;
+                    let height=self.pop_int()? as u32;
+                    let width=self.pop_int()? as u32;
+                    let object=self.pop_int()?;
+                    let count=width.checked_mul(height).filter(|n|*n!=0).ok_or_else(||VmError::Runtime("90:78: invalid tile table dimensions".into()))?;
+                    let bytes=count.checked_mul(2).ok_or_else(||VmError::Runtime("90:78: tile table size overflow".into()))?;
+                    // Validate the entire range before allocating a host vector.
+                    self.resolve_range(pointer,bytes as usize)?;
+                    let mut tiles=Vec::with_capacity(count as usize);
+                    for i in 0..count {tiles.push(self.read_int(pointer.wrapping_add(i*2),1)? as u16);}
+                    if !api.upload_map_tile_data(object,width,height,&tiles){return Err(VmError::Runtime("90:78: invalid map or tile dimensions".into()));}
+                    Value::None
+                } else if (code,id)==(0x90,0x44) {
+                    let alpha=self.pop_int()?;
+                    let table=self.pop_ptr()?;
+                    let count=self.pop_int()?;
+                    if !(2..=32).contains(&count) {return Err(VmError::Runtime(format!("Graph90:44 invalid frame count {count}")));}
+                    let mut frames=Vec::with_capacity(count as usize);
+                    for index in 0..count {frames.push(self.read_int(table.wrapping_add(index as u32*4),2)? as i32);}
+                    api.configure_background_frames(&frames,alpha)?;
+                    Value::None
+                } else if code == 0x90 && matches!(id, 0xA0 | 0xA2 | 0xA3 | 0xB0 | 0xB1) {
+                    let opcode = NativeOpcode { group: code, id };
+                    let args = self.take_dispatch_call_frame(code, id)?;
+                    let request = self.decode_native_selection(api, opcode, &args)?;
+                    let window = request.window;
+                    let selection_id = api.start_native_selection(request)?;
+                    let class_name = match id {
+                        0xA0 => "CProcSelectItem", 0xA2 => "CProcSelectItemEx",
+                        0xA3 => "CProcSelectItemExBlink", 0xB0 => "CProcSelectIcon",
+                        _ => "CProcSelectIconEx",
+                    };
+                    self.install_cprocedure(InstalledCProcedure::graph(
+                        self.thread.thread_id(), opcode, class_name,
+                        native_thread::NativeGraphProcedureMode::Select,
+                        Some(window), Some(selection_id),
+                    ), trace_events);
+                    Value::None
+                } else if (code, id) == (0x90, 0xbc) {
                     let object = self.pop_value()?;
                     let state_buffer = self.pop_ptr()?;
                     let exists = api.graph_input_object_exists(object.as_i32());
@@ -4149,8 +4361,8 @@ impl Vm {
                                 value as u32,
                             )?;
                         }
-                        if self.native_abi_profile==NativeAbiProfile::Amachoco && api.input_gate_diagnostics_enabled() && state_buffer==(0x1200_0000u32|self.mem_ptr.wrapping_sub(0x64)) {
-                            let base=0x1200_0000u32|self.mem_ptr;
+                        if self.native_abi_profile==NativeAbiProfile::Amachoco && api.input_gate_diagnostics_enabled() && state_buffer==(FRAME_SEGMENT|self.mem_ptr.wrapping_sub(0x64)) {
+                            let base=FRAME_SEGMENT|self.mem_ptr;
                             let read=|offset:u32|self.read_int(base.wrapping_sub(offset),2).unwrap_or(u32::MAX);
                             let event=read(0x70);
                             if event!=0 {api.record_input_gate([self.pc as u32,self.mem_ptr,event,read(0x6c),read(0x68),read(0x44),read(0x40),state[0]as u32,self.read_int(1092,2).unwrap_or(u32::MAX)]);}
@@ -4202,6 +4414,12 @@ impl Vm {
                     let height = self.pop_int()?;
                     let width = self.pop_int()?;
                     let bitmap = self.pop_int()?;
+                    // sub_47A5C0: sub_4986D0 first.
+                    if bitmap as u32 >= 0x4000 {
+                        return Err(VmError::Runtime(format!(
+                            "無効なビットマップ番号 [ {bitmap} ] が指定されました"
+                        )));
+                    }
                     // sub_4080B0: format 1 (and 7, which sub_407DA0 maps to
                     // 1) reads packed 3-byte B,G,R pixels into XRGB dwords;
                     // every other format is a tightly packed copy using the
@@ -4221,20 +4439,32 @@ impl Vm {
                     api.create_bitmap_from_rgb(bitmap, width, height, format, &bytes);
                     Value::None
                 } else if (code, id) == (0x90, 0x15) {
+                    // sub_47A630 -> sub_4081F0: an unknown bitmap (9) or a
+                    // buffer smaller than the packed image (10) is fatal.
                     let bitmap = self.pop_int()?;
-                    let capacity = self.pop_int()?.max(0) as usize;
+                    let capacity = self.pop_int()? as u32;
                     let written = self.pop_ptr()?;
                     let destination = self.pop_ptr()?;
-                    let bytes = api
-                        .read_bitmap_pixels(bitmap, capacity)
-                        .filter(|bytes| bytes.len() <= capacity);
-                    let count = bytes.as_ref().map(Vec::len).unwrap_or_default();
-                    if let Some(bytes) = bytes {
-                        let range = self.resolve_write_range(destination, bytes.len())?;
-                        self.memory[range].copy_from_slice(&bytes);
-                        self.clear_shadow_values(destination, bytes.len());
+                    if bitmap as u32 >= 0x4000 {
+                        return Err(VmError::Runtime(format!(
+                            "無効なビットマップ番号 [ {bitmap} ] が指定されました"
+                        )));
                     }
-                    self.write_int(written, 2, count as u32)?;
+                    if api.query_bitmap_info(bitmap).is_none() {
+                        return Err(VmError::Runtime(format!(
+                            "指定されたビットマップ [ {bitmap} ] は存在しません"
+                        )));
+                    }
+                    let Some(bytes) = api.read_bitmap_pixels(bitmap, capacity as usize) else {
+                        return Err(VmError::Runtime(format!(
+                            "指定されたイメージの格納先のサイズ [ {} ] ではイメージを取得できません",
+                            capacity as i32
+                        )));
+                    };
+                    let range = self.resolve_write_range(destination, bytes.len())?;
+                    self.memory[range].copy_from_slice(&bytes);
+                    self.clear_shadow_values(destination, bytes.len());
+                    self.write_int(written, 2, bytes.len() as u32)?;
                     Value::None
                 } else if (code, id) == (0x90, 0x16) {
                     let bitmap = self.pop_value()?.as_i32();
@@ -4270,7 +4500,14 @@ impl Vm {
                     let points = self.pop_ptr()?;
                     let identifier = self.pop_int()?;
                     if points == 0 {
-                        let _ = api.remove_graph_color_lut(identifier);
+                        // sub_405420 -> sub_40A250: removing an unknown curve
+                        // is fatal (0x8000000F); invalid control points
+                        // (0x80000016) are ignored by the handler.
+                        if !api.remove_graph_color_lut(identifier) {
+                            return Err(VmError::Runtime(format!(
+                                "登録先に指定されたトーンカーブの識別番号 [ {identifier} ] は無効です"
+                            )));
+                        }
                     } else {
                         let mut control = [[0i32; 2]; 3];
                         for (index, pair) in control.iter_mut().enumerate() {
@@ -4300,8 +4537,23 @@ impl Vm {
                                 self.clear_shadow_values(destination, bytes.len());
                             }
                         }
-                        Err(_) => {
-                            self.write_int(size_out, 2, 0)?;
+                        Err(code) => {
+                            // sub_4804A0: every failure is a script error.
+                            let message = match code as u32 {
+                                0x8000_0006 => format!(
+                                    "指定されたビットマップ [ {bitmap} ] はピクセル数が多過ぎます"
+                                ),
+                                0x8000_0008 => "必要なメモリが確保できませんでした".to_string(),
+                                0x8000_000A => format!("指定されたビットマップ [ {bitmap} ] は無効です"),
+                                0x8000_0011 => format!(
+                                    "指定されたビットマップ [ {bitmap} ] のピクセルモードはサポートされていません"
+                                ),
+                                0x8000_0017 => format!("無効な形式 [ {format} ] が指定されました"),
+                                0x8000_0018 => format!("無効なパラメータ [ {format} ] が指定されました"),
+                                0xFFFF_FFFE => "エンコードに失敗しました".to_string(),
+                                _ => "想定外のエラーが発生しました".to_string(),
+                            };
+                            return Err(VmError::Runtime(message));
                         }
                     }
                     Value::None
@@ -4318,9 +4570,19 @@ impl Vm {
                     let values = api
                         .query_graph91_object_property(object, parameter, input)
                         .map_err(|status| {
-                            VmError::Runtime(format!(
-                                "Graph91:38 object #{object} parameter {parameter:#x} failed (status {status})"
-                            ))
+                            // sub_482590: 5 unsupported, 254 bad argument,
+                            // 255 unknown object.
+                            VmError::Runtime(match status {
+                                5 => format!(
+                                    "サポートされていないパラメータ番号 [ 0x{:08X} ] が設定されました",
+                                    parameter as u32
+                                ),
+                                255 => "無効なオブジェクトハンドルが指定されました".to_string(),
+                                _ => format!(
+                                    "取得対象パラメータ [ 0x{:08X} ] に渡された引数 [ {input} ( 0x{:08X} ) ] に誤りがあります",
+                                    parameter as u32, input as u32
+                                ),
+                            })
                         })?;
                     for (index, value) in values.iter().enumerate() {
                         let address = destination.wrapping_add((index * 4) as u32);
@@ -4334,11 +4596,15 @@ impl Vm {
                     // coordinate DWORDs through that pointer.
                     let object = self.pop_int()?;
                     let destination = self.pop_ptr()?;
-                    if let Some(position) = api.query_graph91_object_composite_position(object) {
-                        self.write_int(destination, 2, position[0] as u32)?;
-                        self.write_int(destination.wrapping_add(4), 2, position[1] as u32)?;
-                        self.clear_shadow_values(destination, 8);
-                    }
+                    let Some(position) = api.query_graph91_object_composite_position(object) else {
+                        // sub_482650 -> sub_462650: 255 is fatal.
+                        return Err(VmError::Runtime(
+                            "無効なオブジェクトハンドルが指定されました".into(),
+                        ));
+                    };
+                    self.write_int(destination, 2, position[0] as u32)?;
+                    self.write_int(destination.wrapping_add(4), 2, position[1] as u32)?;
+                    self.clear_shadow_values(destination, 8);
                     Value::None
                 } else if (code, id) == (0x91, 0x73) {
                     // sub_482DA0 pops alpha-test mode and landscape, then
@@ -4346,7 +4612,7 @@ impl Vm {
                     let alpha_test_mode = self.pop_int()?;
                     let landscape = self.pop_int()?;
                     let destination = self.pop_ptr()?;
-                    let hit = api.graph91_landscape_hit_test(landscape, alpha_test_mode);
+                    let hit = api.graph91_landscape_hit_test(landscape, alpha_test_mode)?;
                     if let Some([line, column]) = hit {
                         self.write_int(destination, 2, line as u32)?;
                         self.write_int(destination.wrapping_add(4), 2, column as u32)?;
@@ -4362,6 +4628,8 @@ impl Vm {
                     let part_count = self.pop_int()?.max(0);
                     let bitmap = self.pop_int()?;
                     let landscape = self.pop_int()?;
+                    self.resolve_range(parts_ptr,part_count as usize*20)?;
+                    self.resolve_range(columns_ptr,column_count as usize*136)?;
                     let mut part_words = Vec::with_capacity(part_count as usize * 5);
                     for index in 0..part_count as usize * 5 {
                         part_words.push(
@@ -4374,7 +4642,7 @@ impl Vm {
                             self.read_int(columns_ptr.wrapping_add((index * 4) as u32), 2)? as i32,
                         );
                     }
-                    let _ = api.configure_graph91_landscape_parts(
+                    api.configure_graph91_landscape_parts(
                         landscape,
                         bitmap,
                         part_count,
@@ -4382,37 +4650,38 @@ impl Vm {
                         part_spacing,
                         column_count,
                         &column_words,
-                    );
+                    )?;
                     Value::None
                 } else if (code, id) == (0x91, 0x79) {
                     let map_ptr = self.pop_ptr()?;
                     let height = self.pop_int()?;
                     let width = self.pop_int()?;
                     let landscape = self.pop_int()?;
-                    let count = width.max(0) as usize * height.max(0) as usize;
+                    let count = if (1..=256).contains(&width) && (1..=256).contains(&height) {
+                        width as usize * height as usize
+                    } else {
+                        0
+                    };
+                    self.resolve_range(map_ptr,count*4)?;
                     let mut map = Vec::with_capacity(count);
                     for index in 0..count {
                         map.push(self.read_int(map_ptr.wrapping_add((index * 4) as u32), 2)? as i32);
                     }
-                    let _ = api.configure_graph91_landscape_map(landscape, width, height, &map);
+                    api.configure_graph91_landscape_map(landscape, width, height, &map)?;
                     Value::None
                 } else if (code, id) == (0x91, 0x7A) {
                     let guides_ptr = self.pop_ptr()?;
                     let guide_count = self.pop_int()?.max(0);
                     let bitmap = self.pop_int()?;
                     let landscape = self.pop_int()?;
+                    self.resolve_range(guides_ptr,guide_count as usize*20)?;
                     let mut words = Vec::with_capacity(guide_count as usize * 5);
                     for index in 0..guide_count as usize * 5 {
                         words.push(
                             self.read_int(guides_ptr.wrapping_add((index * 4) as u32), 2)? as i32,
                         );
                     }
-                    let _ = api.configure_graph91_landscape_guides(
-                        landscape,
-                        bitmap,
-                        guide_count,
-                        &words,
-                    );
+                    api.configure_graph91_landscape_guides(landscape, bitmap, guide_count, &words)?;
                     Value::None
                 } else if (code, id) == (0x91, 0x7B) {
                     let value = self.pop_int()?;
@@ -4421,21 +4690,21 @@ impl Vm {
                     let pairs_ptr = self.pop_ptr()?;
                     let point_count = self.pop_int()?.max(0);
                     let landscape = self.pop_int()?;
+                    self.resolve_range(pairs_ptr,point_count as usize*8)?;
                     let mut pairs = Vec::with_capacity(point_count as usize * 2);
                     for index in 0..point_count as usize * 2 {
                         pairs.push(
                             self.read_int(pairs_ptr.wrapping_add((index * 4) as u32), 2)? as i32,
                         );
                     }
-                    let _ = api
-                        .set_graph91_landscape_cell_guides(landscape, &pairs, layer, guide, value);
+                    api.set_graph91_landscape_cell_guides(landscape, &pairs, layer, guide, value)?;
                     Value::None
                 } else if (code, id) == (0x91, 0x7E) {
                     let column = self.pop_int()?;
                     let line = self.pop_int()?;
                     let landscape = self.pop_int()?;
                     let destination = self.pop_ptr()?;
-                    let value = api.query_graph91_landscape_cell_value(landscape, line, column);
+                    let value = api.query_graph91_landscape_cell_value(landscape, line, column)?;
                     if let Some(value) = value {
                         self.write_int(destination, 2, value as u32)?;
                         self.clear_shadow_values(destination, 4);
@@ -4473,12 +4742,12 @@ impl Vm {
                     // The public return value is a boolean success flag.
                     let bitmap = self.pop_int()?;
                     let destination = self.pop_ptr()?;
-                    match api.query_movie_position(bitmap) {
-                        Ok(position) => {
+                    match api.query_movie_slot_position(bitmap) {
+                        Some(position) => {
                             self.write_int(destination, 2, position as u32)?;
                             Value::Int(1)
                         }
-                        Err(_) => Value::Int(0),
+                        None => Value::Int(0),
                     }
                 } else if (code, id) == (0x92, 0x12) {
                     // funcs_486FEE[0x12] -> sub_4857F0 -> sub_402440.
@@ -4506,11 +4775,11 @@ impl Vm {
                     // funcs_486FEE[0x17] -> sub_485950 -> sub_4025E0.
                     // The destination DWORD is cleared before copying the
                     // native pixel's one-to-four bytes into it.
+                    // Only a pixel that passed the checks clears the DWORD.
                     let y = self.pop_int()?;
                     let x = self.pop_int()?;
                     let bitmap = self.pop_int()?;
                     let destination = self.pop_ptr()?;
-                    self.write_int(destination, 2, 0)?;
                     let status = if let Some(info) = api.query_bitmap_info(bitmap) {
                         if info.format == 6 {
                             2
@@ -4521,9 +4790,16 @@ impl Vm {
                         {
                             3
                         } else if let Some([r, g, b, a]) = api.read_bitmap_pixel(bitmap, x, y) {
+                            // App rasters keep format 3 coverage in red and
+                            // format 0 as 5-bit channels.
                             let value = match info.format {
+                                0 => {
+                                    (u32::from(r >> 3) << 10)
+                                        | (u32::from(g >> 3) << 5)
+                                        | u32::from(b >> 3)
+                                }
                                 1 => u32::from_le_bytes([b, g, r, 0]),
-                                3 => u32::from(a),
+                                3 => u32::from(r),
                                 _ => u32::from_le_bytes([b, g, r, a]),
                             };
                             self.write_int(destination, 2, value)?;
@@ -4543,6 +4819,12 @@ impl Vm {
                     let window = self.pop_int()?;
                     let destination = self.pop_ptr()?;
                     let region = api.query_graph_window_valid_region(window);
+                    // sub_47EA50: an unknown window is fatal.
+                    if region.is_none() {
+                        return Err(VmError::Runtime(
+                            "無効なウィンドウハンドルが指定されました".into(),
+                        ));
+                    }
                     if let Some(region) = region {
                         for (index, value) in region.into_iter().enumerate() {
                             self.write_int(
@@ -4586,7 +4868,7 @@ impl Vm {
                         api.configure_message_caret_frames(table_pointer, frame_count, &frames)
                     {
                         return Err(VmError::Runtime(format!(
-                            "Graph90:98 invalid caret bitmap #{bitmap}"
+                            "指定されたビットマップ [ {bitmap} ] は存在しないか、スクリーンと互換性がありません"
                         )));
                     }
                     Value::None
@@ -4735,11 +5017,10 @@ impl Vm {
                     }
                     Value::None
                 } else if (code, id) == (0x91, 0x9f) {
-                    let source = self.pop_string_lossy()?;
+                    let source = self.pop_native_string_bytes()?;
                     let destination = self.pop_ptr()?;
                     let stripped = strip_native_markup_tags(&source);
-                    tracing::debug!(%source, %stripped, "GraphStripTextMarkup");
-                    self.write_c_string(destination, &stripped)?;
+                    self.write_c_string_native_bytes(destination, &stripped)?;
                     Value::None
                 } else if (code, id) == (0x91, 0x3e) {
                     let call_stack = self.take_dispatch_call_frame(code, id)?;
@@ -4749,22 +5030,19 @@ impl Vm {
                     self.write_int(1072, 2, result.as_i32() as u32)?;
                     Value::None
                 } else if (code, id) == (0x91, 0x9b) {
-                    self.handle_text_measure_call()?;
-                    Value::Int(0)
+                    self.handle_text_measure_call(api)?
                 } else if (code, id) == (0x91, 0x9e) {
                     // sub_437EE0 extracts every non-empty <l>...</l> payload
                     // into consecutive zero-padded 128-byte records.
-                    let source = self.pop_string_lossy()?;
+                    let source = self.pop_native_string_bytes()?;
                     let destination = self.pop_ptr()?;
                     let labels = extract_native_labels(&source);
-                    for (index, label) in labels.iter().enumerate() {
+                    // A null output only counts.
+                    for (index, label) in labels.iter().enumerate().filter(|_| destination != 0) {
                         let address = destination.wrapping_add((index * 128) as u32);
-                        let (encoded, _, _) = encoding_rs::SHIFT_JIS.encode(label);
-                        let size = encoded.len().min(95);
                         let range = self.resolve_write_range(address, 128)?;
                         self.memory[range.clone()].fill(0);
-                        self.memory[range.start..range.start + size]
-                            .copy_from_slice(&encoded[..size]);
+                        self.memory[range.start..range.start + label.len()].copy_from_slice(label);
                         self.clear_shadow_values(address, 128);
                     }
                     Value::Int(labels.len() as i32)
@@ -4802,9 +5080,9 @@ impl Vm {
                         Some(values)
                     };
                     if !api.set_item_selection_column_layout(window, layout) {
-                        return Err(VmError::Runtime(format!(
-                            "Graph90:A7 invalid window handle #{window}"
-                        )));
+                        return Err(VmError::Runtime(
+                            "無効なウィンドウハンドルが指定されました".into(),
+                        ));
                     }
                     Value::None
                 } else if matches!((code, id), (0x90, 0xb4) | (0x90, 0xb5)) {
@@ -4817,13 +5095,13 @@ impl Vm {
                     let window = self.pop_int()?;
                     if !(1..=64).contains(&count) {
                         return Err(VmError::Runtime(format!(
-                            "Graph90:{id:02X} invalid icon count {count}"
+                            "無効なアイコン数 [ {count} ] が指定されました"
                         )));
                     }
                     if !api.graph_window_exists(window) {
-                        return Err(VmError::Runtime(format!(
-                            "Graph90:{id:02X} invalid window handle #{window}"
-                        )));
+                        return Err(VmError::Runtime(
+                            "無効なウィンドウハンドルが指定されました".into(),
+                        ));
                     }
                     let stride = if id == 0xb4 { 16 } else { 64 };
                     let byte_len = count as usize * stride;
@@ -4843,9 +5121,9 @@ impl Vm {
                         });
                     }
                     if !api.draw_graph_icon_batch(window, &records) {
-                        return Err(VmError::Runtime(format!(
-                            "Graph90:{id:02X} failed to draw icon batch for window #{window}"
-                        )));
+                        return Err(VmError::Runtime(
+                            "無効なウィンドウハンドルが指定されました".into(),
+                        ));
                     }
                     Value::None
                 } else if (code, id) == (0x90, 0xb6) {
@@ -4915,25 +5193,32 @@ impl Vm {
                     }
                     if !api.set_graph_key_assignment(assignment, values) {
                         return Err(VmError::Runtime(format!(
-                            "Graph91:BF invalid key assignment [{assignment}]"
+                            "無効なキーアサインメント [ {assignment} ] が指定されました"
                         )));
                     }
                     Value::None
                 } else if (code, id) == (0x92, 0x9b) {
-                    // sub_486760 pops selector first and a BP destination
-                    // pointer second. sub_434410 accepts only selector 256
-                    // and writes dword_565D34/dword_565D38.
+                    // sub_487260 -> sub_4347B0: selector 256 writes
+                    // dword_565D44/48, 257 dword_565D4C; anything else is a
+                    // script error.
                     let selector = self.pop_int()?;
                     let destination = self.pop_ptr()?;
-                    if selector != 256 {
-                        return Err(VmError::Runtime(format!(
-                            "Graph92:9B invalid output selector {selector}"
-                        )));
+                    match selector {
+                        256 => {
+                            let [first, second] = api.system92_text_output_pair();
+                            let _ = self.resolve_write_range(destination, 8)?;
+                            self.write_int(destination, 2, first as u32)?;
+                            self.write_int(destination.wrapping_add(4), 2, second as u32)?;
+                        }
+                        257 => {
+                            self.write_int(destination, 2, api.system92_text_colour() as u32)?;
+                        }
+                        _ => {
+                            return Err(VmError::Runtime(format!(
+                                "無効なパラメータ番号 [ {selector} ] が指定されました"
+                            )));
+                        }
                     }
-                    let [first, second] = api.system92_text_output_pair();
-                    let _ = self.resolve_write_range(destination, 8)?;
-                    self.write_int(destination, 2, first as u32)?;
-                    self.write_int(destination.wrapping_add(4), 2, second as u32)?;
                     Value::None
                 } else if (code, id) == (0x92, 0x9e) {
                     // sub_437EB0 copies count * 128 bytes and clears the
@@ -4960,22 +5245,6 @@ impl Vm {
                         self.clear_shadow_values(destination, byte_len);
                     }
                     Value::Int(count as i32)
-                } else if (code, id) == (0xa0, 0x86) {
-                    // sub_48D910 writes the translated MCI mode through the
-                    // converted destination pointer and returns one when the
-                    // status query ran. A closed/not-ready portable device
-                    // preserves the target failure path: return zero and do
-                    // not manufacture a successful mode value.
-                    let destination = self.pop_ptr()?;
-                    if let Some(mode) = api.query_cd_audio_mode() {
-                        self.write_int(destination, 2, mode as u32)?;
-                        self.clear_shadow_values(destination, 4);
-                        Value::Int(1)
-                    } else {
-                        self.write_int(destination, 2, u32::MAX)?;
-                        self.clear_shadow_values(destination, 4);
-                        Value::Int(0)
-                    }
                 } else if (code, id) == (0x90, 0xb7) {
                     let descriptor_ptr = self.pop_ptr()?;
                     let window = self.pop_int()?;
@@ -5088,7 +5357,7 @@ impl Vm {
                                 let procedure = InstalledCProcedure::dsp_msg(
                                     self.thread.thread_id(),
                                     opcode,
-                                    self.timing.tick_count().max(0) as u32,
+                                    self.timing.tick_count() as u32,
                                     config,
                                 );
                                 self.install_cprocedure(procedure, trace_events);
@@ -5142,13 +5411,6 @@ impl Vm {
                         NativeOpcode { group: code, id },
                         trace_events,
                     );
-                    if (code, id) == (0x92, 0x14) {
-                        let pending = self.read_int(1644, 2)?.saturating_sub(1);
-                        self.write_int(1644, 2, pending)?;
-                        if trace_events {
-                            tracing::info!(pending, "VM graph preload completed");
-                        }
-                    }
                     result
                 };
                 if api.take_runtime_stub() {
@@ -5199,6 +5461,20 @@ impl Vm {
                         self.push_value(Value::Int(channel));
                         self.push_value(Value::Ptr(destination));
                         None
+                    }
+                } else if (code, id) == (0xa0, 0x86) {
+                    // sub_487C50 -> sub_48D910 writes the translated MCI mode
+                    // and returns one when the status query ran; a closed
+                    // device or a failed query writes nothing and returns 0.
+                    let destination = self.pop_ptr()?;
+                    if let Some(mode) = api.query_cd_audio_mode() {
+                        if destination != 0 {
+                            self.write_int(destination, 2, mode as u32)?;
+                            self.clear_shadow_values(destination, 4);
+                        }
+                        Some(Value::Int(1))
+                    } else {
+                        Some(Value::Int(0))
                     }
                 } else if (code, id) == (0xa0, 0x28) {
                     // sub_487A70 resolves the second source argument to a BP
@@ -5331,224 +5607,24 @@ impl Vm {
                     let text = api.current_user_text();
                     let bytes_written = self.write_c_string_bounded(destination, &text, 255)?;
                     Some(Value::Int(bytes_written as i32))
-                } else if (code, id) == (0xb0, 0x84) {
-                    // sub_478D70: mode, initial, title, output buffer. A negative
-                    // mode enables the target signed-decimal edit filter.
-                    let mode = self.pop_int()?;
-                    let initial = self.pop_string_lossy()?;
-                    let title = self.pop_string_lossy()?;
-                    let destination = self.pop_ptr()?;
-                    let max_bytes = target_dialog_max_bytes(mode, 255);
-                    let accepted = match api.show_user_dialog(UserDialogRequest::Input {
-                        title,
-                        initial,
-                        max_bytes,
-                        numeric: mode < 0,
-                    }) {
-                        Some(UserDialogResponse::Input(value)) => {
-                            self.write_c_string_bounded(destination, &value, max_bytes)?;
-                            true
+                } else if user_dialog::is_user_dialog(code, id) {
+                    let (request, sink) = self
+                        .parse_user_dialog(id)?
+                        .expect("user dialog selector");
+                    if self.begin_host_continuation(
+                        api,
+                        HostRequest::UserDialog(request.clone()),
+                        1,
+                    )? {
+                        if let Some(pending) = self.pending_host_request.as_mut() {
+                            pending.user_dialog = Some(sink);
                         }
-                        _ => false,
-                    };
-                    Some(Value::Int(i32::from(accepted)))
-                } else if (code, id) == (0xb0, 0x85) {
-                    // sub_478DC0: two independent 256-byte output buffers.
-                    let second_max = self.pop_int()?;
-                    let second_initial = self.pop_string_lossy()?;
-                    let second_label = self.pop_string_lossy()?;
-                    let first_max = self.pop_int()?;
-                    let first_initial = self.pop_string_lossy()?;
-                    let first_label = self.pop_string_lossy()?;
-                    let title = self.pop_string_lossy()?;
-                    let second_destination = self.pop_ptr()?;
-                    let first_destination = self.pop_ptr()?;
-                    let first_max_bytes = target_dialog_max_bytes(first_max, 255);
-                    let second_max_bytes = target_dialog_max_bytes(second_max, 255);
-                    let accepted = match api.show_user_dialog(UserDialogRequest::TwoField {
-                        title,
-                        first_label,
-                        first_initial,
-                        first_max_bytes,
-                        first_numeric: false,
-                        second_label,
-                        second_initial,
-                        second_max_bytes,
-                        second_numeric: false,
-                    }) {
-                        Some(UserDialogResponse::TwoField([first, second])) => {
-                            self.write_c_string_bounded(
-                                first_destination,
-                                &first,
-                                first_max_bytes,
-                            )?;
-                            self.write_c_string_bounded(
-                                second_destination,
-                                &second,
-                                second_max_bytes,
-                            )?;
-                            true
-                        }
-                        _ => false,
-                    };
-                    Some(Value::Int(i32::from(accepted)))
-                } else if (code, id) == (0xb0, 0x86) {
-                    // sub_478E60: four fixed segments joined with '-'.
-                    let _extra = self.pop_int()?;
-                    let signed_max = self.pop_int()?;
-                    let prompt = self.pop_string_lossy()?;
-                    let title = self.pop_string_lossy()?;
-                    let destination = self.pop_ptr()?;
-                    let max_bytes_per_segment = target_dialog_max_bytes(signed_max, 32);
-                    let accepted = match api.show_user_dialog(UserDialogRequest::Segmented {
-                        title,
-                        prompt,
-                        segment_count: 4,
-                        max_bytes_per_segment,
-                        numeric: signed_max < 0,
-                    }) {
-                        Some(UserDialogResponse::Segmented(value)) => {
-                            let capacity =
-                                max_bytes_per_segment.saturating_mul(4).saturating_add(3);
-                            self.write_c_string_bounded(destination, &value, capacity)?;
-                            true
-                        }
-                        _ => false,
-                    };
-                    Some(Value::Int(i32::from(accepted)))
-                } else if (code, id) == (0xb0, 0x87) {
-                    // sub_478EC0: extended two-field template with independent
-                    // numeric filters and output buffers.
-                    let second_numeric = self.pop_int()? != 0;
-                    let second_max = self.pop_int()?;
-                    let second_initial = self.pop_string_lossy()?;
-                    let second_label = self.pop_string_lossy()?;
-                    let first_numeric = self.pop_int()? != 0;
-                    let first_max = self.pop_int()?;
-                    let first_initial = self.pop_string_lossy()?;
-                    let first_label = self.pop_string_lossy()?;
-                    let title = self.pop_string_lossy()?;
-                    let second_destination = self.pop_ptr()?;
-                    let first_destination = self.pop_ptr()?;
-                    let _template = self.pop_int()?;
-                    let first_max_bytes = target_dialog_max_bytes(first_max, 255);
-                    let second_max_bytes = target_dialog_max_bytes(second_max, 255);
-                    let accepted = match api.show_user_dialog(UserDialogRequest::TwoField {
-                        title,
-                        first_label,
-                        first_initial,
-                        first_max_bytes,
-                        first_numeric,
-                        second_label,
-                        second_initial,
-                        second_max_bytes,
-                        second_numeric,
-                    }) {
-                        Some(UserDialogResponse::TwoField([first, second])) => {
-                            self.write_c_string_bounded(
-                                first_destination,
-                                &first,
-                                first_max_bytes,
-                            )?;
-                            self.write_c_string_bounded(
-                                second_destination,
-                                &second,
-                                second_max_bytes,
-                            )?;
-                            true
-                        }
-                        _ => false,
-                    };
-                    Some(Value::Int(i32::from(accepted)))
-                } else if (code, id) == (0xb0, 0x8c) {
-                    // sub_478F80 builds one list from newline-delimited text and
-                    // writes the selected row through the caller buffer.
-                    let option_text = self.pop_string_lossy()?;
-                    let prompt = self.pop_string_lossy()?;
-                    let title = self.pop_string_lossy()?;
-                    let destination = self.pop_ptr()?;
-                    let options = option_text
-                        .split('\n')
-                        .map(|line| line.trim_end_matches('\r').to_string())
-                        .filter(|line| !line.is_empty())
-                        .collect::<Vec<_>>();
-                    let accepted = match api.show_user_dialog(UserDialogRequest::Selection {
-                        title,
-                        prompt,
-                        options,
-                    }) {
-                        Some(UserDialogResponse::Selection(value)) => {
-                            self.write_c_string_bounded(destination, &value, 779)?;
-                            true
-                        }
-                        _ => false,
-                    };
-                    Some(Value::Int(i32::from(accepted)))
-                } else if (code, id) == (0xb0, 0x8f) {
-                    // sub_478FD0 uses four mutable 10-byte text fields and two
-                    // caller-owned zero-based month/day indices.
-                    let day_destination = self.pop_ptr()?;
-                    let month_destination = self.pop_ptr()?;
-                    let fourth_destination = self.pop_ptr()?;
-                    let third_destination = self.pop_ptr()?;
-                    let second_destination = self.pop_ptr()?;
-                    let first_destination = self.pop_ptr()?;
-                    let read_initial = |vm: &Vm, pointer: u32| -> VmResult<String> {
-                        if pointer == 0 {
-                            Ok(String::new())
-                        } else {
-                            vm.read_c_string(pointer)
-                        }
-                    };
-                    let fields = [
-                        read_initial(self, first_destination)?,
-                        read_initial(self, second_destination)?,
-                        read_initial(self, third_destination)?,
-                        read_initial(self, fourth_destination)?,
-                    ];
-                    let month_index = if month_destination == 0 {
-                        0
-                    } else {
-                        self.read_int(month_destination, 2)? as i32
-                    };
-                    let day_index = if day_destination == 0 {
-                        0
-                    } else {
-                        self.read_int(day_destination, 2)? as i32
-                    };
-                    let accepted = match api.show_user_dialog(UserDialogRequest::DateFields {
-                        fields,
-                        month_index,
-                        day_index,
-                    }) {
-                        Some(UserDialogResponse::DateFields {
-                            fields,
-                            month_index,
-                            day_index,
-                        }) => {
-                            for (destination, value) in [
-                                first_destination,
-                                second_destination,
-                                third_destination,
-                                fourth_destination,
-                            ]
-                            .into_iter()
-                            .zip(fields.iter())
-                            {
-                                self.write_c_string_bounded(destination, value, 10)?;
-                            }
-                            if month_destination != 0 {
-                                self.write_int(month_destination, 2, month_index as u32)?;
-                                self.clear_shadow_values(month_destination, 4);
-                            }
-                            if day_destination != 0 {
-                                self.write_int(day_destination, 2, day_index as u32)?;
-                                self.clear_shadow_values(day_destination, 4);
-                            }
-                            true
-                        }
-                        _ => false,
-                    };
+                        self.pc = next_pc;
+                        return Ok(());
+                    }
+                    let response = api.show_user_dialog(request);
+                    let (accepted, writes) = self.user_dialog_writes(&sink, response)?;
+                    self.apply_host_writes(writes)?;
                     Some(Value::Int(i32::from(accepted)))
                 } else if (code, id) == (0xb0, 0xa0) {
                     // sub_479040 passes a pointer to nine DWORD initial values,
@@ -5602,10 +5678,11 @@ impl Vm {
                     let first_source = self.pop_ptr()?;
                     let count = self.pop_int()?;
                     let handle = self.pop_int()?;
-                    let count = usize::try_from(count.max(0))
-                        .unwrap_or(usize::MAX)
-                        .min(4096);
-                    let (first, second) = if count == 1 && first_source == 0 {
+                    let layers = count;
+                    let count = if (1..=16).contains(&count) { count as usize } else { 0 };
+                    let (first, second) = if count == 0 {
+                        (Vec::new(), Vec::new())
+                    } else if count == 1 && first_source == 0 {
                         (vec![0x7fff], vec![0])
                     } else {
                         let mut first = Vec::with_capacity(count);
@@ -5617,7 +5694,7 @@ impl Vm {
                             } else {
                                 self.read_int(first_source.wrapping_add(offset), 2)? as i32
                             });
-                            second.push(if second_source == 0 {
+                            second.push(if count==1 || second_source == 0 {
                                 0
                             } else {
                                 self.read_int(second_source.wrapping_add(offset), 2)? as i32
@@ -5625,20 +5702,52 @@ impl Vm {
                         }
                         (first, second)
                     };
-                    let _ = api.configure_particle_frame_tables(handle, &first, &second);
+                    // sub_4760C0: handle (255), count 1..=16 (7), each
+                    // relative priority plus the screen's within 0xFFFF (8).
+                    match api.configure_particle_frame_tables(handle, layers, &first, &second) {
+                        0 => {}
+                        7 => {
+                            return Err(VmError::Runtime(format!(
+                                "無効なレイヤー数 [ {layers} ] が指定されました"
+                            )));
+                        }
+                        8 => {
+                            return Err(VmError::Runtime(
+                                "指定された相対プライオリティの中に無効なものが存在します".into(),
+                            ));
+                        }
+                        _ => {
+                            return Err(VmError::Runtime(
+                                "無効なパーティクルスクリーンハンドルが指定されました".into(),
+                            ));
+                        }
+                    }
                     Some(Value::None)
+                } else if code == 0xc0 && matches!(id, 0x25 | 0x2d) {
+                    // 476A80 dereferences the final source operand; 476ED0
+                    // dereferences source operand 14. Preserve the positional
+                    // frame, replacing only this raw DWORD pointer with its value.
+                    let count = if id == 0x25 { 11 } else { 18 };
+                    let pointer_index = if id == 0x25 { 10 } else { 14 };
+                    let mut args = Vec::with_capacity(count);
+                    for _ in 0..count { args.push(self.pop_value()?); }
+                    args.reverse();
+                    let pointer = args[pointer_index].as_i32() as u32;
+                    args[pointer_index] = Value::Int(self.read_int(pointer, 2)? as i32);
+                    let mut call = NativeCallFrame::new(NativeOpcode {group: code, id}, args);
+                    Some(api.call_user(&mut call)?.unwrap_or(Value::None))
                 } else if (code, id) == (0xc0, 0xc2) {
-                    // sub_476E40 / sub_494A60: [handle, duration,
-                    // point_record_ptr, point_count]. Every point occupies
-                    // four DWORDs; x/y/z are the first three and the fourth is
-                    // target padding.
-                    let count = self.pop_int()?;
-                    let source = self.pop_ptr()?;
+                    // sub_4777B0 -> sub_495550: [handle, point_count,
+                    // point_record_ptr, duration]; count and duration are
+                    // compared unsigned (2, 3) before the handle (1). Every
+                    // point occupies four DWORDs; x/y/z are the first three.
                     let duration = self.pop_int()?;
+                    let source = self.pop_ptr()?;
+                    let count = self.pop_int()?;
                     let handle = self.pop_int()?;
-                    let status = if count < 2 {
+                    let status = if (count as u32) < 2 {
                         2
-                    } else if duration < 2 {
+                    } else if (duration as u32) < 2 {
                         3
                     } else if !api.user_spline_exists(handle) {
                         1
@@ -5677,14 +5786,14 @@ impl Vm {
                     };
                     Some(Value::Int(status))
                 } else if (code, id) == (0xc0, 0xf0) {
-                    // sub_476ED0 / sub_4066C0 loads a BWEF resource and writes
-                    // count pairs {base + offset, stride}. Native pop order is
-                    // base, resource, count_out, table_out, archive.
+                    // sub_477840 -> sub_4066C0 loads a BWEF resource and writes
+                    // count pairs {base + offset, stride}. Script order is
+                    // (table_out, count_out, archive, resource, base).
                     let base = self.pop_int()?;
                     let resource = self.pop_string_lossy()?;
+                    let archive = self.pop_string_lossy()?;
                     let count_out = self.pop_ptr()?;
                     let table_out = self.pop_ptr()?;
-                    let archive = self.pop_string_lossy()?;
                     let status = match api.load_file_bytes(&archive, &resource) {
                         None => i32::MIN + 1,
                         Some(bytes) if bytes.len() < 288 || &bytes[..8] != b"bwef    " => {
@@ -6057,7 +6166,7 @@ impl Vm {
                 // or the procedure is no longer alive. Nothing is pushed.
                 let (terminal, _) = self.drain_procedure_callbacks();
                 let cancelled = !self.procedure_alive(terminal);
-                let now_tick = self.timing.tick_count().max(0) as u32;
+                let now_tick = self.timing.tick_count() as u32;
                 let deadline_reached = now_tick >= procedure.base.native.deadline_tick;
                 if !cancelled && !deadline_reached {
                     return Some(VmStopReason::WaitingForTime);
@@ -6081,7 +6190,7 @@ impl Vm {
                 let callback_completed = procedure.native.callback_completion != 0
                     || callbacks.iter().any(|callback| callback[0].as_i32() == 1);
                 let cancelled = !self.procedure_alive(terminal);
-                let now_tick = self.timing.tick_count().max(0) as u32;
+                let now_tick = self.timing.tick_count() as u32;
                 let deadline_reached = now_tick >= procedure.native.base.deadline_tick;
                 // The input query (sub_46DF00((scope << 16) | 0xFFFF) filtered
                 // by dword_507690 | 0x80000181) runs only when the deadline,
@@ -6130,21 +6239,22 @@ impl Vm {
                 None
             }
             CProcedure::WaitWndMsg(procedure) => {
-                // CProcWaitWndMsg::Tick (sub_43D5D0); no-op callback handler.
+                // CProcWaitWndMsg::Tick (sub_43D990); no-op callback handler.
+                // Signaled: push wParam, lParam. Wait state 0 or a {0,..}
+                // callback (sub_431D90): push -1, -1.
                 let (terminal, _) = self.drain_procedure_callbacks();
                 let cancelled = !self.procedure_alive(terminal);
                 let result = if cancelled {
-                    // Target's engine-disabled path pushes -1 then 0.
-                    Some((-1, 0))
+                    Some((-1, -1))
                 } else {
                     api.poll_window_message(procedure.message_id, procedure.registered_after_serial)
                 };
-                let Some((lparam, wparam)) = result else {
+                let Some((wparam, lparam)) = result else {
                     return Some(VmStopReason::WaitingForProcedure);
                 };
                 self.thread.clear_current_procedure();
-                self.push_value(Value::Int(lparam));
                 self.push_value(Value::Int(wparam));
+                self.push_value(Value::Int(lparam));
                 if trace_events || self.collect_diagnostics {
                     tracing::debug!(
                         message_id = format_args!("0x{:04X}", procedure.message_id),
@@ -6157,7 +6267,7 @@ impl Vm {
                 None
             }
             CProcedure::DspMsg(mut procedure) => {
-                let now_tick = self.timing.tick_count().max(0) as u32;
+                let now_tick = self.timing.tick_count() as u32;
                 let (terminal, callbacks) = self.drain_procedure_callbacks();
                 let cancel = !self.procedure_alive(terminal);
                 for callback in callbacks {
@@ -6374,6 +6484,16 @@ impl Vm {
                     });
                 match procedure.mode {
                     native_thread::NativeGraphProcedureMode::Select => {
+                        if let Some(selection_id) = procedure.control_id {
+                            let callbacks = callbacks.iter().map(|v| [v[0].as_i32(), v[1].as_i32()]).collect::<Vec<_>>();
+                            // 512 is an Icon-only forced-selection callback,
+                            // not a base cancellation. Item procedures ignore it.
+                            let completion = api.poll_native_selection(selection_id, &callbacks, !self.procedure_alive(terminal));
+                            let Some(completion) = completion else { return Some(VmStopReason::WaitingForProcedure); };
+                            for value in &completion.values[..completion.count] { self.push_value(Value::Int(*value)); }
+                            self.thread.clear_current_procedure();
+                            return None;
+                        }
                         let selected = if cancelled {
                             None
                         } else {
@@ -6517,6 +6637,35 @@ impl Vm {
             args.push(self.pop_value()?);
         }
         args.reverse();
+        // The handlers' `char *` arguments (sub_48EA40) reach the host as
+        // text whatever produced the pointer.
+        let encoding = if matches!(group, 0x90..=0x92) {
+            self.graph_text_encoding.unwrap_or(encoding_rs::SHIFT_JIS)
+        } else {
+            encoding_rs::SHIFT_JIS
+        };
+        let strings = native_strings::string_arguments(group, id);
+        let pointers = native_strings::pointer_arguments(group, id);
+        for index in 0..args.len() {
+            // Literals are code pointers (segment 1): any one the handler
+            // does not take as a raw pointer is text for the host.
+            let literal = matches!(args[index], Value::Ptr(pointer) if pointer >> 26 == 1)
+                && !pointers.contains(&index);
+            if !strings.contains(&index) && !literal {
+                continue;
+            }
+            let pointer = match &args[index] {
+                Value::Ptr(pointer) => *pointer,
+                Value::Int(pointer) => *pointer as u32,
+                _ => continue,
+            };
+            if pointer == 0 {
+                continue;
+            }
+            if let Ok(text) = self.value_as_string_with_encoding(Value::Ptr(pointer), encoding) {
+                args[index] = Value::Str(text);
+            }
+        }
         Ok(args)
     }
     pub fn set_native_abi_profile(&mut self,profile:NativeAbiProfile) {
@@ -6728,6 +6877,7 @@ impl Vm {
             })
             .max()
             .unwrap_or_default()
+            .max(self.code_used_floor)
     }
 
     /// `CThread+0x38` (`code_used`): the initial module plus every module
@@ -6754,14 +6904,15 @@ impl Vm {
         let code_used_end = self.active_code_used_end();
         self.thread
             .sync_program_region(self.target_loaded_programs.len(), code_used_end);
+        self.sync_region_reservations(code_used_end);
     }
 
     fn resolve_target_code_offset(&self, target_offset: u32) -> Option<(usize, u32)> {
-        // Prefer the newest module when a freed region has been reused.
-        for index in (1..self.programs.len()).rev() {
-            if !self.program_active.get(index).copied().unwrap_or(false) {
-                continue;
-            }
+        // The newest module covering the offset owns those code bytes. Freeing
+        // a module only rewinds the chain (sub_444D80), so its code stays
+        // callable until a later module is loaded over it; senmomo's ipl._bp
+        // calls environ._bp's entry again after FreeLastProgramModule.
+        for index in (0..self.programs.len()).rev() {
             let base = self.program_code_bases.get(index).copied()?;
             let program = self.programs.get(index)?;
             let size = Self::program_target_code_size(program);
@@ -6775,6 +6926,26 @@ impl Vm {
             }
         }
         None
+    }
+
+    /// A parser (file) offset of `program_index` as the thread's code-region
+    /// offset scripts see (push_offset, return addresses).
+    fn code_offset_of(&self, program_index: usize, parser_offset: u32) -> u32 {
+        let Some(program) = self.programs.get(program_index) else {
+            return parser_offset;
+        };
+        let base = self.program_code_bases.get(program_index).copied().unwrap_or_default();
+        base.wrapping_add(parser_offset.wrapping_sub(Self::program_parser_code_start(program)))
+    }
+
+    /// A code-region offset back to (module, parser offset): the newest
+    /// module covering it, else `program_index`.
+    fn resolve_code_target(&self, program_index: usize, code_offset: u32) -> (usize, u32) {
+        self.resolve_target_code_offset(code_offset).unwrap_or_else(|| {
+            let program = &self.programs[program_index];
+            let base = self.program_code_bases.get(program_index).copied().unwrap_or_default();
+            (program_index, code_offset.wrapping_sub(base).wrapping_add(Self::program_parser_code_start(program)))
+        })
     }
 
     fn resolve_indirect_call_target(
@@ -6796,8 +6967,23 @@ impl Vm {
             .unwrap_or((current_program, target_offset))
     }
 
+    /// sub_4450B0's memcpy: the module bytes at `base` of the thread's code
+    /// region (segment 1).
+    fn install_module_code(&mut self, base: u32, code: &[u8]) {
+        let start = (LOCAL_MEMORY_BASE + CODE_WINDOW_OFFSET) as usize + base as usize;
+        let end = (start + code.len()).min((LOCAL_MEMORY_BASE + CODE_WINDOW_OFFSET + CODE_WINDOW_SIZE) as usize);
+        if start >= end {
+            return;
+        }
+        if self.memory.len() < end {
+            self.memory.resize(end.next_power_of_two().max(INITIAL_MEMORY_SIZE).min(MAX_MEMORY_SIZE), 0);
+        }
+        self.memory[start..end].copy_from_slice(&code[..end - start]);
+    }
+
     fn append_target_loaded_program(&mut self, program: BpProgram) -> u32 {
         let code_base = self.active_code_used_end();
+        self.install_module_code(code_base, &program.code);
         let index = self.programs.len();
         if let Some(name) = program.script_name.clone() {
             self.program_cache.insert(name, index);
@@ -6863,6 +7049,7 @@ impl Vm {
         if let Some(name) = program.script_name.clone() {
             self.program_cache.insert(name, index);
         }
+        self.install_module_code(code_base, &program.code);
         self.programs.push(program);
         self.program_code_bases.push(code_base);
         self.program_active.push(true);
@@ -6938,14 +7125,14 @@ impl Vm {
             Value::Program(program) => Some(program.as_ref()),
             Value::Ptr(ptr) => self
                 .mem_values
-                .get(&Self::value_key(*ptr))
+                .get(&self.value_key(*ptr))
                 .and_then(|value| match value {
                     Value::Program(program) => Some(program.as_ref()),
                     _ => None,
                 }),
             Value::Int(ptr) => {
                 self.mem_values
-                    .get(&Self::value_key(*ptr as u32))
+                    .get(&self.value_key(*ptr as u32))
                     .and_then(|value| match value {
                         Value::Program(program) => Some(program.as_ref()),
                         _ => None,
@@ -7069,7 +7256,7 @@ impl Vm {
     }
 
     fn pop_ptr(&mut self) -> VmResult<u32> {
-        Ok(Self::translate_system_descriptor(self.pop_int()? as u32))
+        Ok(self.pop_int()? as u32)
     }
 
     fn value_as_numeric_operand(&mut self, value: Value) -> VmResult<i32> {
@@ -7080,8 +7267,11 @@ impl Vm {
                     .iter()
                     .find(|(_, existing)| existing.as_str() == text.as_str())
                 {
-                    let offset = addr.saturating_sub(LOCAL_MEMORY_BASE);
-                    return Ok((0x1200_0000 | offset) as i32);
+                    // The record lives in a heap block: hand back its
+                    // script address.
+                    if let Some(ptr) = self.target_heap.address_of(addr - LOCAL_MEMORY_BASE, &self.heap_allocations) {
+                        return Ok(ptr as i32);
+                    }
                 }
                 let byte_len = encoding_rs::SHIFT_JIS
                     .encode(&text)
@@ -7101,8 +7291,16 @@ impl Vm {
         }
     }
 
+    /// sub_48E8C0's fatal error for an address no segment maps.
+    fn invalid_pointer(ptr: u32) -> VmError {
+        VmError::Runtime(format!("無効なポインタ [ ${ptr:08X} ] にアクセスしようとしました"))
+    }
+
     fn resolve_range(&self, ptr: u32, size: usize) -> VmResult<std::ops::Range<usize>> {
-        let addr = Self::memory_addr(ptr);
+        let addr = self.memory_addr(ptr);
+        if addr == u32::MAX {
+            return Err(Self::invalid_pointer(ptr));
+        }
         let start = addr as usize;
         let end = start
             .checked_add(size)
@@ -7118,7 +7316,10 @@ impl Vm {
         ptr: u32,
         size: usize,
     ) -> VmResult<std::ops::Range<usize>> {
-        let addr = Self::memory_addr(ptr);
+        let addr = self.memory_addr(ptr);
+        if addr == u32::MAX {
+            return Err(Self::invalid_pointer(ptr));
+        }
         let start = addr as usize;
         let end = start
             .checked_add(size)
@@ -7133,19 +7334,7 @@ impl Vm {
                 .min(MAX_MEMORY_SIZE);
             self.memory.resize(grown, 0);
         }
-        if start >= HEAP_MEMORY_BASE && size != 0 {
-            self.mark_shared_heap_dirty(start..end);
-        }
         Ok(start..end)
-    }
-
-    fn translate_system_descriptor(ptr: u32) -> u32 {
-        let slot = ptr.wrapping_sub(SYSTEM_PROGRAM_DESCRIPTOR_BASE);
-        if slot < SYSTEM_PROGRAM_SLOTS as u32 {
-            SYSTEM_PROGRAM_TABLE + slot * SYSTEM_PROGRAM_STRIDE
-        } else {
-            ptr
-        }
     }
 
     fn read_int(&self, ptr: u32, width: u8) -> VmResult<u32> {
@@ -7185,34 +7374,81 @@ impl Vm {
         Ok(())
     }
 
+    /// sub_464C50 -> sub_464AD0 / sub_464A80: the error text with the
+    /// thread, module, IP, instruction and SP header and the call chain,
+    /// written to BGIError.txt; the first error is shown (MB_ICONHAND) and,
+    /// while Sys81:6A capture is on, kept for Sys81:6B.
+    fn report_script_error<A: SysApi>(
+        &mut self,
+        api: &mut A,
+        program_index: usize,
+        parser_offset: u32,
+        opcode: u8,
+        error: &VmError,
+    ) {
+        let mut message = format!(
+            "Thread [ {} ] , Program [ {} ] , IP [ ${:08X} ] , Instruction [ ${:X} ] , SP [ ${:08X} ]\n\n",
+            self.thread.thread_id(),
+            self.program_name(program_index),
+            self.code_offset_of(program_index, parser_offset),
+            opcode,
+            FRAME_SEGMENT | self.mem_ptr,
+        );
+        let frames = self.call_stack.clone();
+        for &(program, pc, _) in frames.iter().rev() {
+            let offset = self
+                .programs
+                .get(program)
+                .and_then(|module| module.instructions.get(pc))
+                .map_or(0, |instruction| self.code_offset_of(program, instruction.offset as u32));
+            let base = self.program_code_bases.get(program).copied().unwrap_or_default();
+            message.push_str(&format!("( {} - ${:08X} )\n", self.program_name(program), offset.wrapping_sub(base)));
+        }
+        if !frames.is_empty() {
+            message.push('\n');
+        }
+        message.push_str(&error.to_string());
+        let root = self
+            .validated_file_root
+            .clone()
+            .unwrap_or_else(|| self.resource_primary_root(api));
+        let (bytes, _, _) = encoding_rs::SHIFT_JIS.encode(&message);
+        api.write_file_bytes(&format!("{root}BGIError.txt"), &bytes);
+        let mut shared = self.system81_shared.lock().expect("system81 state poisoned");
+        if shared.captured_error.is_none() {
+            let capture = shared.error_capture_mode != 0;
+            drop(shared);
+            api.message_box("", &message);
+            if capture {
+                self.system81_shared.lock().expect("system81 state poisoned").captured_error = Some(message);
+            }
+        }
+    }
+
     fn write_return_addr(&mut self, program_index: usize, next_pc: usize) -> VmResult<()> {
         let return_offset = self
             .programs
             .get(program_index)
             .and_then(|program| program.instructions.get(next_pc))
-            .map(|instruction| instruction.offset as u32)
+            .map(|instruction| self.code_offset_of(program_index, instruction.offset as u32))
             .unwrap_or_default();
-        // sub_473A70 rejects a call whose frame pointer already reached the
-        // data region limit.
-        if self.mem_ptr >= self.thread.data_region_size() {
-            return Err(VmError::Runtime(format!(
-                "call: SP 0x{:08X} outside the {}-byte data region",
-                self.mem_ptr,
-                self.thread.data_region_size()
-            )));
+        // sub_473FD0: the return address must fit below the data limit
+        // (sub_445010: base + free limit, lowered by child reservations).
+        if self.mem_ptr.wrapping_add(4) >= self.data_region_limit() {
+            return Err(VmError::Runtime("スタック領域が不足しています".into()));
         }
-        self.write_int(0x1200_0000 | self.mem_ptr, 2, return_offset)?;
+        self.write_int(FRAME_SEGMENT | self.mem_ptr, 2, return_offset)?;
         self.mem_ptr = self.mem_ptr.saturating_add(4);
         Ok(())
     }
 
     fn read_return_addr(&mut self) -> VmResult<u32> {
         self.mem_ptr = self.mem_ptr.saturating_sub(4);
-        self.read_int(0x1200_0000 | self.mem_ptr, 2)
+        self.read_int(FRAME_SEGMENT | self.mem_ptr, 2)
     }
 
     fn read_value(&self, ptr: u32, width: u8) -> VmResult<Value> {
-        let addr = Self::value_key(ptr);
+        let addr = self.value_key(ptr);
         if width >= 2 {
             if let Some(value) = self.mem_values.get(&addr) {
                 let size = 1usize << width.min(2);
@@ -7350,7 +7586,7 @@ impl Vm {
             // sub_44A900 projects the 64-byte extended source group into the
             // common 52-byte runtime group: source +0x14/+0x18/+0x1C/+0x20
             // become internal +0x0C/+0x10/+0x14/+0x18 respectively.
-            descriptor.groups.push(GraphInputGroup {
+            descriptor.groups.push(GraphInputGroup { navigation_columns: self.read_int(group_ptr.wrapping_add(4),2)? as i32,
                 index: group as i32,
                 initial_current_item: selected_index,
                 selection_enabled: self.read_int(group_ptr.wrapping_add(20), 2)? != 0,
@@ -7508,7 +7744,7 @@ impl Vm {
                 (self.read_int(group_ptr, 2)? & 0xffff).min(MAX_REGIONS_PER_GROUP as u32) as usize;
             let regions_ptr = self.read_pointer_field(group_ptr.wrapping_add(4))?;
             let selected_index = self.read_int(group_ptr.wrapping_add(8), 2)? as i32;
-            descriptor.groups.push(GraphInputGroup {
+            descriptor.groups.push(GraphInputGroup { navigation_columns: (self.read_int(group_ptr,2)?>>16) as i32,
                 index: group as i32,
                 initial_current_item: selected_index,
                 selection_enabled: self.read_int(group_ptr.wrapping_add(12), 2)? != 0,
@@ -7588,28 +7824,55 @@ impl Vm {
         })
     }
 
-    fn handle_text_measure_call(&mut self) -> VmResult<()> {
-        let _flags = self.pop_value()?;
-        let _style = self.pop_value()?;
-        let _scale = self.pop_value()?;
-        let font_size = self.pop_value()?.as_i32().max(1);
-        let max_width = self.pop_value()?.as_i32().max(0);
-        let text = self.pop_value()?;
+    /// sub_4854B0 -> sub_403BA0: font number (p2), size (p3), width
+    /// percent (p4) and style (p5) go through sub_4035A0, whose failures
+    /// are returned, not raised: no face 0x80000003, size outside 4..=200
+    /// 0x80000001, width outside 25..=200 0x80000002. sub_4352B0 without the
+    /// glyph flag (p6) advances size*width/100 per double-byte character,
+    /// half that per single byte, plus the 91:98 character spacing after
+    /// every character but the last. The glyph-box path (p6 != 0) uses GDI
+    /// metrics; it shares this cell arithmetic here.
+    fn handle_text_measure_call<A: GraphApi + ?Sized>(&mut self, api: &mut A) -> VmResult<Value> {
+        let _glyph_metrics = self.pop_int()?;
+        let _style = self.pop_int()?;
+        let width_percent = self.pop_int()?;
+        let font_size = self.pop_int()?;
+        let font = self.pop_int()?;
+        let text = self.pop_native_string_bytes()?;
         let dest = self.pop_ptr()?;
-        let measured = measure_text_width_value(&text, font_size, max_width);
-        self.write_int(dest, 2, measured as u32)?;
-        Ok(())
+        if !api.native_font_registered(font) {
+            return Ok(Value::Int(0x8000_0003_u32 as i32));
+        }
+        if !(4..=200).contains(&font_size) {
+            return Ok(Value::Int(0x8000_0001_u32 as i32));
+        }
+        if !(25..=200).contains(&width_percent) {
+            return Ok(Value::Int(0x8000_0002_u32 as i32));
+        }
+        let cell = font_size * width_percent / 100;
+        let spacing = api.text_character_spacing();
+        let mut width = 0i32;
+        let mut index = 0;
+        while index < text.len() {
+            let double = is_sjis_lead_byte(text[index]) && text.get(index + 1).is_some_and(|&b| b != 0);
+            width = width.wrapping_add(if double { cell } else { cell / 2 }).wrapping_add(spacing);
+            index += if double { 2 } else { 1 };
+        }
+        self.write_int(dest, 2, width.wrapping_sub(spacing) as u32)?;
+        Ok(Value::Int(0))
     }
 
     fn write_value(&mut self, ptr: u32, width: u8, value: &Value) -> VmResult<()> {
-        let addr = Self::value_key(ptr);
+        let addr = self.value_key(ptr);
         self.write_int(ptr, width, value.as_i32() as u32)?;
         if width >= 2 {
             match value {
-                Value::Int(_) | Value::None => {
+                // Pointers and code offsets are raw cells like the target's;
+                // only host-side strings and program handles have no bytes.
+                Value::Int(_) | Value::None | Value::Ptr(_) | Value::Func { .. } => {
                     self.mem_values.remove(&addr);
                 }
-                Value::Ptr(_) | Value::Str(_) | Value::Func { .. } | Value::Program(_) => {
+                Value::Str(_) | Value::Program(_) => {
                     self.mem_values.insert(addr, value.clone());
                 }
             }
@@ -7654,7 +7917,7 @@ impl Vm {
         if watches.is_empty() {
             return;
         }
-        let start = Self::memory_addr(ptr);
+        let start = self.memory_addr(ptr);
         let end = start.saturating_add(size as u32);
         let hit = watches
             .iter()
@@ -7696,6 +7959,10 @@ impl Vm {
     }
 
     fn alloc_heap(&mut self, size: u32) -> u32 {
+        let requested = size;
+        if !self.target_heap.has_room(requested) {
+            return 0;
+        }
         let size = size.max(4).saturating_add(3) & !3;
         let previous_heap_ptr = self.heap_ptr;
         let offset = if let Some(index) = self
@@ -7739,7 +8006,10 @@ impl Vm {
             self.heap_ptr = next;
             offset
         };
-        let ptr = Self::heap_tagged_ptr(offset);
+        let ptr = self
+            .target_heap
+            .alloc(requested, offset)
+            .expect("checked by TargetHeap::has_room");
         let Ok(range) = self.resolve_write_range(ptr, size as usize) else {
             return 0;
         };
@@ -7765,13 +8035,14 @@ impl Vm {
         if ptr == 0 {
             return true;
         }
-        let Some(offset) = Self::heap_logical_offset(ptr) else {
+        let Some((offset, 0)) = self.target_heap.translate(ptr) else {
             return false;
         };
         let Some(size) = self.heap_allocations.remove(&offset) else {
             return false;
         };
         self.clear_shadow_values(ptr, size as usize);
+        self.target_heap.free(ptr);
         self.heap_free_blocks.push((offset, size));
         self.heap_free_blocks.sort_unstable_by_key(|block| block.0);
         let mut merged: Vec<(u32, u32)> = Vec::with_capacity(self.heap_free_blocks.len());
@@ -7834,23 +8105,6 @@ impl Vm {
                 .is_some_and(|end| end <= AUX_MEMORY_SEGMENT_SIZE)
     }
 
-    fn heap_tagged_ptr(offset: u32) -> u32 {
-        let segment = offset / AUX_MEMORY_SEGMENT_SIZE;
-        let tag = AUX_MEMORY_TAG_BASE.saturating_add(segment.saturating_mul(2));
-        (tag << 24) | (offset & ADDRESS_MASK)
-    }
-
-    fn heap_logical_offset(ptr: u32) -> Option<u32> {
-        let tag = ptr >> 24;
-        if tag < AUX_MEMORY_TAG_BASE {
-            return None;
-        }
-        let segment = (tag >> 1).checked_sub(AUX_MEMORY_TAG_BASE >> 1)?;
-        segment
-            .checked_mul(AUX_MEMORY_SEGMENT_SIZE)?
-            .checked_add(ptr & ADDRESS_MASK)
-    }
-
     fn rand_msvc(&mut self) -> i32 {
         self.rng_seed = self.rng_seed.wrapping_mul(214013).wrapping_add(2531011);
         ((self.rng_seed >> 16) & 0x7fff) as i32
@@ -7898,7 +8152,7 @@ impl Vm {
     }
 
     fn read_c_string_bytes(&self, ptr: u32) -> VmResult<Vec<u8>> {
-        let start = Self::memory_addr(ptr) as usize;
+        let start = self.memory_addr(ptr) as usize;
         if start >= self.memory.len() {
             return Err(VmError::MemoryOutOfBounds { addr: ptr, size: 1 });
         }
@@ -7911,7 +8165,7 @@ impl Vm {
     }
 
     fn read_wide_c_string(&self, ptr: u32) -> VmResult<Vec<u16>> {
-        let start = Self::memory_addr(ptr) as usize;
+        let start = self.memory_addr(ptr) as usize;
         if start >= self.memory.len() {
             return Err(VmError::MemoryOutOfBounds { addr: ptr, size: 2 });
         }
@@ -7932,7 +8186,7 @@ impl Vm {
     }
 
     fn c_string_byte_len(&self, ptr: u32) -> VmResult<usize> {
-        let start = Self::memory_addr(ptr) as usize;
+        let start = self.memory_addr(ptr) as usize;
         if start >= self.memory.len() {
             return Err(VmError::MemoryOutOfBounds { addr: ptr, size: 1 });
         }
@@ -7953,11 +8207,11 @@ impl Vm {
         match source {
             Value::Str(text) => self.write_c_string(dst, &text),
             Value::Int(ptr) if ptr != 0 => {
-                let src = Self::translate_system_descriptor(ptr as u32);
+                let src = ptr as u32;
                 self.copy_c_string_pointer(dst, src)
             }
             Value::Ptr(ptr) if ptr != 0 => {
-                let src = Self::translate_system_descriptor(ptr);
+                let src = ptr;
                 self.copy_c_string_pointer(dst, src)
             }
             Value::Func { offset, .. } if offset != 0 => self.copy_c_string_pointer(dst, offset),
@@ -7971,11 +8225,31 @@ impl Vm {
     }
 
     fn copy_c_string_pointer(&mut self, dst: u32, src: u32) -> VmResult<()> {
-        if let Some(Value::Str(text)) = self.mem_values.get(&Self::value_key(src)).cloned() {
+        if let Some(Value::Str(text)) = self.mem_values.get(&self.value_key(src)).cloned() {
             return self.write_c_string(dst, &text);
         }
         let size = self.c_string_byte_len(src)?.saturating_add(1);
         self.copy_buffer(dst, src, size)
+    }
+
+    /// Write native bytes, keeping the String path (and its script-record
+    /// restore) for anything that round-trips through the native encoding.
+    fn write_c_string_native_bytes(&mut self, ptr: u32, bytes: &[u8]) -> VmResult<()> {
+        let text = if self.native_abi_profile == NativeAbiProfile::Amachoco {
+            String::from_utf8_lossy(bytes)
+        } else {
+            encoding_rs::SHIFT_JIS.decode(bytes).0
+        };
+        if self.encode_native_string(&text).as_ref() == bytes {
+            return self.write_c_string(ptr, &text);
+        }
+        let range = self.resolve_write_range(ptr, bytes.len().saturating_add(1))?;
+        let start = range.start;
+        self.memory[start..start + bytes.len()].copy_from_slice(bytes);
+        self.memory[start + bytes.len()] = 0;
+        self.clear_shadow_values(ptr, bytes.len().saturating_add(1));
+        self.trace_watch_write(ptr, bytes.len().saturating_add(1), 0, "write_c_string");
+        Ok(())
     }
 
     fn write_c_string_raw(&mut self, ptr: u32, text: &str) -> VmResult<()> {
@@ -7990,6 +8264,13 @@ impl Vm {
     }
     fn encode_native_string<'a>(&self,text:&'a str)->std::borrow::Cow<'a,[u8]> {
         if self.native_abi_profile==NativeAbiProfile::Amachoco {std::borrow::Cow::Borrowed(text.as_bytes())} else {encoding_rs::SHIFT_JIS.encode(text).0}
+    }
+    fn decode_native_string_lossy(&self, bytes: &[u8]) -> String {
+        if self.native_abi_profile == NativeAbiProfile::Amachoco {
+            String::from_utf8_lossy(bytes).into_owned()
+        } else {
+            encoding_rs::SHIFT_JIS.decode(bytes).0.into_owned()
+        }
     }
 
     /// Write one target Shift-JIS C string without splitting a multibyte
@@ -8075,90 +8356,6 @@ impl Vm {
         )))
     }
 
-    fn resource_file_exists_with_search<A>(&self, api: &mut A, archive: &str, file: &str) -> bool
-    where
-        A: SysApi,
-    {
-        let mut archives = vec![archive.to_string()];
-        if let Some(components) = self.composite_archives.get(archive) {
-            archives.extend(components.iter().cloned());
-        }
-        if archives
-            .iter()
-            .any(|candidate_archive| api.file_exists(candidate_archive, file))
-        {
-            return true;
-        }
-        for root in [
-            self.primary_resource_root.as_deref(),
-            self.secondary_resource_root.as_deref(),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            if api.file_exists("", &join_native_path(root, file)) {
-                return true;
-            }
-        }
-        // sub_466440: with dword_506BE0 set, each additional directory is
-        // probed as a loose file `root + dir + "\\" + file`.
-        if self.additional_resource_search_enabled {
-            let roots = [
-                self.primary_resource_root.clone().unwrap_or_default(),
-                self.secondary_resource_root.clone().unwrap_or_default(),
-            ];
-            for root in &roots {
-                for path in &self.additional_resource_paths {
-                    let candidate = join_native_path(&join_native_path(root, path), file);
-                    if api.file_exists("", &candidate) {
-                        return true;
-                    }
-                }
-            }
-        }
-        false
-    }
-
-    fn resource_file_size_with_search<A>(&self, api: &mut A, archive: &str, file: &str) -> i32
-    where
-        A: SysApi,
-    {
-        let mut archives = vec![archive.to_string()];
-        if let Some(components) = self.composite_archives.get(archive) {
-            archives.extend(components.iter().cloned());
-        }
-        for candidate_archive in &archives {
-            let size = api.file_size(candidate_archive, file);
-            if size >= 0 {
-                return size;
-            }
-        }
-        for root in [
-            self.primary_resource_root.as_deref(),
-            self.secondary_resource_root.as_deref(),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            let size = api.file_size("", &join_native_path(root, file));
-            if size >= 0 {
-                return size;
-            }
-        }
-        if self.additional_resource_search_enabled {
-            for path in &self.additional_resource_paths {
-                let candidate = join_native_path(path, file);
-                for candidate_archive in &archives {
-                    let size = api.file_size(candidate_archive, &candidate);
-                    if size >= 0 {
-                        return size;
-                    }
-                }
-            }
-        }
-        -1
-    }
-
     fn load_resource_bytes_with_search<A>(
         &mut self,
         api: &mut A,
@@ -8218,51 +8415,75 @@ impl Vm {
         None
     }
 
-    fn sys80_31_read_file_range<A>(&mut self, api: &mut A) -> VmResult<Value>
+    /// Sys80:25 (sub_488F90 -> sub_467110): pop max count, recursive flag,
+    /// pattern, buffer size and destination.
+    fn sys80_25_enumerate_files<A>(&mut self, api: &mut A) -> VmResult<Value>
     where
         A: SysApi,
     {
-        // Target pop order: length, offset, file, optional secondary root,
-        // destination. The packed u64 passed to sub_465C30 stores offset in
-        // the low dword and requested length in the high dword.
-        let requested_length = self.pop_int()? as u32 as usize;
-        let offset = self.pop_int()? as u32 as usize;
-        let file = self.pop_string_lossy()?;
-        let secondary_root = self.pop_string_lossy()?;
+        let max_count = self.pop_int()? as u32 as usize;
+        let recursive = self.pop_int()? != 0;
+        let pattern = self.pop_string_lossy()?;
+        let capacity = self.pop_int()? as u32 as usize;
         let destination = self.pop_ptr()?;
+        // sub_467110 builds each subdirectory pattern from strrchr(pattern,
+        // '\\'); without a backslash it formats "(null)" and finds nothing.
+        let recursive = recursive && pattern.contains('\\');
+        let found = api.enumerate_user_files(&pattern, recursive, 0);
+        let names = target_file_enumeration_order(&found, recursive, max_count);
+        self.write_enumerated_names(destination, capacity, &names)
+    }
 
-        let bytes = self
-            .load_resource_bytes_with_search(api, "", &file)
-            .map(|(bytes, _)| bytes)
-            .or_else(|| {
-                (!secondary_root.is_empty())
-                    .then(|| api.load_file_bytes(&secondary_root, &file))
-                    .flatten()
-            });
-        let Some(bytes) = bytes else {
-            return Ok(Value::Int(1));
-        };
-        if bytes.len() > 0x0400_0000 {
-            return Ok(Value::Int(6));
+    /// Sys80:26 (sub_489010 -> sub_467460): pop max count, pattern, buffer
+    /// size and destination. Only directories other than `.`/`..`, no recursion.
+    fn sys80_26_enumerate_directories<A>(&mut self, api: &mut A) -> VmResult<Value>
+    where
+        A: SysApi,
+    {
+        let max_count = self.pop_int()? as u32 as usize;
+        let pattern = self.pop_string_lossy()?;
+        let capacity = self.pop_int()? as u32 as usize;
+        let destination = self.pop_ptr()?;
+        let mut names = api
+            .enumerate_user_directories(&pattern, 0)
+            .into_iter()
+            .filter(|name| name != "." && name != "..")
+            .collect::<Vec<_>>();
+        names.sort_by_key(|name| ntfs_order_key(name));
+        // FindNextFileA stops once the count reaches the limit; the check
+        // follows each accepted entry.
+        if max_count != 0 {
+            names.truncate(max_count);
         }
-        let length = if offset == 0 && requested_length == 0 {
-            bytes.len()
-        } else {
-            requested_length
-        };
-        if length == 0 || length > bytes.len() {
-            return Ok(Value::Int(3));
+        self.write_enumerated_names(destination, capacity, &names)
+    }
+
+    /// Pack names as consecutive C strings. A null destination only measures
+    /// and returns the byte total; a name that does not fit fails with -1
+    /// after the earlier names were copied, as in sub_467110/sub_467460.
+    fn write_enumerated_names(
+        &mut self,
+        destination: u32,
+        capacity: usize,
+        names: &[String],
+    ) -> VmResult<Value> {
+        let mut written = 0usize;
+        for name in names {
+            let mut bytes = self.encode_native_string(name).into_owned();
+            bytes.push(0);
+            if destination != 0 {
+                if bytes.len() > capacity - written {
+                    return Ok(Value::Int(-1));
+                }
+                let start = destination.wrapping_add(written as u32);
+                let range = self.resolve_write_range(start, bytes.len())?;
+                self.memory[range].copy_from_slice(&bytes);
+                self.clear_shadow_values(start, bytes.len());
+            }
+            written += bytes.len();
         }
-        let Some(end) = offset.checked_add(length) else {
-            return Ok(Value::Int(2));
-        };
-        if end > bytes.len() {
-            return Ok(Value::Int(2));
-        }
-        let range = self.resolve_write_range(destination, length)?;
-        self.memory[range].copy_from_slice(&bytes[offset..end]);
-        self.clear_shadow_values(destination, length);
-        Ok(Value::Int(0))
+        let result = if destination == 0 { written } else { names.len() };
+        Ok(Value::Int(result.min(i32::MAX as usize) as i32))
     }
 
     fn write_loaded_file<A>(
@@ -8376,7 +8597,7 @@ impl Vm {
         // sub_488DE0: a thread sub_444B90 cannot find is a script error.
         if !self.post_async_program_message(thread_or_program.clone(), message, trace_events) {
             return Err(VmError::Runtime(format!(
-                "PostMessage: thread {} does not exist",
+                "無効なスレッドハンドルが指定されました ({})",
                 value_summary(&thread_or_program)
             )));
         }
@@ -8416,13 +8637,13 @@ impl Vm {
         let thread_or_program = self.pop_value()?;
         if !self.async_program_is_active_value(&thread_or_program) {
             return Err(VmError::Runtime(format!(
-                "PostMessages: thread {} does not exist",
+                "無効なスレッドハンドルが指定されました ({})",
                 value_summary(&thread_or_program)
             )));
         }
         if message_count < 1 {
             return Err(VmError::Runtime(format!(
-                "PostMessages: message count {message_count} is below 1"
+                "無効なスレッドメッセージ数 [ {message_count} ] が指定されました"
             )));
         }
         let message_count = message_count as usize;
@@ -8441,16 +8662,19 @@ impl Vm {
         Ok(Value::None)
     }
 
-    /// System80:0x4B — bounded dequeue into a caller-provided array.
-    ///
-    /// Target evidence: System80 slot 0x0050442C and repeated target calls to
-    /// `BPThread_DequeueDword`. Returns the actual number of dequeued values.
-    ///
-    /// BP push order: `[max_count, output_ptr]`; native pop order:
-    /// `output_ptr`, then `max_count`.
+    /// System80:0x4B (sub_489A10): pops the output array, then the count;
+    /// a count below 1 is fatal, there is no upper bound. Dequeues
+    /// (sub_4456D0) until the count or the queue runs out and pushes how
+    /// many were written.
     fn sys80_4b_dequeue_message_array(&mut self) -> VmResult<Value> {
         let output_ptr = self.pop_ptr()?;
-        let max_count = self.pop_int()?.max(0).min(256) as usize;
+        let max_count = self.pop_int()?;
+        if max_count < 1 {
+            return Err(VmError::Runtime(format!(
+                "無効なスレッドメッセージ数 [ {max_count} ] が指定されました"
+            )));
+        }
+        let max_count = max_count as usize;
         let mut received = 0usize;
         while received < max_count {
             let Some(value) = self.thread.pop_message() else {
@@ -8491,26 +8715,40 @@ impl Vm {
         Ok(Value::Int(i32::from(active)))
     }
 
+    /// sub_46C310's length checks (31, 31, 31, 255, 511 bytes) with the
+    /// caller's fatal texts: Sys80:94 (sub_48A730) or Sys80:96 (sub_48A960).
     fn validate_structured_history_record(
         record: &system80_state::StructuredHistoryRecord,
+        from_buffer: bool,
     ) -> VmResult<()> {
-        for (index, text) in record.short_text.iter().enumerate() {
-            if encoding_rs::SHIFT_JIS.encode(text).0.len() >= 32 {
-                return Err(VmError::Runtime(format!(
-                    "Sys80 structured-history short string {} exceeds 31 bytes",
-                    index + 1
-                )));
+        let messages: [&str; 5] = if from_buffer {
+            [
+                "アーカイブ名が{}文字を超えています",
+                "ファイル名が{}文字を超えています",
+                "名前が{}文字を超えています",
+                "メッセージが{}文字を超えています",
+                "読み仮名リストが{}文字を超えています",
+            ]
+        } else {
+            [
+                "指定されたアーカイブ名は{}文字を超えています",
+                "指定されたファイル名は{}文字を超えています",
+                "指定された名前は{}文字を超えています",
+                "指定されたメッセージは{}文字を超えています",
+                "",
+            ]
+        };
+        let fields = [
+            (&record.short_text[0], 32),
+            (&record.short_text[1], 32),
+            (&record.short_text[2], 32),
+            (&record.text, 256),
+            (&record.extended_text, 512),
+        ];
+        for ((text, limit), message) in fields.into_iter().zip(messages) {
+            if encoding_rs::SHIFT_JIS.encode(text).0.len() >= limit {
+                return Err(VmError::Runtime(message.replace("{}", &(limit - 1).to_string())));
             }
-        }
-        if encoding_rs::SHIFT_JIS.encode(&record.text).0.len() >= 256 {
-            return Err(VmError::Runtime(
-                "Sys80 structured-history text exceeds 255 bytes".into(),
-            ));
-        }
-        if encoding_rs::SHIFT_JIS.encode(&record.extended_text).0.len() >= 512 {
-            return Err(VmError::Runtime(
-                "Sys80 structured-history extended text exceeds 511 bytes".into(),
-            ));
         }
         Ok(())
     }
@@ -8534,7 +8772,7 @@ impl Vm {
             text: self.read_c_string(ptr + 256)?,
             extended_text: self.read_c_string(ptr + 512)?,
         };
-        Self::validate_structured_history_record(&record)?;
+        Self::validate_structured_history_record(&record, true)?;
         Ok(record)
     }
 
@@ -8602,7 +8840,7 @@ impl Vm {
             text,
             extended_text: String::new(),
         };
-        Self::validate_structured_history_record(&record)?;
+        Self::validate_structured_history_record(&record, false)?;
         self.system80_shared
             .lock()
             .map_err(|_| VmError::Runtime("system80 shared state poisoned".into()))?
@@ -8622,7 +8860,7 @@ impl Vm {
         });
         let Some(record) = record else {
             return Err(VmError::Runtime(format!(
-                "Sys80 structured-history index out of range: {index}"
+                "無効なヒストリインデックス [ {index} ] が指定されました"
             )));
         };
         self.write_structured_history_record(dst, &record, include_extended)?;
@@ -8648,10 +8886,74 @@ impl Vm {
     /// internal and is not exposed to BP code.
     ///
     /// BP push order: `[name]`; native pop order: `name`.
+    /// A string operand that may be a null pointer.
+    fn pop_nullable_string(&mut self) -> VmResult<Option<String>> {
+        match self.pop_value()? {
+            Value::Int(0) | Value::Ptr(0) | Value::None => Ok(None),
+            value => self.value_as_native_string_lossy(value).map(Some),
+        }
+    }
+
+    /// sub_472A10: the program is "dir\\cmd", or primary root + cmd without
+    /// a directory (which is then also the current directory). On failure:
+    /// no message -> 0; without retry MessageBox(OK) -> 0; with retry
+    /// OK|CANCEL and the quit question, where only a confirmed quit -> 0.
+    #[allow(clippy::too_many_arguments)]
+    fn launch_native_process<A: SysApi>(
+        &mut self,
+        api: &mut A,
+        directory: Option<String>,
+        command: &str,
+        error_message: Option<String>,
+        hide_window: bool,
+        retry: bool,
+        wait_for_uninstaller: bool,
+    ) -> i32 {
+        let (command_line, current_directory) = match directory {
+            Some(directory) => (format!("{directory}\\{command}"), directory),
+            None => {
+                let root = self.resource_primary_root(api);
+                (format!("{root}{command}"), root)
+            }
+        };
+        loop {
+            if api.launch_process(&current_directory, &command_line, hide_window, wait_for_uninstaller) {
+                return 1;
+            }
+            let Some(message) = error_message.as_deref() else {
+                return 0;
+            };
+            if !retry {
+                api.message_box("", message);
+                return 0;
+            }
+            if !api.retry_or_quit_prompt("", message) {
+                return 0;
+            }
+        }
+    }
+
+    /// Namespace 0x80000000 of the string tables (dword_503E00): the
+    /// resource names of Sys80:84/85, saved in BGI.gdb, and spared by 80:D8.
+    pub(crate) fn resource_names(&self) -> &[String] {
+        self.string_hash_tables.get(&RESOURCE_NAMESPACE).map_or(&[], Vec::as_slice)
+    }
+
+    /// sub_496070(0x80000000, ..): a zero count removes the namespace.
+    pub(crate) fn set_resource_names(&mut self, names: Vec<String>) {
+        if names.is_empty() {
+            self.string_hash_tables.remove(&RESOURCE_NAMESPACE);
+        } else {
+            self.string_hash_tables.insert(RESOURCE_NAMESPACE, names);
+        }
+    }
+
     fn sys80_84_intern_resource_name(&mut self) -> VmResult<Value> {
         let name = self.pop_string_lossy()?;
-        if !self.resource_names.iter().any(|entry| entry == &name) {
-            self.resource_names.push(name);
+        // sub_496200 on namespace 0x80000000 (created on first use).
+        let names = self.string_hash_tables.entry(RESOURCE_NAMESPACE).or_default();
+        if !names.iter().any(|entry| entry == &name) {
+            names.push(name);
         }
         // sub_46B430 always returns one after interning; the stable index is
         // internal to the native table and is not exposed to BP code.
@@ -8668,7 +8970,7 @@ impl Vm {
     fn sys80_85_resource_name_exists(&mut self) -> VmResult<Value> {
         let name = self.pop_string_lossy()?;
         Ok(Value::Int(i32::from(
-            self.resource_names.iter().any(|entry| entry == &name),
+            self.resource_names().iter().any(|entry| entry == &name),
         )))
     }
 
@@ -8686,10 +8988,12 @@ impl Vm {
     fn sys80_88_create_or_resize_read_flag_table(&mut self) -> VmResult<Value> {
         let bit_count = self.pop_int()?;
         let name = self.pop_string_lossy()?;
+        // sub_446FD0 fails only for a zero byte count ((bits + 7) >> 3,
+        // unsigned); an empty name is a valid table name.
         let Ok(bit_count) = usize::try_from(bit_count) else {
             return Ok(Value::Int(0));
         };
-        if bit_count == 0 || name.is_empty() {
+        if bit_count == 0 {
             return Ok(Value::Int(0));
         }
         let success = if let Some(flags) = self.read_flags.get_mut(&name) {
@@ -8735,21 +9039,17 @@ impl Vm {
         let enabled = self.pop_int()? != 0;
         let start_bit = self.pop_int()?;
         let name = self.pop_string_lossy()?;
-        let status = match (
-            self.read_flags.get_mut(&name),
-            u32::try_from(start_bit),
-            u32::try_from(bit_count),
-        ) {
-            (None, _, _) => 1,
-            (Some(_), Err(_), _) => 2,
-            (Some(_), _, Err(_) | Ok(0)) => 3,
-            (Some(_), _, Ok(bit_count)) if bit_count > 65_536 => 3,
-            (Some(flags), Ok(start_bit), Ok(bit_count)) => {
-                if flags.set_range(start_bit, bit_count, enabled) {
-                    0
-                } else {
-                    3
-                }
+        // sub_447190, all unsigned: unknown table 1; start >= length 2;
+        // count - 1 > 0xFFFF or start + count > length 3.
+        let (start_bit, bit_count) = (start_bit as u32, bit_count as u32);
+        let status = match self.read_flags.get_mut(&name) {
+            None => 1,
+            Some(flags) if start_bit >= flags.bit_len => 2,
+            Some(_) if bit_count.wrapping_sub(1) > 0xFFFF => 3,
+            Some(flags) if start_bit + bit_count > flags.bit_len => 3,
+            Some(flags) => {
+                flags.set_range(start_bit, bit_count, enabled);
+                0
             }
         };
         Ok(Value::Int(status))
@@ -8770,31 +9070,23 @@ impl Vm {
     /// The name is therefore whichever argument names a read-flag table;
     /// when neither does, the order above applies.
     fn sys80_8b_query_read_flag_bit(&mut self) -> VmResult<Value> {
-        let bit_offset = self.pop_int()?;
-        let second = self.pop_value()?;
-        let first = self.pop_value()?;
-        let first_name = self.value_as_native_string_lossy(first.clone());
-        let swapped = !first_name
-            .as_ref()
-            .is_ok_and(|name| self.read_flags.contains_key(name))
-            && self
-                .value_as_native_string_lossy(second.clone())
-                .is_ok_and(|name| self.read_flags.contains_key(&name));
-        let (name, output) = if swapped {
-            (self.value_as_native_string_lossy(second)?, first)
-        } else {
-            (first_name?, second)
-        };
-        let output_ptr = Self::translate_system_descriptor(output.as_i32() as u32);
-        let (status, enabled) = match (self.read_flags.get(&name), u32::try_from(bit_offset)) {
-            (None, _) => (1, false),
-            (Some(_), Err(_)) => (2, false),
-            (Some(flags), Ok(bit_offset)) => match flags.contains(bit_offset) {
-                Some(enabled) => (0, enabled),
-                None => (2, false),
+        // sub_48A670 pops the bit index, the table name, then the output
+        // DWORD; sub_447230 writes the output only on success (status 0;
+        // unknown table 1, index >= length 2, unsigned).
+        let bit_offset = self.pop_int()? as u32;
+        let name = self.pop_string_lossy()?;
+        let output = self.pop_value()?;
+        let output_ptr = output.as_i32() as u32;
+        let (status, enabled) = match self.read_flags.get(&name) {
+            None => (1, None),
+            Some(flags) => match flags.contains(bit_offset) {
+                Some(enabled) => (0, Some(enabled)),
+                None => (2, None),
             },
         };
-        self.write_int(output_ptr, 2, u32::from(enabled))?;
+        if let Some(enabled) = enabled {
+            self.write_int(output_ptr, 2, u32::from(enabled))?;
+        }
         Ok(Value::Int(status))
     }
 
@@ -8824,19 +9116,11 @@ impl Vm {
                 Value::Int(i32::from(accepted))
             }
             (0x81, 0x07) => {
+                // sub_48F090: index < 5 (unsigned) copies the press slot.
                 let index = self.pop_int()?;
                 let destination = self.pop_ptr()?;
-                let value = if (0..5).contains(&index) {
-                    let cached = self
-                        .system81_shared
-                        .lock()
-                        .expect("system81 state poisoned")
-                        .coordinate_slots[index as usize];
-                    cached.or_else(|| api.pointer_position(index))
-                } else {
-                    None
-                };
-                if let Some((x, y)) = value {
+                if (index as u32) < 5 {
+                    let (x, y) = api.pointer_position(index).unwrap_or((-1, -1));
                     self.write_int(destination, 2, x as u32)?;
                     self.write_int(destination.wrapping_add(4), 2, y as u32)?;
                     Value::Int(1)
@@ -8845,63 +9129,71 @@ impl Vm {
                 }
             }
             (0x81, 0x08) => {
+                // GetUserNameA with a 257-byte buffer: a longer name fails
+                // and leaves the buffer as it was.
                 let destination = self.pop_ptr()?;
-                self.write_c_string(destination, &api.host_user_name())?;
+                let name = api.host_user_name();
+                if self.encode_native_string(&name).len() < 257 {
+                    self.write_c_string(destination, &name)?;
+                }
                 Value::None
             }
             (0x81, 0x09) => {
+                // GetComputerNameA with nSize 16 (the NetBIOS name, at most
+                // 15 characters; a longer one fails, nothing written).
                 let destination = self.pop_ptr()?;
-                self.write_c_string(destination, &api.host_computer_name())?;
+                let name = api.host_computer_name();
+                if self.encode_native_string(&name).len() < 16 {
+                    self.write_c_string(destination, &name)?;
+                }
                 Value::None
             }
             (0x81, 0x0a) => {
+                // sub_46FC80: CPUID 0x80000002..4 through sub_496650; 0 and
+                // nothing written when leaf 0x80000004 is not supported.
                 let destination = self.pop_ptr()?;
-                if let Some(brand) = target_cpu_brand_string() {
-                    self.write_c_string(destination, &brand)?;
-                    Value::Int(1)
-                } else {
-                    if destination != 0 {
-                        self.write_c_string(destination, "")?;
+                match target_cpu_brand_string() {
+                    Some(brand) => {
+                        self.write_c_string(destination, &bgi_normalize_spaces(&brand))?;
+                        Value::Int(1)
                     }
-                    Value::Int(0)
+                    None => Value::Int(0),
                 }
             }
             (0x81, 0x0b) => {
+                // sub_45E9F0: the D3DADAPTER_IDENTIFIER9 that sub_4605A0
+                // read at start-up (zeroed when GetAdapterIdentifier
+                // failed): Description through sub_496650, then the
+                // DriverVersion words product, version, subversion, build.
                 let _ignored = self.pop_ptr()?;
-                let signature_destination = self.pop_ptr()?;
-                let text = self.pop_ptr()?;
-                if text != 0 {
-                    let normalized = self
-                        .read_c_string(text)?
-                        .split_whitespace()
-                        .collect::<Vec<_>>()
-                        .join(" ");
-                    self.write_c_string(text, &normalized)?;
-                }
-                for (index, value) in target_cpu_signature_words().into_iter().enumerate() {
+                let version_destination = self.pop_ptr()?;
+                let description_destination = self.pop_ptr()?;
+                let (description, version) = api.display_adapter_identifier();
+                self.write_c_string(description_destination, &bgi_normalize_spaces(&description))?;
+                for (index, value) in version.into_iter().enumerate() {
                     self.write_int(
-                        signature_destination.wrapping_add(index as u32 * 4),
+                        version_destination.wrapping_add(index as u32 * 4),
                         2,
-                        value,
+                        u32::from(value),
                     )?;
                 }
                 Value::None
             }
             (0x81, 0x0c) => {
+                // sub_46FD60: GetVersionExA once (OSVERSIONINFOA zeroed
+                // first, so a host without Windows reports 0.0.0 platform 0
+                // and an empty service pack).
                 let service_pack = self.pop_ptr()?;
                 let version = self.pop_ptr()?;
-                let values = if cfg!(target_os = "windows") {
-                    [10u32, 0, 0, 2]
-                } else {
-                    [0u32, 0, 0, 0]
-                };
+                let (values, csd) = api.host_os_version();
                 for (index, value) in values.into_iter().enumerate() {
                     self.write_int(version.wrapping_add(index as u32 * 4), 2, value)?;
                 }
-                self.write_c_string(service_pack, "")?;
+                self.write_c_string(service_pack, &csd)?;
                 Value::None
             }
             (0x81, 0x0d) => {
+                // GlobalMemoryStatusEx: ullTotalPhys / ullAvailPhys >> 20.
                 let available = self.pop_ptr()?;
                 let total = self.pop_ptr()?;
                 let (total_mb, available_mb) = api.host_physical_memory_mb();
@@ -8910,10 +9202,11 @@ impl Vm {
                 Value::None
             }
             (0x81, 0x0e) => {
+                // sub_45EAE0(.., 1) over the start-up GetAdapterDisplayMode.
                 let destination = self.pop_ptr()?;
-                let (width, height) = adjusted_desktop_dimensions(api.runtime_screen_dimensions());
-                self.write_int(destination, 2, width as u32)?;
-                self.write_int(destination.wrapping_add(4), 2, height as u32)?;
+                let (width, height) = adjusted_desktop_dimensions(api.desktop_display_size());
+                self.write_int(destination, 2, width)?;
+                self.write_int(destination.wrapping_add(4), 2, height)?;
                 Value::None
             }
             (0x81, 0x0f) => Value::Int(i32::from(api.window_minimized())),
@@ -8922,9 +9215,9 @@ impl Vm {
                 let index = self.pop_int()?;
                 // sub_497B40 rejects a descriptor >= 0x100 with a fatal error.
                 if !(0..256).contains(&index) {
-                    return Err(VmError::Runtime(format!(
-                        "Sys81:10 input descriptor {index} is out of range"
-                    )));
+                    return Err(VmError::Runtime(
+                        "不正な仮想キーコードが指定されています".into(),
+                    ));
                 } else {
                     api.swap_input_repeat_flag(index, replacement);
                     let mut state = self
@@ -8956,85 +9249,38 @@ impl Vm {
                 Value::None
             }
             (0x81, 0x16) => {
+                // sub_46B720: capacity <= 0x200 (unsigned) empties the touch
+                // history and sets its capacity and minimum step.
                 let distance = self.pop_int()?;
                 let capacity = self.pop_int()?;
                 let accepted = self
                     .system81_shared
                     .lock()
                     .expect("system81 state poisoned")
-                    .configure_pointer_history(capacity, distance);
+                    .configure_touch_history(capacity as u32, distance as u32);
                 Value::Int(i32::from(accepted))
             }
             (0x81, 0x17) => {
-                let count = self.pop_int()?.max(0) as usize;
-                let start = self.pop_int()?.max(0) as usize;
-                let distances = self.pop_ptr()?;
-                let points = self.pop_ptr()?;
-                if let Some((x, y)) = api.pointer_position(0) {
-                    self.system81_shared
-                        .lock()
-                        .expect("system81 state poisoned")
-                        .record_pointer(x, y);
-                }
-                let samples = {
-                    let state = self
-                        .system81_shared
-                        .lock()
-                        .expect("system81 state poisoned");
-                    state
-                        .pointer_history
-                        .iter()
-                        .skip(start)
-                        .take(count)
-                        .copied()
-                        .collect::<Vec<_>>()
-                };
-                for (index, sample) in samples.iter().enumerate() {
-                    self.write_int(points.wrapping_add(index as u32 * 8), 2, sample.x as u32)?;
-                    self.write_int(
-                        points.wrapping_add(index as u32 * 8 + 4),
-                        2,
-                        sample.y as u32,
-                    )?;
-                    let distance = samples.get(index + 1).map_or(-1, |next| {
-                        let dx = sample.x.saturating_sub(next.x);
-                        let dy = sample.y.saturating_sub(next.y);
-                        (((i64::from(dx) * i64::from(dx) + i64::from(dy) * i64::from(dy)) as f64)
-                            .sqrt()) as i32
-                    });
-                    self.write_int(distances.wrapping_add(index as u32 * 4), 2, distance as u32)?;
-                }
-                Value::Int(samples.len().min(i32::MAX as usize) as i32)
+                // sub_46B860 walks the WM_TOUCH history (dword_5666BC). The
+                // host delivers no WM_TOUCH, so the history stays empty and
+                // `start < count` never holds.
+                let _count = self.pop_int()?;
+                let _start = self.pop_int()?;
+                let _angles = self.pop_ptr()?;
+                let _points = self.pop_ptr()?;
+                Value::Int(0)
             }
             (0x81, 0x18) => {
+                // sub_46B660: RegisterTouchWindow / UnregisterTouchWindow
+                // when user32 has them (dword_566690), else 0.
                 let enabled = self.pop_int()? != 0;
-                let accepted = api.register_touch_input(enabled);
-                if accepted {
-                    self.system81_shared
-                        .lock()
-                        .expect("system81 state poisoned")
-                        .touch_registered = enabled;
-                }
-                Value::Int(i32::from(accepted))
+                Value::Int(i32::from(api.register_touch_input(enabled)))
             }
             (0x81, 0x19) => {
-                let destination = self.pop_ptr()?;
-                let records = self
-                    .system81_shared
-                    .lock()
-                    .expect("system81 state poisoned")
-                    .touch_records
-                    .clone();
-                for (record_index, record) in records.iter().enumerate() {
-                    for (field_index, value) in record.values.into_iter().enumerate() {
-                        self.write_int(
-                            destination.wrapping_add((record_index * 24 + field_index * 4) as u32),
-                            2,
-                            value as u32,
-                        )?;
-                    }
-                }
-                Value::Int(records.len().min(i32::MAX as usize) as i32)
+                // sub_46B6A0 counts (and copies, 24 bytes each) the active
+                // contacts of dword_5666B0; none without WM_TOUCH.
+                let _destination = self.pop_ptr()?;
+                Value::Int(0)
             }
             (0x81, 0x1b) => {
                 let value = self.pop_int()?;
@@ -9051,21 +9297,21 @@ impl Vm {
                 Value::Int(i32::from(accepted))
             }
             (0x81, 0x1d) => {
-                let destination = self.pop_ptr()?;
-                let _device = self.pop_ptr()?;
-                let (x, y) = api.pointer_position(0).unwrap_or_default();
-                for (index, value) in [x, y, 0, 0, -1, 0].into_iter().enumerate() {
-                    self.write_int(destination.wrapping_add(index as u32 * 4), 2, value as u32)?;
-                }
-                Value::Int(1)
+                // sub_4613C0 sums the DirectInput joysticks of dword_565F18
+                // (all, or the one whose id matches). The host enumerates no
+                // DirectInput device, so the result is 0x80000001 and the
+                // handler pushes 0 without writing.
+                let _device = self.pop_int()?;
+                let _destination = self.pop_ptr()?;
+                Value::Int(0)
             }
             (0x81, 0x1e) => {
                 let button = self.pop_int()?;
-                let valid = matches!(button, 1 | 2 | 4 | 5 | 6);
-                Value::Int(i32::from(valid && api.inject_mouse_click(button)))
+                Value::Int(i32::from(api.inject_mouse_click(button)))
             }
             (0x81, 0x1f) => {
                 let mask = self.pop_int()?;
+                api.set_message_auxiliary_input_mask(mask);
                 self.system81_shared
                     .lock()
                     .expect("system81 state poisoned")
@@ -9087,7 +9333,7 @@ impl Vm {
                 self.memory[range.start+bytes.len()]=0;
                 self.clear_shadow_values(destination,bytes.len()+1);
                 self.mem_values
-                    .insert(Self::value_key(destination), Value::Str(text));
+                    .insert(self.value_key(destination), Value::Str(text));
                 Value::None
             }
             (0x81, 0x28) => {
@@ -9471,70 +9717,41 @@ impl Vm {
                 Value::Int(i32::from(available))
             }
             (0x81, 0x44) => {
-                let data_size = self.pop_int()?;
-                let code_size = self.pop_int()?;
-                let operand_slots = self.pop_int()?;
-                let entry_index = self.pop_int()?;
-                let program = empty_loaded_program(format!(
-                    "DCTChildThread:{entry_index}:{operand_slots}:{code_size}:{data_size}"
-                ));
-                let thread_id = self
-                    .start_async_program_with_args(
-                        Value::Program(Arc::new(program)),
-                        Vec::new(),
-                        false,
-                    )
-                    .unwrap_or(0);
-                Value::Int(thread_id)
+                // sub_48CA50 pops the initial IP, the data (stack) bytes,
+                // the code bytes and the operand slots (`child_thread.rs`).
+                let initial_ip = self.pop_int()? as u32;
+                let data_bytes = self.pop_int()? as u32;
+                let code_bytes = self.pop_int()? as u32;
+                let operand_slots = self.pop_int()? as u32;
+                Value::Int(self.start_child_thread(operand_slots, code_bytes, data_bytes, initial_ip, false)?)
             }
             (0x81, 0x60) => {
-                let second = self.pop_int()?;
-                let first = self.pop_int()?;
+                // sub_4615A0: index >= 8 (unsigned) -> 1, a zero dimension
+                // -> 2, else dword_506B8C/506BAC[index] = width/height.
+                let height = self.pop_int()?;
+                let width = self.pop_int()?;
                 let index = self.pop_int()?;
-                let status = if !(0..8).contains(&index) {
+                let status = if index as u32 >= 8 {
                     1
-                } else if first == 0 || second == 0 {
+                } else if width == 0 || height == 0 {
                     2
                 } else {
-                    self.display_mode_slots[index as usize] = Some((first, second));
-                    api.register_display_mode(index as usize, first, second);
+                    api.register_display_mode(index as usize, width, height);
                     0
                 };
                 Value::Int(status)
             }
-            (0x81, 0x61) => {
-                let mut mode = self.config_input_mode;
-                if mode == 2 {
-                    let (width, height) =
-                        adjusted_desktop_dimensions(api.runtime_screen_dimensions());
-                    let required = self
-                        .display_mode_slots
-                        .iter()
-                        .flatten()
-                        .next()
-                        .copied()
-                        .unwrap_or((0, 0));
-                    if width < required.0 || height < required.1 {
-                        mode = 0;
-                    }
-                }
-                Value::Int(mode)
-            }
+            // sub_45EDE0: the effective full-screen scaling mode.
+            (0x81, 0x61) => Value::Int(api.fullscreen_scale_mode()),
             (0x81, 0x62) => {
+                // sub_45ED90: dword_50721C = mode for mode <= 1 (unsigned).
                 let mode = self.pop_int()?;
-                let accepted = (0..=1).contains(&mode) && api.set_window_monitor_adapter_mode(mode);
-                if accepted {
-                    self.window_monitor_adapter_mode = mode;
-                }
-                Value::Int(i32::from(accepted))
+                Value::Int(i32::from(mode as u32 <= 1 && api.set_window_monitor_adapter_mode(mode)))
             }
             (0x81, 0x63) => {
+                // sub_45EDC0: dword_565EAC = mode for mode <= 2 (unsigned).
                 let mode = self.pop_int()?;
-                let accepted = (0..=2).contains(&mode) && api.set_config_input_mode(mode);
-                if accepted {
-                    self.config_input_mode = mode;
-                }
-                Value::Int(i32::from(accepted))
+                Value::Int(i32::from(mode as u32 <= 2 && api.set_config_input_mode(mode)))
             }
             (0x81, 0x64) => {
                 let height = self.pop_int()?;
@@ -9581,6 +9798,9 @@ impl Vm {
                 Value::None
             }
             (0x81, 0x6b) => {
+                // sub_4649E0 returns 0 without touching the destination while
+                // no error has been captured; errdtctn._bp polls this and
+                // starts its error report on any non-zero result.
                 let destination = self.pop_ptr()?;
                 let message = self
                     .system81_shared
@@ -9588,86 +9808,106 @@ impl Vm {
                     .expect("system81 state poisoned")
                     .captured_error
                     .clone();
-                if destination != 0 {
-                    self.write_c_string(destination, &message)?;
+                match message {
+                    None => Value::Int(0),
+                    Some(message) => {
+                        if destination != 0 {
+                            self.write_c_string(destination, &message)?;
+                        }
+                        let (bytes, _, _) = encoding_rs::SHIFT_JIS.encode(&message);
+                        Value::Int(bytes.len().saturating_add(1).min(i32::MAX as usize) as i32)
+                    }
                 }
-                let (bytes, _, _) = encoding_rs::SHIFT_JIS.encode(&message);
-                Value::Int(bytes.len().saturating_add(1).min(i32::MAX as usize) as i32)
             }
-            (0x81, 0x6d) => {
-                let version = api.pixel_shader_version();
-                self.system81_shared
-                    .lock()
-                    .expect("system81 state poisoned")
-                    .pixel_shader_version = version;
-                Value::Int(i32::from(version))
-            }
-            (0x81, 0x6e) => Value::Int(i32::from(std::thread::panicking())),
+            // LOWORD(D3DCAPS9::PixelShaderVersion) (dword_5172E8).
+            (0x81, 0x6d) => Value::Int(i32::from(api.pixel_shader_version())),
+            // The D3DXCreateEffect import of d3dx9_43.dll (sub_460B00).
+            (0x81, 0x6e) => Value::Int(i32::from(api.d3dx_effects_available())),
             (0x81, 0x6f) => {
+                // sub_460AB0: 0 drops the bicubic effect and returns 1; 1
+                // needs ps_3_0 and D3DXCreateEffect (sub_460980), else 0.
                 let mode = self.pop_int()?;
                 let accepted = match mode {
                     0 => api.set_shader_effect_enabled(false),
-                    1 => api.set_shader_effect_enabled(true),
+                    1 => {
+                        api.pixel_shader_version() >= 0x0300
+                            && api.d3dx_effects_available()
+                            && api.set_shader_effect_enabled(true)
+                    }
                     _ => false,
                 };
-                if accepted {
-                    self.shader_effect_enabled = mode != 0;
-                }
                 Value::Int(i32::from(accepted))
             }
             (0x81, 0xb0) => {
-                // Handler sub_48C2F0 pops helper a2 first and a1 second. The
-                // distance is symmetric for non-empty strings, but target's
-                // empty-a2 fast path is not, so preserve the native order.
-                let right = self.pop_ptr()?;
-                let left = self.pop_ptr()?;
-                if left == 0 || right == 0 {
+                // sub_496770(a1 = first pop, a2 = second pop): -1 for a null
+                // pointer, else the LCS length of the two UTF-16 strings.
+                let a1 = self.pop_ptr()?;
+                let a2 = self.pop_ptr()?;
+                if a1 == 0 || a2 == 0 {
                     Value::Int(-1)
                 } else {
-                    let left = self.read_wide_c_string(left)?;
-                    let right = self.read_wide_c_string(right)?;
-                    Value::Int(wide_string_similarity(&left, &right))
+                    let a1 = self.read_wide_c_string(a1)?;
+                    let a2 = self.read_wide_c_string(a2)?;
+                    Value::Int(wide_string_similarity(&a1, &a2))
                 }
             }
             (0x81, 0xb7) => {
+                // sub_496700: each Shift-JIS character becomes one 16-bit
+                // unit, a double-byte one as lead << 8 | trail (no UTF-16
+                // conversion); a null destination only counts.
                 let source = self.pop_ptr()?;
                 let destination = self.pop_ptr()?;
                 if source == 0 {
                     Value::Int(-1)
                 } else {
-                    let source_bytes = self.read_c_string_bytes(source)?;
-                    let (decoded, _, _) = encoding_rs::SHIFT_JIS.decode(&source_bytes);
-                    let encoded = decoded.encode_utf16().collect::<Vec<_>>();
-                    if destination != 0 {
-                        for (index, value) in encoded.iter().copied().enumerate() {
-                            self.write_int(
-                                destination.wrapping_add(index as u32 * 2),
-                                1,
-                                value as u32,
-                            )?;
+                    let mut at = source;
+                    let mut out = destination;
+                    let mut count = 0i32;
+                    loop {
+                        let lead = self.read_int(at, 0)? as u8;
+                        if lead == 0 {
+                            break;
                         }
-                        self.write_int(destination.wrapping_add(encoded.len() as u32 * 2), 1, 0)?;
+                        let unit = if (0x81..=0x9f).contains(&lead) || lead >= 0xe0 && lead <= 0xfc {
+                            let trail = self.read_int(at.wrapping_add(1), 0)?;
+                            at = at.wrapping_add(2);
+                            u32::from(lead) << 8 | trail
+                        } else {
+                            at = at.wrapping_add(1);
+                            u32::from(lead)
+                        };
+                        if destination != 0 {
+                            self.write_int(out, 1, unit)?;
+                            out = out.wrapping_add(2);
+                        }
+                        count = count.wrapping_add(1);
                     }
-                    Value::Int(encoded.len().min(i32::MAX as usize) as i32)
+                    if destination != 0 {
+                        self.write_int(out, 1, 0)?;
+                    }
+                    Value::Int(count)
                 }
             }
             (0x81, 0xd0) => {
-                let capacity = self.pop_int()?;
+                // sub_46AE10: capacity <= 1 (unsigned) -> 0x80000001; else a
+                // new table, handle ++dword_566684, written to the output.
+                let capacity = self.pop_int()? as u32;
                 let destination = self.pop_ptr()?;
-                let result = self
+                let created = self
                     .system81_shared
                     .lock()
                     .expect("system81 state poisoned")
                     .create_blob_table(capacity);
-                match result {
-                    Ok(handle) => {
+                match created {
+                    Some(handle) => {
                         self.write_int(destination, 2, handle)?;
                         Value::Int(0)
                     }
-                    Err(status) => Value::Int(status),
+                    None => Value::Int(system81_state::NATIVE_INVALID_ARGUMENT),
                 }
             }
             (0x81, 0xd1) => {
+                // sub_46AEC0: 0, or 0x80000002 for an unknown handle.
                 let handle = self.pop_int()? as u32;
                 let removed = self
                     .system81_shared
@@ -9676,137 +9916,100 @@ impl Vm {
                     .blob_tables
                     .remove(&handle)
                     .is_some();
-                Value::Int(if removed {
-                    0
-                } else {
-                    system81_state::NATIVE_NOT_FOUND
-                })
+                Value::Int(if removed { 0 } else { system81_state::NATIVE_NOT_FOUND })
             }
             (0x81, 0xd2) => {
-                let handle = self.pop_int()? as u32;
+                // sub_46AF30(index output, index, source; size in edx).
+                // With an output pointer the first empty slot (or the
+                // capacity) is used and reported. Size 0 -> 0x80000003.
+                let size = self.pop_int()? as u32;
                 let source = self.pop_ptr()?;
-                let size = self.pop_int()?.max(0) as usize;
-                let requested_index = self.pop_int()?.max(0) as usize;
+                let index = self.pop_int()? as u32;
+                let handle = self.pop_int()? as u32;
                 let index_destination = self.pop_ptr()?;
-                if size == 0 {
-                    Value::Int(system81_state::NATIVE_OPERATION_FAILED)
-                } else {
-                    let range = self.resolve_range(source, size)?;
-                    let bytes = self.memory[range].to_vec();
-                    let mut state = self
-                        .system81_shared
-                        .lock()
-                        .expect("system81 state poisoned");
-                    if let Some(table) = state.blob_tables.get_mut(&handle) {
-                        let index = if index_destination != 0 {
-                            table.insert_first_free(bytes)
-                        } else {
-                            table.insert_at(requested_index, bytes);
-                            requested_index
-                        };
-                        drop(state);
-                        if index_destination != 0 {
-                            self.write_int(index_destination, 2, index as u32)?;
-                        }
-                        Value::Int(0)
-                    } else {
-                        Value::Int(system81_state::NATIVE_NOT_FOUND)
-                    }
-                }
-            }
-            (0x81, 0xd3) => {
-                let index = self.pop_int()?.max(0) as usize;
-                let handle = self.pop_int()? as u32;
-                let mut state = self
-                    .system81_shared
-                    .lock()
-                    .expect("system81 state poisoned");
-                let status = if let Some(table) = state.blob_tables.get_mut(&handle) {
-                    if index < table.slots.len() && table.slots[index].take().is_some() {
-                        0
-                    } else {
-                        system81_state::NATIVE_INVALID_INDEX
-                    }
-                } else {
-                    system81_state::NATIVE_NOT_FOUND
-                };
-                Value::Int(status)
-            }
-            (0x81, 0xd4) => {
-                let index = self.pop_int()?.max(0) as usize;
-                let handle = self.pop_int()? as u32;
-                let size_destination = self.pop_ptr()?;
-                let destination = self.pop_ptr()?;
-                let result = {
-                    let state = self
-                        .system81_shared
-                        .lock()
-                        .expect("system81 state poisoned");
-                    match state.blob_tables.get(&handle) {
-                        None => Err(system81_state::NATIVE_NOT_FOUND),
-                        Some(table) => table
-                            .slots
-                            .get(index)
-                            .and_then(|slot| slot.clone())
-                            .ok_or(system81_state::NATIVE_INVALID_INDEX),
-                    }
-                };
-                match result {
-                    Ok(bytes) => {
-                        if destination != 0 {
-                            let range = self.resolve_range(destination, bytes.len())?;
-                            self.memory[range].copy_from_slice(&bytes);
-                            self.clear_shadow_values(destination, bytes.len());
-                        }
-                        if size_destination != 0 {
-                            self.write_int(size_destination, 2, bytes.len() as u32)?;
-                        }
-                        Value::Int(0)
-                    }
-                    Err(status) => Value::Int(status),
-                }
-            }
-            (0x81, 0xd5) => {
-                let handle = self.pop_int()? as u32;
-                let count_destination = self.pop_ptr()?;
-                let pairs_destination = self.pop_ptr()?;
-                let entries = self
+                let exists = self
                     .system81_shared
                     .lock()
                     .expect("system81 state poisoned")
                     .blob_tables
-                    .get(&handle)
-                    .map(|table| {
-                        table
-                            .slots
-                            .iter()
-                            .enumerate()
-                            .filter_map(|(index, slot)| {
-                                slot.as_ref().map(|bytes| (index, bytes.len()))
-                            })
-                            .collect::<Vec<_>>()
-                    });
-                if let Some(entries) = entries {
-                    if pairs_destination != 0 {
-                        for (output_index, (index, size)) in entries.iter().copied().enumerate() {
-                            self.write_int(
-                                pairs_destination.wrapping_add((output_index * 8) as u32),
-                                2,
-                                index as u32,
-                            )?;
-                            self.write_int(
-                                pairs_destination.wrapping_add((output_index * 8 + 4) as u32),
-                                2,
-                                size as u32,
-                            )?;
-                        }
-                    }
-                    if count_destination != 0 {
-                        self.write_int(count_destination, 2, entries.len() as u32)?;
+                    .contains_key(&handle);
+                if !exists {
+                    Value::Int(system81_state::NATIVE_NOT_FOUND)
+                } else if size == 0 {
+                    Value::Int(system81_state::NATIVE_OPERATION_FAILED)
+                } else {
+                    let range = self.resolve_range(source, size as usize)?;
+                    let bytes = self.memory[range].to_vec();
+                    let mut state = self.system81_shared.lock().expect("system81 state poisoned");
+                    let table = state.blob_tables.get_mut(&handle).expect("checked above");
+                    let slot = if index_destination != 0 { table.first_free() } else { index };
+                    table.store(slot, bytes);
+                    drop(state);
+                    if index_destination != 0 {
+                        self.write_int(index_destination, 2, slot)?;
                     }
                     Value::Int(0)
-                } else {
-                    Value::Int(system81_state::NATIVE_NOT_FOUND)
+                }
+            }
+            (0x81, 0xd3) => {
+                // sub_46AF90 -> sub_447A20: free one stored slot.
+                let index = self.pop_int()? as u32;
+                let handle = self.pop_int()? as u32;
+                let mut state = self.system81_shared.lock().expect("system81 state poisoned");
+                Value::Int(match state.blob_tables.get_mut(&handle).map(|table| table.remove(index)) {
+                    None => system81_state::NATIVE_NOT_FOUND,
+                    Some(true) => 0,
+                    Some(false) => system81_state::NATIVE_INVALID_INDEX,
+                })
+            }
+            (0x81, 0xd4) => {
+                // sub_46AFC0 -> sub_447A60: copy a stored slot (when the
+                // buffer is not null) and write its size.
+                let index = self.pop_int()? as u32;
+                let handle = self.pop_int()? as u32;
+                let size_destination = self.pop_ptr()?;
+                let destination = self.pop_ptr()?;
+                let fetched = {
+                    let state = self.system81_shared.lock().expect("system81 state poisoned");
+                    state.blob_tables.get(&handle).map(|table| table.get(index).map(<[u8]>::to_vec))
+                };
+                match fetched {
+                    None => Value::Int(system81_state::NATIVE_NOT_FOUND),
+                    Some(None) => Value::Int(system81_state::NATIVE_INVALID_INDEX),
+                    Some(Some(bytes)) => {
+                        if destination != 0 {
+                            let range = self.resolve_write_range(destination, bytes.len())?;
+                            self.memory[range].copy_from_slice(&bytes);
+                            self.clear_shadow_values(destination, bytes.len());
+                        }
+                        self.write_int(size_destination, 2, bytes.len() as u32)?;
+                        Value::Int(0)
+                    }
+                }
+            }
+            (0x81, 0xd5) => {
+                // sub_46B000 -> sub_447AA0: (index, size) of every stored
+                // slot into the list (when not null), count to the output.
+                let handle = self.pop_int()? as u32;
+                let count_destination = self.pop_ptr()?;
+                let destination = self.pop_ptr()?;
+                let entries = {
+                    let state = self.system81_shared.lock().expect("system81 state poisoned");
+                    state.blob_tables.get(&handle).map(|table| table.entries())
+                };
+                match entries {
+                    None => Value::Int(system81_state::NATIVE_NOT_FOUND),
+                    Some(entries) => {
+                        if destination != 0 {
+                            for (position, (index, size)) in entries.iter().enumerate() {
+                                let at = destination.wrapping_add(position as u32 * 8);
+                                self.write_int(at, 2, *index)?;
+                                self.write_int(at.wrapping_add(4), 2, *size)?;
+                            }
+                        }
+                        self.write_int(count_destination, 2, entries.len() as u32)?;
+                        Value::Int(0)
+                    }
                 }
             }
             (0x81, 0xda) => {
@@ -9825,7 +10028,7 @@ impl Vm {
                     if destination!=0 {
                         let range=self.resolve_write_range(destination,length+1)?;
                         self.memory[range.start..range.start+length].copy_from_slice(bytes);self.memory[range.start+length]=0;
-                        self.clear_shadow_values(destination,length+1);self.mem_values.insert(Self::value_key(destination),Value::Str(replacement));
+                        self.clear_shadow_values(destination,length+1);self.mem_values.insert(self.value_key(destination),Value::Str(replacement));
                     }
                     Value::Int(length as i32)
                 } else {Value::Int(0)}
@@ -9849,26 +10052,47 @@ impl Vm {
                 }
             }
             (0x81, 0xe0) => {
-                let flags = self.pop_int()?;
-                let error_message = self.pop_string_lossy()?;
+                // sub_48CFE0 -> sub_472A10(current dir, message, exit code,
+                // dir, command, show, hide main window, wait, retry). The
+                // command line is "dir\\command" or primary root + command;
+                // the current directory defaults to dir, or to the primary
+                // root without its trailing backslash.
+                let hide_main_window = self.pop_int()? != 0;
+                let error_message = self.pop_nullable_string()?;
                 let show_window = self.pop_int()? != 0;
-                let working_directory = self.pop_string_lossy()?;
-                let executable = self.pop_string_lossy()?;
-                let arguments = self.pop_string_lossy()?;
+                let current_directory = self.pop_nullable_string()?;
+                let command = self.pop_string_lossy()?;
+                let directory = self.pop_nullable_string()?;
                 let exit_code_destination = self.pop_ptr()?;
-                let mut exit_code = 0;
-                let success = api.launch_process_wait(
-                    &working_directory,
-                    &executable,
-                    &arguments,
-                    &error_message,
-                    show_window || flags != 0,
-                    (exit_code_destination != 0).then_some(&mut exit_code),
-                );
-                if exit_code_destination != 0 {
-                    self.write_int(exit_code_destination, 2, exit_code as u32)?;
+                let (command_line, default_directory) = match directory {
+                    Some(directory) => (format!("{directory}\\{command}"), directory),
+                    None => {
+                        let root = self.resource_primary_root(api);
+                        let mut trimmed = root.clone();
+                        trimmed.pop();
+                        (format!("{root}{command}"), trimmed)
+                    }
+                };
+                let current_directory = current_directory.unwrap_or(default_directory);
+                loop {
+                    if let Some(code) = api.launch_process_and_wait(
+                        &current_directory,
+                        &command_line,
+                        show_window,
+                        hide_main_window,
+                    ) {
+                        if exit_code_destination != 0 {
+                            self.write_int(exit_code_destination, 2, code)?;
+                        }
+                        break Value::Int(1);
+                    }
+                    let Some(message) = error_message.as_deref() else {
+                        break Value::Int(0);
+                    };
+                    if !api.retry_or_quit_prompt("", message) {
+                        break Value::Int(0);
+                    }
                 }
-                Value::Int(i32::from(success))
             }
             (0x81, 0xe9) => {
                 let length = self.pop_int()?.max(0) as usize;
@@ -9897,22 +10121,33 @@ impl Vm {
                 Value::None
             }
             (0x81, 0xec) => {
+                // sub_490470: CreateMutexA(NULL, TRUE, name); 0 when it fails
+                // or already existed (any process), else ++dword_56697C.
                 let name = self.pop_string_lossy()?;
-                Value::Int(
-                    self.system81_shared
-                        .lock()
-                        .expect("system81 state poisoned")
-                        .create_named_mutex(name),
-                )
+                match api.create_named_mutex(&name) {
+                    Some(token) => {
+                        let mut state = self.system81_shared.lock().expect("system81 state poisoned");
+                        state.last_mutex_handle = state.last_mutex_handle.wrapping_add(1);
+                        let handle = state.last_mutex_handle;
+                        state.named_mutexes.insert(handle, token);
+                        Value::Int(handle as i32)
+                    }
+                    None => Value::Int(0),
+                }
             }
             (0x81, 0xed) => {
-                let handle = self.pop_int()?;
-                Value::Int(i32::from(
-                    self.system81_shared
-                        .lock()
-                        .expect("system81 state poisoned")
-                        .release_named_mutex(handle),
-                ))
+                // sub_490500: release and close; 1 when the handle is known.
+                let handle = self.pop_int()? as u32;
+                let token = self
+                    .system81_shared
+                    .lock()
+                    .expect("system81 state poisoned")
+                    .named_mutexes
+                    .remove(&handle);
+                if let Some(token) = token {
+                    api.release_named_mutex(token);
+                }
+                Value::Int(i32::from(token.is_some()))
             }
             (0x81, 0xf2) => {
                 let text5 = self.pop_string_lossy()?;
@@ -10008,7 +10243,7 @@ impl Vm {
                 )))
             }
             (0x80, 0x06) => {
-                let enabled = self.pop_int()? != 0;
+                let enabled = self.pop_int()?;
                 api.set_performance_profiling(enabled);
                 Value::None
             }
@@ -10030,6 +10265,30 @@ impl Vm {
                 Value::None
             }
             (0x80, 0x0b) => Value::Int(api.graphics_memory_metric()),
+            (0x80, 0x2b) => {
+                // sub_489130 pops the path, then the extension, file name,
+                // directory and drive outputs (script order drive, dir,
+                // name, ext, path). sub_42D7F0 splits the path as wide text
+                // (_wsplitpath) and writes each non-null output; a null
+                // path writes nothing and returns 0.
+                let path = self.pop_value()?;
+                let ext = self.pop_ptr()?;
+                let name = self.pop_ptr()?;
+                let dir = self.pop_ptr()?;
+                let drive = self.pop_ptr()?;
+                if matches!(path, Value::Int(0) | Value::Ptr(0) | Value::None) {
+                    Value::Int(0)
+                } else {
+                    let text = self.value_as_string_lossy(path)?;
+                    let parts = msvc_wsplitpath(&text);
+                    for (destination, part) in [(drive, &parts[0]), (dir, &parts[1]), (name, &parts[2]), (ext, &parts[3])] {
+                        if destination != 0 {
+                            self.write_c_string(destination, part)?;
+                        }
+                    }
+                    Value::Int(1)
+                }
+            }
             (0x80, 0x0c) => {
                 let destination = self.pop_ptr()?;
                 let fields = portable_local_system_time();
@@ -10082,10 +10341,10 @@ impl Vm {
                 let descriptors = self.pop_ptr()?;
                 let mut total = 0i32;
                 if descriptors != 0 {
-                    let start = Self::memory_addr(descriptors) as usize;
+                    let start = self.memory_addr(descriptors) as usize;
                     if start >= self.memory.len() {
                         return Err(VmError::MemoryOutOfBounds {
-                            addr: Self::memory_addr(descriptors),
+                            addr: self.memory_addr(descriptors),
                             size: 4,
                         });
                     }
@@ -10162,10 +10421,21 @@ impl Vm {
                         descriptors.push(descriptor);
                     }
                     if !terminated {
-                        return Err(VmError::Runtime(
-                            "Sys80:1B input descriptor list exceeds 15 entries".into(),
-                        ));
+                        // sub_46E500 counts the list first (-2).
+                        return Err(VmError::Runtime(format!(
+                            "指定されたキー配列は長過ぎます\n\nキー配列の長さは [ {} ] エレメント以内でなければなりません",
+                            15
+                        )));
                     }
+                }
+                // Then the class must be one of sub_46E500's ten tables (-1).
+                const CLASSES: [u32; 10] =
+                    [0x40, 0x80, 0x100, 0x200, 0x1000, 0x2000, 0x4000, 0x8000, 0x4000_0000, 0x8000_0000];
+                if !CLASSES.contains(&(class_mask as u32)) {
+                    return Err(VmError::Runtime(format!(
+                        "無効なスタンダードキー [ ${:08X} ] が指定されました",
+                        class_mask as u32
+                    )));
                 }
                 api.register_input_class_descriptors(class_mask, &descriptors);
                 Value::None
@@ -10199,7 +10469,7 @@ impl Vm {
                         }
                         if !terminated {
                             return Err(VmError::Runtime(
-                                "Sys80:62 fullscreen hotkey descriptor list exceeds 15 entries"
+                                "ディスプレイスタイルチェンジの対象として指定されたキーの配列が長過ぎます"
                                     .into(),
                             ));
                         }
@@ -10214,7 +10484,8 @@ impl Vm {
                 let requested = self.pop_int()?.max(0) as usize;
                 let source = self.pop_ptr()?;
                 let destination = self.pop_ptr()?;
-                let sdc_header = b"SDC FORMAT 1.00";
+                // sub_494430: strcmp, so the terminating NUL is part of it.
+                let sdc_header = b"SDC FORMAT 1.00\0";
                 let has_sdc_header = self
                     .resolve_range(source, sdc_header.len())
                     .ok()
@@ -10222,21 +10493,23 @@ impl Vm {
                 let output = if has_sdc_header {
                     self.decode_sdc_records(source, destination)?
                 } else {
-                    // Target sub_465320 is the engine-wide resource/data
-                    // decoder. Until every wrapped resource format is ported,
-                    // preserve the destination/length contract with a bounded
-                    // raw copy rather than inventing a successful decode size.
-                    let start = source as usize;
-                    if start >= self.memory.len() {
-                        0
-                    } else {
-                        let count = requested.min(self.memory.len() - start);
-                        let bytes = self.memory[start..start + count].to_vec();
-                        let range = self.resolve_write_range(destination, count)?;
-                        self.memory[range].copy_from_slice(&bytes);
-                        self.clear_shadow_values(destination, count);
-                        count.min(i32::MAX as usize) as i32
-                    }
+                    // 499120 -> 465880 dispatches DSC, both CBG decoders,
+                    // or an unwrapped payload. Length describes the input,
+                    // not the capacity of the decoded destination.
+                    let range = self.resolve_range(source, requested)?;
+                    let input = &self.memory[range];
+                    let decoded = if input.starts_with(b"DSC FORMAT 1.00") {
+                        if input.get(20..24).is_some_and(|v| u32::from_le_bytes(v.try_into().unwrap()) <= 0x400_0000) {
+                            ethornell_archive::dsc_decode(input).unwrap_or_default()
+                        } else { Vec::new() }
+                    } else if input.starts_with(b"CompressedBG___") {
+                        ethornell_image::decode_cbg_native_buffer(input).unwrap_or_default()
+                    } else { input.to_vec() };
+                    let count = decoded.len();
+                    let range = self.resolve_write_range(destination, count)?;
+                    self.memory[range].copy_from_slice(&decoded);
+                    self.clear_shadow_values(destination, count);
+                    count as i32
                 };
                 self.install_host_completed_procedure(
                     NativeOpcode { group, id },
@@ -10415,59 +10688,136 @@ impl Vm {
             }
             (0x80, 0x04) => Value::Int(self.timing.tick_count()),
             (0x80, 0x05) => {
+                // sub_4888D0 -> sub_499430: QueryPerformanceCounter as
+                // nanoseconds; it does not stop inside clock pause sections.
                 let ptr = self.pop_ptr()?;
-                let counter = self.timing.performance_counter();
+                let counter = api
+                    .performance_counter_ns()
+                    .unwrap_or_else(|| self.timing.performance_counter() as u64);
                 self.write_int(ptr, 2, counter as u32)?;
                 self.write_int(ptr.wrapping_add(4), 2, (counter >> 32) as u32)?;
                 Value::Int(1)
             }
             (0x80, 0x20) => {
-                let size = self.pop_int()?.max(0) as u32;
-                Value::Ptr(self.alloc_heap(size))
+                // sub_488E80: sub_498460 (1..=64 MiB, unsigned), then
+                // sub_48E760; no free slot is fatal.
+                let size = self.pop_int()? as u32;
+                if size == 0 || size > 0x400_0000 {
+                    return Err(VmError::Runtime(format!(
+                        "無効なサイズ [ {} ] byteのメモリ領域を確保しようとしました\nメモリサイズは最大で [ {} ] byteまでしか確保できません",
+                        size as i32, 0x400_0000
+                    )));
+                }
+                let ptr = self.alloc_heap(size);
+                if ptr == 0 {
+                    return Err(VmError::Runtime("グローバル領域に空きがありません".into()));
+                }
+                Value::Int(ptr as i32)
             }
             (0x80, 0x21) => {
-                let ptr = self.pop_ptr()?;
-                Value::Int(i32::from(self.free_heap(ptr)))
+                // sub_488ED0: 0 is accepted; anything sub_48E800 does not
+                // free (not a block start) is fatal.
+                let ptr = self.pop_int()? as u32;
+                if ptr != 0 && !self.free_heap(ptr) {
+                    return Err(VmError::Runtime(format!(
+                        "グローバルメモリの解放の対象に不正なアドレス [ ${ptr:08X} ] が指定されました"
+                    )));
+                }
+                Value::Int(1)
             }
-            (0x80, 0x33) => {
-                let _mode = self.pop_value()?;
-                let _key = self.pop_value()?;
-                Value::None
+            (0x80, 0x33) => self.sys80_33_delete_file(api)?,
+            (0x80, 0x25) => self.sys80_25_enumerate_files(api)?,
+            (0x80, 0x26) => self.sys80_26_enumerate_directories(api)?,
+            (0x80, 0x6d) => {
+                // sub_464040 copies szFile while file drop is enabled and a
+                // path is pending; reading leaves the buffer in place.
+                let destination = self.pop_ptr()?;
+                match api.take_dropped_file().filter(|path| !path.is_empty()) {
+                    Some(path) => {
+                        self.write_c_string(destination, &path)?;
+                        Value::Int(1)
+                    }
+                    None => Value::Int(0),
+                }
             }
             (0x80, 0x36) => {
-                let _enabled = self.pop_value()?;
+                // sub_4657A0 stores the raw value in dword_506BE0.
+                let enabled = self.pop_int()? != 0;
+                self.additional_resource_search_enabled = enabled;
+                api.set_loose_search_fallback(enabled);
                 Value::None
             }
             (0x80, 0x37) => {
-                let _path = self.pop_string_lossy()?;
+                // sub_4657F0 links the copy in front of dword_566648.
+                let path = self.pop_string_lossy()?;
+                self.additional_resource_paths.insert(0, path.clone());
+                api.prepend_loose_search_path(&path);
                 Value::None
             }
             (0x80, 0x38) => {
-                let _records = self.pop_value()?;
-                let _name = self.pop_value()?;
-                Value::Int(0)
+                // sub_489480 pops the NUL-terminated archive-name pointer list,
+                // then the composite name; sub_406BC0 refuses a name already
+                // in the archive chain, sub_445C50 an empty list and
+                // sub_445C00 a null name. Names compare after the DBCS-aware
+                // ASCII lowering of sub_42EE60; the chain's plain archives are
+                // keyed by full path, which a composite name never matches.
+                let list = self.pop_ptr()?;
+                let name = match self.pop_value()? {
+                    Value::Int(0) | Value::Ptr(0) | Value::None => None,
+                    value => Some(self.value_as_string_lossy(value)?),
+                };
+                let members = self.read_zero_terminated_string_pointer_list(list, 0x10000)?;
+                let registered = name.as_ref().is_some_and(|name| {
+                    !members.is_empty()
+                        && !self
+                            .composite_archives
+                            .keys()
+                            .any(|existing| existing.eq_ignore_ascii_case(name))
+                });
+                if let Some(name) = name.filter(|_| registered) {
+                    api.register_composite_archive(&name, &members);
+                    self.composite_archives.insert(name, members);
+                }
+                Value::Int(i32::from(registered))
             }
             (0x80, 0x39) => {
-                let _path = self.pop_string_lossy()?;
-                Value::None
+                // sub_46B8F0 keeps an existing directory with a trailing
+                // backslash in byte_518988.
+                let path = self.pop_string_lossy()?;
+                let valid = api.directory_exists(&path);
+                if valid {
+                    self.validated_file_root = Some(ensure_trailing_separator(&path));
+                }
+                Value::Int(i32::from(valid))
             }
             (0x80, 0x3a) => {
+                // sub_467AD0: 0 GetWindowsDirectoryA and 4 SHGetFolderPathA
+                // (CSIDL_PROGRAM_FILES) report 1 even when they fail and leave
+                // the buffer alone; 1..3 (CSIDL 16/2/5) and 5 (the registry's
+                // ProgramFilesDir) report whether a path was written; other
+                // modes report 0.
                 let mode = self.pop_int()?;
                 let destination = self.pop_ptr()?;
-                if let Some(path) = api.special_folder_path(mode) {
-                    self.write_c_string(destination, &path)?;
-                    Value::Int(1)
-                } else {
-                    Value::Int(0)
+                let path = api.special_folder_path(mode);
+                if let Some(path) = &path {
+                    self.write_c_string(destination, path)?;
                 }
+                Value::Int(i32::from(path.is_some() || matches!(mode, 0 | 4)))
             }
             (0x80, 0x3b) => {
+                // sub_489570 -> sub_467070 -> sub_466E80: one filter
+                // "description(*.ext)"; the 780-byte path buffer is cleared
+                // before the mode check (0 open, 1 save, otherwise 4); the
+                // result is GetOpen/SaveFileNameA - 1.
                 let mode = self.pop_int()?;
+                let initial_directory = self.pop_string_lossy()?;
                 let title = self.pop_string_lossy()?;
-                let destination = self.pop_ptr()?;
                 let extension = self.pop_string_lossy()?;
                 let description = self.pop_string_lossy()?;
-                let initial_directory = self.pop_string_lossy()?;
+                let destination = self.pop_ptr()?;
+                let range = self.resolve_write_range(destination, 0x30c)?;
+                self.memory[range].fill(0);
+                self.clear_shadow_values(destination, 0x30c);
                 match api.open_file_dialog(
                     &initial_directory,
                     &description,
@@ -10484,18 +10834,17 @@ impl Vm {
                 }
             }
             (0x80, 0x3d) => {
+                // sub_464F00: kind 0 copies ::Buffer, kind 1 the media root
+                // only when one was found; anything else returns 0.
                 let kind = self.pop_int()?;
                 let ptr = self.pop_ptr()?;
                 let root = match kind {
-                    0 => self
-                        .primary_resource_root
-                        .clone()
-                        .or_else(|| api.primary_resource_root()),
-                    1 => self.secondary_resource_root.clone(),
+                    0 => Some(self.resource_primary_root(api)),
+                    1 => Some(self.resource_media_root()).filter(|root| !root.is_empty()),
                     _ => None,
                 };
                 if let Some(root) = root {
-                    self.write_c_string(ptr, &ensure_trailing_separator(&root))?;
+                    self.write_c_string(ptr, &root)?;
                     Value::Int(1)
                 } else {
                     Value::Int(0)
@@ -10553,8 +10902,9 @@ impl Vm {
             (0x80, 0x96) => self.sys80_96_append_structured_history_record()?,
             (0x80, 0x97) => self.sys80_95_97_read_structured_history(true)?,
             (0x80, 0x98) => {
+                // sub_46C730: either value 0 -> 2; capacity is unsigned.
                 let record_size = self.pop_int()?.max(0) as u32;
-                let capacity = self.pop_int()?.max(0) as u32;
+                let capacity = self.pop_int()? as u32;
                 let slot = self.pop_ptr()?;
                 Value::Int(self.sys_indexed_record_open(slot, capacity, record_size)?)
             }
@@ -10564,14 +10914,14 @@ impl Vm {
                 Value::Int(self.sys_indexed_record_count(dst, handle)?)
             }
             (0x80, 0x9d) => {
-                let index = self.pop_int()?.max(0) as u32;
+                let index = self.pop_int()?;
                 let handle = self.pop_ptr()?;
                 let dst = self.pop_ptr()?;
                 Value::Int(self.sys_indexed_record_load(dst, handle, index)?)
             }
             (0x80, 0x9e) => {
-                let count = self.pop_int()?.max(0) as u32;
-                let start = self.pop_int()?.max(0) as u32;
+                let count = self.pop_int()? as u32;
+                let start = self.pop_int()?;
                 let handle = self.pop_ptr()?;
                 Value::Int(self.sys_indexed_record_remove(handle, start, count))
             }
@@ -10687,11 +11037,21 @@ impl Vm {
                 Value::None
             }
             (0x80, 0x70) => {
+                // sub_48A090 -> sub_46C0F0: an index above 12 is fatal; the
+                // handler only ever pushes 1.
                 let shift = self.pop_int()?;
-                Value::Int(i32::from(self.allocate_global_config(shift)))
+                if !self.allocate_global_config(shift) {
+                    return Err(VmError::Runtime(format!(
+                        "無効なサイズ番号 [ {shift} ] が指定されました"
+                    )));
+                }
+                Value::Int(1)
             }
             (0x80, 0x71) => {
-                self.global_config.fill(0);
+                // sub_48A100: memset(dword_56676C, 0, Size).
+                let size = self.global_size;
+                self.global_bytes_mut().fill(0);
+                self.clear_shadow_values(0, size);
                 Value::None
             }
             (0x80, 0x74) => {
@@ -10704,11 +11064,10 @@ impl Vm {
             }
             (0x80, 0x78) => {
                 // sub_489650 pops the label pointer first and the slot second.
+                // sub_48A140 ignores whether sub_4664F0 wrote the file.
                 let label = self.pop_string_lossy()?;
                 let slot = self.pop_int()?;
-                if !self.save_config_slot(api, slot, &label)? {
-                    return Err(VmError::Runtime("configuration save commit failed".into()));
-                }
+                self.save_config_slot(api, slot, &label)?;
                 Value::None
             }
             (0x80, 0x79) => {
@@ -10734,17 +11093,21 @@ impl Vm {
                 Value::Int(self.validate_config_slot(api, slot))
             }
             (0x80, 0xe0) => {
-                let restore_parent_window = self.pop_int()? != 0;
-                let error_message = self.pop_string_lossy()?;
+                // sub_48B470: pops hide-window flag, error message, command
+                // line, directory; retries through OK|CANCEL.
+                let hide_window = self.pop_int()? != 0;
+                let error_message = self.pop_nullable_string()?;
                 let command_line = self.pop_string_lossy()?;
-                let working_directory = self.pop_string_lossy()?;
-                Value::Int(i32::from(api.launch_process(
-                    &working_directory,
+                let working_directory = self.pop_nullable_string()?;
+                Value::Int(self.launch_native_process(
+                    api,
+                    working_directory,
                     &command_line,
-                    &error_message,
-                    restore_parent_window,
+                    error_message,
+                    hide_window,
+                    true,
                     false,
-                )))
+                ))
             }
             (0x80, 0xe1) => {
                 // The target distinguishes a null command-line pointer from a
@@ -10756,35 +11119,45 @@ impl Vm {
                 let working_directory_ptr = self.pop_ptr()?;
                 if command_line_ptr == 0 {
                     return Err(VmError::Runtime(
-                        "Sys80:E1 restart command-line pointer is null".into(),
+                        "外部プログラムのファイル名にNULLポインタが指定されました".into(),
                     ));
                 }
                 let error_message = if error_message_ptr == 0 {
-                    String::new()
+                    None
                 } else {
-                    self.read_c_string(error_message_ptr)?
+                    Some(self.read_c_string(error_message_ptr)?)
                 };
-                let command_line = self.read_c_string(command_line_ptr)?;
-                let working_directory = if working_directory_ptr == 0 {
-                    String::new()
+                let command = self.read_c_string(command_line_ptr)?;
+                // sub_48B4D0 keeps the strings; WinMain resolves them with
+                // sub_472A10 like Sys80:E0 (the roots do not change after
+                // status 6).
+                let (command_line, working_directory) = if working_directory_ptr == 0 {
+                    let root = self.resource_primary_root(api);
+                    (format!("{root}{command}"), root)
                 } else {
-                    self.read_c_string(working_directory_ptr)?
+                    let directory = self.read_c_string(working_directory_ptr)?;
+                    (format!("{directory}\\{command}"), directory)
                 };
-                api.schedule_restart(&working_directory, &command_line, &error_message);
+                api.schedule_restart(&working_directory, &command_line, error_message.as_deref());
                 self.scheduler_signal = Some(SchedulerSignal::TerminateInterpreter);
                 Value::None
             }
             (0x80, 0xe2) => {
-                let error_message = self.pop_string_lossy()?;
+                // sub_48B5D0: pops error message, command line, directory;
+                // hides the window, no retry, then waits for the
+                // uninstaller mutex.
+                let error_message = self.pop_nullable_string()?;
                 let command_line = self.pop_string_lossy()?;
-                let working_directory = self.pop_string_lossy()?;
-                Value::Int(i32::from(api.launch_process(
-                    &working_directory,
+                let working_directory = self.pop_nullable_string()?;
+                Value::Int(self.launch_native_process(
+                    api,
+                    working_directory,
                     &command_line,
-                    &error_message,
+                    error_message,
                     true,
+                    false,
                     true,
-                )))
+                ))
             }
             (0x80, 0xe3) => {
                 let target = self.pop_string_lossy()?;
@@ -10796,8 +11169,15 @@ impl Vm {
                 Value::None
             }
             (0x80, 0xe9) => {
-                let path = self.pop_string_lossy()?;
+                // sub_48B680: an absolute name as is, else primary root +
+                // name; the raw file (CFileDX) is hashed by sub_401900.
+                let file = self.pop_string_lossy()?;
                 let output = self.pop_ptr()?;
+                let path = if resource_io::is_absolute_resource_path(&file) {
+                    file
+                } else {
+                    format!("{}{file}", self.resource_primary_root(api))
+                };
                 let Some(bytes) = api.read_user_file_bytes(&path) else {
                     return Ok(Some(Value::Int(0)));
                 };
@@ -10823,19 +11203,23 @@ impl Vm {
                 Value::None
             }
             (0x80, 0xf0) => {
-                let caption = self.pop_string_lossy()?;
-                let mode = self.pop_int()?;
+                // sub_48B740 pops: description (nullable, control 1004),
+                // default subfolder, check box 1003 and 1002 states, the
+                // initial folder, the 1003 and 1002 outputs, and the output
+                // folder buffer; outputs are written only on OK.
+                let caption = self.pop_nullable_string()?.unwrap_or_default();
+                let default_subfolder = self.pop_string_lossy()?;
                 let option_value2 = self.pop_int()?;
                 let option_value1 = self.pop_int()?;
-                let output_text = self.pop_ptr()?;
+                let initial_text = self.pop_string_lossy()?;
                 let output_value2 = self.pop_ptr()?;
                 let output_value1 = self.pop_ptr()?;
-                let initial_text = self.pop_string_lossy()?;
+                let output_text = self.pop_ptr()?;
                 let request = SystemInputDialogRequest {
                     initial_text,
                     option_value1,
                     option_value2,
-                    mode,
+                    default_subfolder,
                     caption,
                 };
                 if let Some(response) = api.show_system_input_dialog(&request) {
@@ -10996,22 +11380,24 @@ impl Vm {
                 let Some(windows_directory) = api.special_folder_path(0) else {
                     return Ok(Some(Value::Int(0)));
                 };
-                let root = windows_directory.trim_end_matches(|ch| ch == '\\' || ch == '/');
-                let path = format!("{root}\\{file_name}");
+                // sub_472000: "%s\\%s" of the Windows directory and the name;
+                // the whole file is read into the output, and only a file
+                // ending in "\\" NUL has that backslash cleared and gives 1.
+                let path = format!("{windows_directory}\\{file_name}");
                 let Some(mut bytes) = api.read_user_file_bytes(&path) else {
                     return Ok(Some(Value::Int(0)));
                 };
-                if bytes.len() < 2 || bytes[bytes.len() - 2] != b'\\' || bytes[bytes.len() - 1] != 0
-                {
-                    Value::Int(0)
-                } else {
+                let terminated = bytes.len() >= 2
+                    && bytes[bytes.len() - 2] == b'\\'
+                    && bytes[bytes.len() - 1] == 0;
+                if terminated {
                     let trailing_slash = bytes.len() - 2;
                     bytes[trailing_slash] = 0;
-                    let range = self.resolve_write_range(output, bytes.len())?;
-                    self.memory[range].copy_from_slice(&bytes);
-                    self.clear_shadow_values(output, bytes.len());
-                    Value::Int(1)
                 }
+                let range = self.resolve_write_range(output, bytes.len())?;
+                self.memory[range].copy_from_slice(&bytes);
+                self.clear_shadow_values(output, bytes.len());
+                Value::Int(i32::from(terminated))
             }
             (0x80, 0xfb) => {
                 let output = self.pop_ptr()?;
@@ -11143,7 +11529,7 @@ impl Vm {
         let positions_from_top: &[usize] = match (group, id) {
             // Host continuations intercept before the VM-owned dialog paths
             // that would otherwise pop/decode these arguments themselves.
-            (0x80, 0x3b) => &[1, 3, 4, 5],
+            (0x80, 0x3b) => &[1, 2, 3, 4],
             (0x80, 0x3c) => &[0, 1, 2],
             (0x80, 0x3f) => &[1, 2, 3],
             (0x80, 0xf0) => &[0, 7],
@@ -11443,7 +11829,7 @@ impl Vm {
     }
 
     fn memory_preview(&self, ptr: u32, size: usize) -> String {
-        let addr = Self::memory_addr(ptr) as usize;
+        let addr = self.memory_addr(ptr) as usize;
         let Some(bytes) = self
             .memory
             .get(addr..addr.saturating_add(size).min(self.memory.len()))
@@ -11502,7 +11888,7 @@ impl Vm {
             Value::Int(value) => match self.read_c_string_with_encoding(value as u32, encoding) {
                 _ if self
                     .mem_values
-                    .get(&Self::value_key(value as u32))
+                    .get(&self.value_key(value as u32))
                     .and_then(|stored| match stored {
                         Value::Str(text) => Some(text),
                         _ => None,
@@ -11512,7 +11898,7 @@ impl Vm {
                     Ok(
                         match self
                             .mem_values
-                            .get(&Self::value_key(value as u32))
+                            .get(&self.value_key(value as u32))
                             .expect("checked above")
                         {
                             Value::Str(text) => text.clone(),
@@ -11541,11 +11927,11 @@ impl Vm {
             }
             Value::Int(ptr) => {
                 let range =
-                    self.resolve_range(Self::translate_system_descriptor(ptr as u32), size)?;
+                    self.resolve_range(ptr as u32, size)?;
                 Ok(self.memory[range].to_vec())
             }
             Value::Ptr(ptr) => {
-                let range = self.resolve_range(Self::translate_system_descriptor(ptr), size)?;
+                let range = self.resolve_range(ptr, size)?;
                 Ok(self.memory[range].to_vec())
             }
             Value::None => Ok(vec![0; size]),
@@ -11653,7 +12039,7 @@ impl Vm {
 
     fn shadow_string_at(&self, addr: u32) -> Option<String> {
         self.mem_values
-            .get(&Self::value_key(addr))
+            .get(&self.value_key(addr))
             .and_then(|value| match value {
                 Value::Str(text) if is_plausible_text_payload(text) => Some(text.clone()),
                 _ => None,
@@ -11692,7 +12078,7 @@ impl Vm {
         };
         for offset in [0x5c_u32, 0x60, 0x58] {
             let addr = ptr.saturating_add(offset);
-            if let Some(Value::Str(text)) = self.mem_values.get(&Self::value_key(addr)) {
+            if let Some(Value::Str(text)) = self.mem_values.get(&self.value_key(addr)) {
                 if !text.is_empty() {
                     tracing::debug!(
                         ptr = format_args!("0x{ptr:08X}"),
@@ -11734,7 +12120,7 @@ impl Vm {
     }
 
     fn read_shadowed_c_string(&self, ptr: u32) -> VmResult<String> {
-        if let Some(Value::Str(text)) = self.mem_values.get(&Self::value_key(ptr)) {
+        if let Some(Value::Str(text)) = self.mem_values.get(&self.value_key(ptr)) {
             Ok(text.clone())
         } else {
             self.read_c_string(ptr)
@@ -11744,6 +12130,35 @@ impl Vm {
     fn pop_string_lossy(&mut self) -> VmResult<String> {
         let value = self.pop_value()?;
         self.value_as_native_string_lossy(value)
+    }
+
+    /// Pop a string operand as the bytes the target would see in its buffer.
+    fn pop_native_string_bytes(&mut self) -> VmResult<Vec<u8>> {
+        match self.pop_value()? {
+            Value::Str(text) => Ok(self.encode_native_string(&text).into_owned()),
+            Value::Ptr(ptr) => self.read_shadowed_c_string_bytes(ptr),
+            Value::Int(value) => self.read_shadowed_c_string_bytes(value as u32),
+            Value::Func { offset, .. } => self.read_shadowed_c_string_bytes(offset),
+            Value::Program(_) | Value::None => Ok(Vec::new()),
+        }
+    }
+
+    /// Shadows of loaded scenario text are decoded as Shift-JIS, which is
+    /// lossy for other encodings. Memory stays authoritative whenever the
+    /// shadow is just that decoding of it.
+    fn read_shadowed_c_string_bytes(&self, ptr: u32) -> VmResult<Vec<u8>> {
+        let Some(Value::Str(text)) = self.mem_values.get(&self.value_key(ptr)) else {
+            return self.read_c_string_bytes(ptr);
+        };
+        if let Ok(raw) = self.read_c_string_bytes(ptr) {
+            if self
+                .read_c_string(ptr)
+                .is_ok_and(|decoded| decoded == *text)
+            {
+                return Ok(raw);
+            }
+        }
+        Ok(self.encode_native_string(text).into_owned())
     }
 
     fn render_sprintf(&mut self, fmt: &str) -> String {
@@ -11889,62 +12304,98 @@ impl Vm {
             .collect()
     }
 
-    pub(crate) fn memory_addr(ptr: u32) -> u32 {
-        let tag = ptr >> 24;
-        match tag {
-            0x12 | 0x13 => LOCAL_MEMORY_BASE.saturating_add(ptr & ADDRESS_MASK),
-            AUX_MEMORY_TAG_BASE..=u32::MAX => {
-                let segment = (tag >> 1).saturating_sub(AUX_MEMORY_TAG_BASE >> 1);
-                LOCAL_MEMORY_BASE
-                    .saturating_add(segment.saturating_mul(AUX_MEMORY_SEGMENT_SIZE))
-                    .saturating_add(ptr & ADDRESS_MASK)
-            }
-            _ => ptr & ADDRESS_MASK,
+    /// sub_48E8C0: a script address to its byte in the backing buffer.
+    /// Segment 0 is the global window, 2 the thread's frames, 0x10..0x3F
+    /// heap blocks; an unmapped address returns `u32::MAX` (out of range).
+    pub(crate) fn memory_addr(&self, ptr: u32) -> u32 {
+        if ptr >> 26 == 2 {
+            // The data region shares the local window with the code region.
+            let offset = ptr & 0x03FF_FFFF;
+            return if offset < CODE_WINDOW_OFFSET { LOCAL_MEMORY_BASE + offset } else { u32::MAX };
+        }
+        if ptr >> 26 == 1 {
+            let offset = ptr & 0x03FF_FFFF;
+            return if offset < CODE_WINDOW_SIZE {
+                LOCAL_MEMORY_BASE + CODE_WINDOW_OFFSET + offset
+            } else {
+                u32::MAX
+            };
+        }
+        if target_heap::TargetHeap::is_heap_address(ptr) {
+            return match self.target_heap.translate(ptr) {
+                Some((backing, inside)) => LOCAL_MEMORY_BASE.saturating_add(backing).saturating_add(inside),
+                None => u32::MAX,
+            };
+        }
+        // Segment 0: the globals, below the local window.
+        if ptr < LOCAL_MEMORY_BASE { ptr } else { u32::MAX }
+    }
+
+    /// `memory_addr` for addresses that need no heap lookup (debug watch
+    /// lists); heap addresses map to `u32::MAX`.
+    fn static_memory_addr(ptr: u32) -> u32 {
+        if ptr >> 26 == 2 && ptr & 0x03FF_FFFF < CODE_WINDOW_OFFSET {
+            LOCAL_MEMORY_BASE + (ptr & 0x03FF_FFFF)
+        } else if ptr >> 26 == 1 && ptr & 0x03FF_FFFF < CODE_WINDOW_SIZE {
+            LOCAL_MEMORY_BASE + CODE_WINDOW_OFFSET + (ptr & 0x03FF_FFFF)
+        } else if ptr < LOCAL_MEMORY_BASE {
+            ptr
+        } else {
+            u32::MAX
         }
     }
 
-    pub(crate) fn value_key(ptr: u32) -> u32 {
-        Self::memory_addr(ptr)
+    pub(crate) fn value_key(&self, ptr: u32) -> u32 {
+        self.memory_addr(ptr)
     }
 }
 
-fn strip_native_markup_tags(source: &str) -> String {
-    let mut output = String::with_capacity(source.len());
-    let mut rest = source;
-    while let Some(start) = rest.find('<') {
-        output.push_str(&rest[..start]);
-        let tag = &rest[start..];
-        let valid_tag = tag
-            .as_bytes()
-            .get(1)
-            .is_some_and(|byte| byte.is_ascii_alphabetic() || *byte == b'/');
-        if valid_tag {
-            if let Some(end) = tag.find('>') {
-                rest = &tag[end + 1..];
-                continue;
-            }
+/// sub_438430 on the native bytes: after a '<' followed by a letter or '/',
+/// the closing '>' is searched from two bytes past the current position
+/// (not past the '<'), and everything before the '<' is copied. Any other
+/// '<' moves the scan one byte. An unclosed tag ends the scan.
+fn strip_native_markup_tags(source: &[u8]) -> Vec<u8> {
+    let mut output = Vec::with_capacity(source.len());
+    let mut position = 0;
+    while let Some(relative) = scenario::find_bytes(&source[position..], b"<") {
+        let tag = position + relative;
+        let next = source.get(tag + 1).copied().unwrap_or(0);
+        if next.is_ascii_alphabetic() || next == b'/' {
+            let from = position + 2;
+            let Some(end) = scenario::find_bytes(&source[from..], b">") else {
+                break;
+            };
+            output.extend_from_slice(&source[position..tag]);
+            position = from + end + 1;
+        } else {
+            output.push(source[position]);
+            position += 1;
         }
-        output.push('<');
-        rest = &tag[1..];
     }
-    output.push_str(rest);
+    output.extend_from_slice(&source[position..]);
     output
 }
 
-fn extract_native_labels(source: &str) -> Vec<String> {
-    let lower = source.to_ascii_lowercase();
+/// sub_4382A0: "<l>" is searched before "<L>" and "</l>" before "</L>";
+/// the scan resumes three bytes past the closing tag. Empty labels are
+/// skipped; each payload keeps at most 95 bytes.
+fn extract_native_labels(source: &[u8]) -> Vec<Vec<u8>> {
+    let find = |from: usize, lower: &[u8], upper: &[u8]| {
+        scenario::find_bytes(&source[from..], lower)
+            .or_else(|| scenario::find_bytes(&source[from..], upper))
+            .map(|relative| from + relative)
+    };
     let mut labels = Vec::new();
-    let mut offset = 0;
-    while let Some(relative_start) = lower[offset..].find("<l>") {
-        let start = offset + relative_start + 3;
-        let Some(relative_end) = lower[start..].find("</l>") else {
+    let mut position = 0;
+    while let Some(open) = find(position, b"<l>", b"<L>") {
+        let start = open + 3;
+        let Some(end) = find(start, b"</l>", b"</L>") else {
             break;
         };
-        let end = start + relative_end;
         if end != start {
-            labels.push(source[start..end].to_string());
+            labels.push(source[start..end.min(start + 95)].to_vec());
         }
-        offset = end + 4;
+        position = end + 3;
     }
     labels
 }
@@ -12040,7 +12491,7 @@ fn trace_watch_addresses() -> &'static [u32] {
                             part.parse::<u32>().ok()
                         }
                     })
-                    .map(Vm::memory_addr)
+                    .map(Vm::static_memory_addr)
                     .collect::<Vec<_>>()
             })
             .collect()
@@ -12082,6 +12533,95 @@ fn is_plausible_text_payload(text: &str) -> bool {
 /// dropped: the decoder would turn them into replacement characters, which
 /// make the whole string implausible text (a message line was drawn as its
 /// address).
+/// Order and limit enumerated files like sub_467110: a directory's own files
+/// first, then each subdirectory in turn with its relative prefix. The limit
+/// is checked after each file; a subdirectory gets the remainder, and a
+/// remainder of zero means unlimited there, as in the target.
+/// MSVC _wsplitpath: drive ("X:"), directory up to the last '\\' or '/',
+/// file name, and extension from the last '.' of the remainder.
+fn msvc_wsplitpath(path: &str) -> [String; 4] {
+    let chars = path.chars().collect::<Vec<_>>();
+    let (drive, rest) = if chars.len() >= 2 && chars[1] == ':' {
+        (chars[..2].iter().collect::<String>(), &chars[2..])
+    } else {
+        (String::new(), &chars[..])
+    };
+    let split = rest.iter().rposition(|&c| c == '\\' || c == '/').map_or(0, |index| index + 1);
+    let directory = rest[..split].iter().collect::<String>();
+    let leaf = &rest[split..];
+    let dot = leaf.iter().rposition(|&c| c == '.').unwrap_or(leaf.len());
+    [
+        drive,
+        directory,
+        leaf[..dot].iter().collect(),
+        leaf[dot..].iter().collect(),
+    ]
+}
+
+/// NTFS directory order (what FindFirstFileA/FindNextFileA return): UTF-16
+/// code units compared after the volume's simple uppercase mapping.
+fn ntfs_order_key(name: &str) -> Vec<u16> {
+    name.encode_utf16()
+        .map(|unit| {
+            char::from_u32(u32::from(unit))
+                .and_then(|c| {
+                    let mut upper = c.to_uppercase();
+                    match (upper.next(), upper.next()) {
+                        (Some(u), None) if (u as u32) <= 0xFFFF => Some(u as u32 as u16),
+                        _ => None,
+                    }
+                })
+                .unwrap_or(unit)
+        })
+        .collect()
+}
+
+fn target_file_enumeration_order(found: &[String], recursive: bool, max_count: usize) -> Vec<String> {
+    fn walk(paths: &[Vec<String>], depth: usize, recursive: bool, max: usize, out: &mut Vec<String>) {
+        let mut files = paths
+            .iter()
+            .filter(|path| path.len() == depth + 1)
+            .collect::<Vec<_>>();
+        files.sort_by_key(|path| ntfs_order_key(&path[depth]));
+        let mut count = 0usize;
+        for path in files {
+            out.push(path.join("\\"));
+            count += 1;
+            if max != 0 && count >= max {
+                break;
+            }
+        }
+        if !recursive {
+            return;
+        }
+        let mut directories = paths
+            .iter()
+            .filter(|path| path.len() > depth + 1)
+            .map(|path| path[depth].clone())
+            .collect::<Vec<_>>();
+        directories.sort_by_key(|name| ntfs_order_key(name));
+        directories.dedup_by_key(|name| ntfs_order_key(name));
+        for directory in directories {
+            let nested = paths
+                .iter()
+                .filter(|path| path.len() > depth + 1 && path[depth].eq_ignore_ascii_case(&directory))
+                .cloned()
+                .collect::<Vec<_>>();
+            let before = out.len();
+            // a7 - v23 is unsigned: it wraps once the quirk has passed the limit.
+            walk(&nested, depth + 1, true, if max != 0 { max.wrapping_sub(count) } else { 0 }, out);
+            count += out.len() - before;
+        }
+    }
+    let paths = found
+        .iter()
+        .map(|path| path.split(['\\', '/']).map(str::to_owned).collect::<Vec<_>>())
+        .collect::<Vec<_>>();
+    let mut out = Vec::new();
+    walk(&paths, 0, recursive, max_count, &mut out);
+    out
+}
+
 fn engine_shift_jis_bytes(bytes: &[u8]) -> Cow<'_, [u8]> {
     let mut output: Option<Vec<u8>> = None;
     let mut index = 0;
@@ -12615,15 +13155,10 @@ impl GraphApi for TraceApi {
                 let _arg1 = stack.pop();
             }
             (0x91, 0x9b) => {
-                let _flags = stack.pop();
-                let _style = stack.pop();
-                let _scale = stack.pop();
-                let font_size = stack.pop().map(|value| value.as_i32()).unwrap_or(24);
-                let max_width = stack.pop().map(|value| value.as_i32()).unwrap_or(0);
-                let text = stack.pop().unwrap_or(Value::None);
-                let _dest = stack.pop();
-                let measured = measure_text_width_value(&text, font_size.max(1), max_width);
-                return Ok(Value::Int(measured));
+                for _ in 0..7 {
+                    stack.pop();
+                }
+                return Ok(Value::Int(0));
             }
             (0x90, 0x95) => {
                 let _b = stack.pop();
@@ -13164,7 +13699,7 @@ mod tests {
         window_messages: std::collections::VecDeque<(i32, i32, i32, i32)>,
         system92_text_output_pair: [i32; 2],
         system92_text_fragment_records: Vec<System92TextFragmentRecord>,
-        performance_profiling_enabled: Option<bool>,
+        performance_profiling_enabled: Option<i32>,
         performance_metric: i32,
         presentation_state: i32,
         graphics_capability_record: [u32; 16],
@@ -13174,6 +13709,7 @@ mod tests {
         fullscreen_hotkeys: Vec<i32>,
         special_folder: Option<String>,
         file_dialog_result: Option<Result<Option<String>, i32>>,
+        file_dialog_args: Option<String>,
         resource_dialog_result: Option<Result<Option<String>, i32>>,
         resource_dialog_filters: Vec<(String, String)>,
         browse_folder_result: Option<String>,
@@ -13194,7 +13730,7 @@ mod tests {
             Ok(Value::None)
         }
 
-        fn set_performance_profiling(&mut self, enabled: bool) {
+        fn set_performance_profiling(&mut self, enabled: i32) {
             self.performance_profiling_enabled = Some(enabled);
         }
 
@@ -13232,12 +13768,18 @@ mod tests {
 
         fn open_file_dialog(
             &mut self,
-            _initial_dir: &str,
-            _description: &str,
-            _extension: &str,
-            _title: &str,
-            _mode: i32,
+            initial_dir: &str,
+            description: &str,
+            extension: &str,
+            title: &str,
+            mode: i32,
         ) -> Result<Option<String>, i32> {
+            self.file_dialog_args = Some(
+                [initial_dir, description, extension, title]
+                    .map(str::to_string)
+                    .join("|")
+                    + &format!("|{mode}"),
+            );
             self.file_dialog_result.take().unwrap_or(Ok(None))
         }
 
@@ -13330,14 +13872,11 @@ mod tests {
             message_id: i32,
             registered_after_serial: i32,
         ) -> Option<(i32, i32)> {
-            let index = self
-                .window_messages
+            self.window_messages
                 .iter()
-                .position(|&(serial, id, _, _)| {
-                    serial > registered_after_serial && id == message_id
-                })?;
-            let (_, _, lparam, wparam) = self.window_messages.remove(index)?;
-            Some((lparam, wparam))
+                .rev()
+                .find(|&&(serial, id, _, _)| serial > registered_after_serial && id == message_id)
+                .map(|&(_, _, wparam, lparam)| (wparam, lparam))
         }
     }
 
@@ -13407,12 +13946,13 @@ mod tests {
         fn create_bitmap_from_rgb(
             &mut self,
             bitmap: i32,
-            _width: i32,
-            _height: i32,
+            width: i32,
+            height: i32,
             _format: i32,
             pixels: &[u8],
         ) -> bool {
             self.bitmap_pixels.insert(bitmap, pixels.to_vec());
+            self.bitmap_dimensions.insert(bitmap, (width as u32, height as u32));
             true
         }
 
@@ -13586,6 +14126,225 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct ResourceSearchApi {
+        deleted: Vec<(String, String)>,
+        fallback: Option<bool>,
+        loose: Vec<String>,
+        composites: Vec<(String, Vec<String>)>,
+    }
+
+    impl SysApi for ResourceSearchApi {
+        fn call_sys(&mut self, _call: &mut NativeCallFrame) -> super::VmResult<Value> {
+            Ok(Value::None)
+        }
+
+        fn delete_file(&mut self, root: &str, file: &str) -> bool {
+            self.deleted.push((root.into(), file.into()));
+            true
+        }
+
+        fn directory_exists(&mut self, path: &str) -> bool {
+            path == "C:\\save"
+        }
+
+        fn set_loose_search_fallback(&mut self, enabled: bool) {
+            self.fallback = Some(enabled);
+        }
+
+        fn prepend_loose_search_path(&mut self, directory: &str) {
+            self.loose.push(directory.into());
+        }
+
+        fn register_composite_archive(&mut self, name: &str, members: &[String]) {
+            self.composites.push((name.into(), members.to_vec()));
+        }
+
+        fn take_dropped_file(&mut self) -> Option<String> {
+            Some("C:\\drop\\a.png".into())
+        }
+    }
+
+    impl GraphApi for ResourceSearchApi {
+        fn call_graph(&mut self, _call: &mut NativeCallFrame) -> super::VmResult<Value> {
+            Ok(Value::None)
+        }
+    }
+
+    impl SoundApi for ResourceSearchApi {
+        fn call_sound(&mut self, _call: &mut NativeCallFrame) -> super::VmResult<Value> {
+            Ok(Value::None)
+        }
+    }
+
+    #[test]
+    fn file_enumeration_follows_the_find_first_file_walk() {
+        let found = ["b.txt", "Sub\\z.txt", "a.txt", "Sub\\Deep\\y.txt", "Sub\\c.txt"]
+            .map(String::from);
+        assert_eq!(
+            super::target_file_enumeration_order(&found, true, 0),
+            ["a.txt", "b.txt", "Sub\\c.txt", "Sub\\z.txt", "Sub\\Deep\\y.txt"]
+        );
+        assert_eq!(super::target_file_enumeration_order(&found, false, 1), ["a.txt"]);
+        // a7 - v23 reaches zero for the subdirectory, which then has no limit.
+        assert_eq!(
+            super::target_file_enumeration_order(&found, true, 2),
+            ["a.txt", "b.txt", "Sub\\c.txt", "Sub\\z.txt", "Sub\\Deep\\y.txt"]
+        );
+        // Inside Sub the limit is 1; Deep then gets 1 - 1 = 0, unlimited again.
+        assert_eq!(
+            super::target_file_enumeration_order(&found, true, 3),
+            ["a.txt", "b.txt", "Sub\\c.txt", "Sub\\Deep\\y.txt"]
+        );
+    }
+
+    #[test]
+    fn enumerated_names_measure_pack_and_fail_on_overflow() {
+        let names = ["ab".to_string(), "c".to_string()];
+        let mut vm = Vm::new();
+        assert_eq!(vm.write_enumerated_names(0, 0, &names).unwrap(), Value::Int(5));
+        assert_eq!(vm.write_enumerated_names(0x100, 5, &names).unwrap(), Value::Int(2));
+        assert_eq!(&vm.memory[0x100..0x105], b"ab\0c\0");
+        assert_eq!(vm.write_enumerated_names(0x200, 4, &names).unwrap(), Value::Int(-1));
+        assert_eq!(&vm.memory[0x200..0x203], b"ab\0");
+    }
+
+    #[derive(Default)]
+    struct ItemGridApi {
+        drawn: Vec<(i32, Vec<String>, i32, bool, i32)>,
+    }
+
+    impl SysApi for ItemGridApi {
+        fn call_sys(&mut self, _call: &mut NativeCallFrame) -> super::VmResult<Value> {
+            Ok(Value::None)
+        }
+    }
+
+    impl GraphApi for ItemGridApi {
+        fn call_graph(&mut self, _call: &mut NativeCallFrame) -> super::VmResult<Value> {
+            Ok(Value::None)
+        }
+
+        fn draw_item_selection_grid(
+            &mut self,
+            window: i32,
+            items: &[String],
+            columns: i32,
+            centered: bool,
+            color: i32,
+        ) -> bool {
+            self.drawn.push((window, items.to_vec(), columns, centered, color));
+            window == 0xB000_0001_u32 as i32
+        }
+    }
+
+    impl SoundApi for ItemGridApi {
+        fn call_sound(&mut self, _call: &mut NativeCallFrame) -> super::VmResult<Value> {
+            Ok(Value::None)
+        }
+    }
+
+    #[test]
+    fn item_grid_reads_the_string_table_and_checks_its_operands() {
+        let grid = test_instruction(0, 0x90, "grp1", vec![0x90, 0xa1], Vec::new());
+        let window = 0xB000_0001_u32 as i32;
+        let mut vm = Vm::new();
+        vm.write_c_string(0x200, "Yes").unwrap();
+        vm.write_c_string(0x210, "No").unwrap();
+        vm.write_int(0x100, 2, 0x200).unwrap();
+        vm.write_int(0x104, 2, 0x210).unwrap();
+        let operands = |window: i32, count: i32, columns: i32| {
+            [
+                Value::Int(window),
+                Value::Int(count),
+                Value::Ptr(0x100),
+                Value::Int(columns),
+                Value::Int(1),
+                Value::Int(0x00ff_00ff),
+            ]
+        };
+        let mut api = ItemGridApi::default();
+
+        vm.stack.extend(operands(window, 2, 2));
+        vm.dispatch(&grid, &mut api).unwrap();
+        assert!(vm.stack.is_empty());
+        assert_eq!(
+            api.drawn,
+            [(window, vec!["Yes".to_string(), "No".to_string()], 2, true, 0x00ff_00ff)]
+        );
+
+        for (window, count, columns) in [(window, 17, 2), (window, 2, 17), (window, 2, 0), (5, 2, 2)] {
+            vm.stack.clear();
+            vm.stack.extend(operands(window, count, columns));
+            assert!(vm.dispatch(&grid, &mut api).is_err(), "{window} {count} {columns}");
+        }
+    }
+
+    #[test]
+    fn sys80_resource_search_selectors_follow_the_target_contracts() {
+        let sys = |id: u8| test_instruction(0, 0x80, "sys1", vec![0x80, id], Vec::new());
+        let mut vm = Vm::new();
+        let mut api = ResourceSearchApi::default();
+
+        vm.stack.extend([Value::Int(0), Value::Str("a.sav".into())]);
+        vm.dispatch(&sys(0x33), &mut api).unwrap();
+        vm.stack
+            .extend([Value::Str("C:\\save".into()), Value::Str("b.sav".into())]);
+        vm.dispatch(&sys(0x33), &mut api).unwrap();
+        assert_eq!(vm.stack, [Value::Int(1), Value::Int(1)]);
+        assert_eq!(
+            api.deleted,
+            [
+                (String::new(), "a.sav".into()),
+                (String::new(), "C:\\save\\b.sav".into())
+            ]
+        );
+        vm.stack.clear();
+
+        vm.stack.push(Value::Str("Graphic\\CVTD".into()));
+        vm.dispatch(&sys(0x37), &mut api).unwrap();
+        vm.stack.push(Value::Str("Script\\CVTD".into()));
+        vm.dispatch(&sys(0x37), &mut api).unwrap();
+        vm.stack.push(Value::Int(1));
+        vm.dispatch(&sys(0x36), &mut api).unwrap();
+        assert!(vm.stack.is_empty());
+        assert!(vm.additional_resource_search_enabled);
+        assert_eq!(vm.additional_resource_paths, ["Script\\CVTD", "Graphic\\CVTD"]);
+        assert_eq!(api.fallback, Some(true));
+
+        let names = [0x200u32, 0x210];
+        vm.write_c_string(0x200, "data05001.arc").unwrap();
+        vm.write_c_string(0x210, "data03001.arc").unwrap();
+        for (index, name) in names.into_iter().enumerate() {
+            vm.write_int(0x100 + index as u32 * 4, 2, name).unwrap();
+        }
+        vm.write_int(0x108, 2, 0).unwrap();
+        for expected in [1, 0] {
+            vm.stack
+                .extend([Value::Str("data05xxx.arc".into()), Value::Ptr(0x100)]);
+            vm.dispatch(&sys(0x38), &mut api).unwrap();
+            assert_eq!(vm.stack.pop(), Some(Value::Int(expected)));
+        }
+        let members = vec!["data05001.arc".to_string(), "data03001.arc".to_string()];
+        assert_eq!(api.composites, [("data05xxx.arc".to_string(), members.clone())]);
+        assert_eq!(vm.composite_archives.get("data05xxx.arc"), Some(&members));
+
+        vm.stack.push(Value::Ptr(0x300));
+        vm.dispatch(&sys(0x6d), &mut api).unwrap();
+        assert_eq!(vm.stack.pop(), Some(Value::Int(1)));
+        assert_eq!(vm.read_c_string(0x300).unwrap(), "C:\\drop\\a.png");
+
+        vm.stack.push(Value::Str("C:\\missing".into()));
+        vm.dispatch(&sys(0x39), &mut api).unwrap();
+        vm.stack.push(Value::Str("C:\\save".into()));
+        vm.dispatch(&sys(0x39), &mut api).unwrap();
+        assert_eq!(vm.stack, [Value::Int(0), Value::Int(1)]);
+        assert_eq!(
+            vm.validated_file_root,
+            Some(super::ensure_trailing_separator("C:\\save"))
+        );
+    }
+
     struct RootFileBytesApi {
         expected_file: String,
         bytes: Vec<u8>,
@@ -13691,6 +14450,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            code: Vec::new(),
         };
         let mut api = SchedulingApi::default();
         let mut vm = Vm::new();
@@ -13794,7 +14554,7 @@ mod tests {
             super::native_thread::InstalledCProcedure::dsp_msg(
                 vm.thread.thread_id(),
                 opcode,
-                vm.timing.tick_count().max(0) as u32,
+                vm.timing.tick_count() as u32,
                 super::NativeMessageProcedureConfig {
                     class: super::NativeMessageProcedureClass::DspMsg,
                     initial_delay_enabled: false,
@@ -13837,6 +14597,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            code: Vec::new(),
         };
         let mut vm = Vm::new();
         let mut api = SchedulingApi::default();
@@ -13875,6 +14636,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            code: Vec::new(),
         };
         let options = VmRunOptions {
             max_steps: 100,
@@ -13913,6 +14675,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            code: Vec::new(),
         };
         let options = VmRunOptions {
             max_steps: 100,
@@ -13956,6 +14719,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            code: Vec::new(),
         };
         let options = VmRunOptions {
             max_steps: 100,
@@ -13989,19 +14753,23 @@ mod tests {
             script_name: Some("watchdog-boundary-test".into()),
             functions: Vec::new(),
             strings: Vec::new(),
+            // Jump targets are code-region offsets: the loop starts at code
+            // offset 2 (file offset 0x12).
             instructions: vec![
+                test_instruction(0x10, 0x00, "push_byte", vec![0x00, 0x00], vec![BpOperand::U8(0)]),
                 test_instruction(
-                    0x10,
+                    0x12,
                     0x02,
                     "push_dword",
-                    vec![0x02, 0x10, 0x00, 0x00, 0x00],
-                    vec![BpOperand::U32(0x10)],
+                    vec![0x02, 0x02, 0x00, 0x00, 0x00],
+                    vec![BpOperand::U32(2)],
                 ),
-                test_instruction(0x15, 0x14, "jmp", vec![0x14], Vec::new()),
+                test_instruction(0x17, 0x14, "jmp", vec![0x14], Vec::new()),
             ],
-            labels: [(0x10, 0)].into_iter().collect(),
+            labels: [(0x10, 0), (0x12, 1)].into_iter().collect(),
             warnings: Vec::new(),
             module_size: 0,
+            code: Vec::new(),
         };
         let mut vm = Vm::new();
         let mut api = SchedulingApi::default();
@@ -14017,7 +14785,7 @@ mod tests {
             "{report:#?}"
         );
         assert_eq!(report.steps, 4);
-        assert_eq!(report.pc, 0);
+        assert_eq!(report.pc, 2);
     }
 
     #[test]
@@ -14062,6 +14830,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            code: Vec::new(),
         };
         let mut api = SchedulingApi::default();
         let mut vm = Vm::new();
@@ -14260,11 +15029,11 @@ mod tests {
         assert_eq!(vm.read_c_string(folder_out).unwrap(), "/portable/Desktop");
 
         vm.stack.extend([
-            Value::Str("/portable".into()),
+            Value::Ptr(file_out),
             Value::Str("Save data".into()),
             Value::Str("dat".into()),
-            Value::Ptr(file_out),
             Value::Str("Choose file".into()),
+            Value::Str("/portable".into()),
             Value::Int(1),
         ]);
         vm.dispatch(
@@ -14274,6 +15043,10 @@ mod tests {
         .unwrap();
         assert_eq!(vm.stack.pop(), Some(Value::Int(0)));
         assert_eq!(vm.read_c_string(file_out).unwrap(), "/portable/save.dat");
+        assert_eq!(
+            api.file_dialog_args.as_deref(),
+            Some("/portable|Save data|dat|Choose file|1")
+        );
     }
 
     #[test]
@@ -14368,15 +15141,15 @@ mod tests {
             ..SchedulingApi::default()
         };
 
-        vm.stack.push(Value::Int(1));
+        vm.stack.push(Value::Int(7));
         vm.dispatch(
             &test_instruction(0x10, 0x80, "sys1", vec![0x80, 0x06], Vec::new()),
             &mut api,
         )
         .unwrap();
-        assert_eq!(api.performance_profiling_enabled, Some(true));
+        assert_eq!(api.performance_profiling_enabled, Some(7));
 
-        vm.write_value(destination, 2, &Value::Ptr(0x1200_4321))
+        vm.write_value(destination, 2, &Value::Ptr(0x0800_4321))
             .unwrap();
         vm.stack.extend([Value::Ptr(destination), Value::Int(2)]);
         vm.dispatch(
@@ -14573,11 +15346,12 @@ mod tests {
     fn raw_native_write_replaces_a_stale_pointer_shadow() {
         let mut vm = Vm::new();
         let destination = 0x2480;
-        vm.write_value(destination, 2, &Value::Ptr(0x1200_4321))
+        vm.write_value(destination, 2, &Value::Ptr(0x0800_4321))
             .unwrap();
+        // A stored pointer is the raw cell, as in the target.
         assert_eq!(
             vm.read_value(destination, 2).unwrap(),
-            Value::Ptr(0x1200_4321)
+            Value::Int(0x0800_4321)
         );
 
         vm.write_int(destination, 2, 10_466).unwrap();
@@ -14614,6 +15388,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            code: Vec::new(),
         };
         let mut api = SchedulingApi {
             window_valid_region: Some([11, 22, 333, 444]),
@@ -14653,6 +15428,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            code: Vec::new(),
         };
         let mut api = SchedulingApi::default();
         let mut vm = Vm::new();
@@ -14695,6 +15471,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            code: Vec::new(),
         };
         let mut api = SchedulingApi::default();
         let mut vm = Vm::new();
@@ -14762,6 +15539,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            code: Vec::new(),
         };
         let mut api = SchedulingApi::default();
         let mut vm = Vm::new();
@@ -14804,6 +15582,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            code: Vec::new(),
         };
         let mut api = SchedulingApi {
             bitmap_pixel: Some([0x11, 0x22, 0x33, 0x44]),
@@ -14965,6 +15744,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            code: Vec::new(),
         };
         let mut api = SchedulingApi {
             movie_position: Some(12_345),
@@ -15007,6 +15787,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            code: Vec::new(),
         };
         let mut api = SchedulingApi::default();
         let mut vm = Vm::new();
@@ -15053,6 +15834,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            code: Vec::new(),
         };
         let mut api = SchedulingApi {
             graph_input_object: Some(i32::from(object)),
@@ -15102,6 +15884,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            code: Vec::new(),
         };
         let mut api = SchedulingApi {
             graph_input_object: Some(i32::from(object)),
@@ -15161,6 +15944,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            code: Vec::new(),
         };
         let mut api = SchedulingApi::default();
         let mut vm = Vm::new();
@@ -15195,19 +15979,20 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            code: Vec::new(),
         };
         let mut api = SchedulingApi::default();
         let mut vm = Vm::new();
         vm.start(&program);
         vm.mem_ptr = 0x100;
-        vm.write_value(0x1200_0118, 2, &Value::Ptr(0x1000_1234))
+        vm.write_value(0x0800_0118, 2, &Value::Ptr(0x1000_1234))
             .unwrap();
 
         let report = vm.run_loaded(&mut api, &VmRunOptions::default());
 
         assert_eq!(report.stop_reason, VmStopReason::Completed);
-        assert_eq!(vm.read_int(0x1200_0118, 2).unwrap(), 0);
-        assert!(!vm.mem_values.contains_key(&Vm::value_key(0x1200_0118)));
+        assert_eq!(vm.read_int(0x0800_0118, 2).unwrap(), 0);
+        assert!(!vm.mem_values.contains_key(&vm.value_key(0x0800_0118)));
     }
 
     #[test]
@@ -15256,22 +16041,32 @@ mod tests {
 
         let ptr = vm.alloc_heap(2048);
 
-        assert_eq!(ptr >> 24, 0x22);
-        assert_eq!(ptr & ADDRESS_MASK, 0);
+        // The script sees sub_48E760's address (class 0, slot 0); the
+        // backing block still moves to the next auxiliary segment.
+        assert_eq!(ptr, 0x4000_0000);
         assert_eq!(
-            Vm::memory_addr(ptr),
+            vm.memory_addr(ptr),
             LOCAL_MEMORY_BASE + AUX_MEMORY_SEGMENT_SIZE
         );
         assert!(vm.free_heap(ptr));
     }
 
     #[test]
-    fn native_markup_strip_matches_sub_438070() {
+    fn native_markup_strip_matches_sub_438430() {
+        let strip = |text: &str| {
+            let bytes = encoding_rs::SHIFT_JIS.encode(text).0;
+            encoding_rs::SHIFT_JIS.decode(&strip_native_markup_tags(&bytes)).0.into_owned()
+        };
+        assert_eq!(strip("序章<Ruby>本文</Ruby><1>保持"), "序章本文<1>保持");
+        assert_eq!(strip("未閉合<Tag"), "未閉合<Tag");
+        // The '>' search starts two bytes past the scan position, so an
+        // earlier '>' closes the tag and the bytes after it repeat.
+        assert_eq!(strip("ab>c<d>"), "ab>cc");
+        // Lowercase "<l>" is found first even after an earlier "<L>".
         assert_eq!(
-            strip_native_markup_tags("序章<Ruby>本文</Ruby><1>保持"),
-            "序章本文<1>保持"
+            super::extract_native_labels(b"<L>a</l><l></l><l>b</L>"),
+            vec![b"b".to_vec()]
         );
-        assert_eq!(strip_native_markup_tags("未閉合<Tag"), "未閉合<Tag");
     }
 
     #[test]
@@ -15356,6 +16151,7 @@ mod tests {
             labels: std::iter::once((0x10, 0)).collect(),
             warnings: Vec::new(),
             module_size: 0,
+            code: Vec::new(),
         };
         let main = BpProgram {
             script_name: Some("mediation-main".into()),
@@ -15443,6 +16239,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            code: Vec::new(),
         };
         let mut api = MediationApi { program: mediation };
         let mut vm = Vm::new();
@@ -15469,7 +16266,7 @@ mod tests {
     fn graph_text_decodes_gbk_memory_before_validating_the_payload() {
         let mut vm = Vm::new();
         vm.set_graph_text_encoding(encoding_rs::GBK);
-        let pointer = 0x2021_8ac7;
+        let pointer = vm.alloc_heap(64) + 7;
         // GBK bytes can be invalid Shift-JIS or valid but unrelated halfwidth
         // characters. Both require the selected code page, not error fallback.
         for (group, id, count, from_top, bytes, expected) in [
@@ -15484,7 +16281,7 @@ mod tests {
             (0x92, 0x1c, 10, 6, &b"\xd3\xbd"[..], "咏"),
             (0x90, 0x90, 6, 4, &b"\xeb\xca\xb0\xd7"[..], "胧白"),
         ] {
-            let start = Vm::memory_addr(pointer) as usize;
+            let start = vm.memory_addr(pointer) as usize;
             vm.memory
                 .resize(vm.memory.len().max(start + bytes.len() + 1), 0);
             vm.memory[start..start + bytes.len()].copy_from_slice(bytes);
@@ -15539,7 +16336,7 @@ mod tests {
     #[test]
     fn graph_load_resolves_dynamic_strings_stored_in_frame_slots() {
         let mut vm = Vm::new();
-        let local_name = 0x1200_3000;
+        let local_name = 0x0800_3000;
         vm.write_value(local_name, 2, &Value::Str("bg50d_a".into()))
             .unwrap();
         vm.stack.extend([
@@ -15563,8 +16360,8 @@ mod tests {
     #[test]
     fn graph_load_skips_a_damaged_direct_string_for_nested_descriptor_text() {
         let mut vm = Vm::new();
-        let descriptor = 0x1200_3000;
-        let resource_name = 0x1200_3100;
+        let descriptor = 0x0800_3000;
+        let resource_name = 0x0800_3100;
         vm.write_c_string(descriptor, "&#65533;&#65533;").unwrap();
         vm.write_c_string(resource_name, "bg_WHITE").unwrap();
         vm.write_int(descriptor + 8, 2, resource_name).unwrap();
@@ -15582,8 +16379,8 @@ mod tests {
     #[test]
     fn graph_draw_text_ex_converts_both_native_text_arguments() {
         let mut vm = Vm::new();
-        let primary = 0x1200_3000;
-        let annotation = 0x1200_3100;
+        let primary = 0x0800_3000;
+        let annotation = 0x0800_3100;
         vm.write_c_string(primary, "history text").unwrap();
         vm.write_c_string(annotation, "ruby data").unwrap();
         vm.stack.extend([
@@ -15780,7 +16577,7 @@ mod tests {
     #[test]
     fn graph92_draw_formatted_text_normalizes_native_text_argument() {
         let mut vm = Vm::new();
-        let text_pointer = 0x1200_3000;
+        let text_pointer = 0x0800_3000;
         vm.write_c_string(text_pointer, "formatted text").unwrap();
         vm.stack.extend((0..11).map(Value::Int));
         let text_index = vm.stack.len() - 1 - 9;
@@ -15794,13 +16591,13 @@ mod tests {
     #[test]
     fn message_text_with_the_engine_glyph_codes_is_text() {
         let mut vm = Vm::new();
-        let text_pointer = 0x1200_3000;
+        let text_pointer = 0x0800_3000;
         // "A", the dash code 0xEF40 twice, "B", the codes 0xEF41 and 0xF040,
         // "!" and 0x7F.
         let bytes = [
             b'A', 0xEF, 0x40, 0xEF, 0x40, b'B', 0xEF, 0x41, 0xF0, 0x40, b'!', 0x7F, 0,
         ];
-        let at = Vm::memory_addr(text_pointer) as usize;
+        let at = vm.memory_addr(text_pointer) as usize;
         vm.memory[at..at + bytes.len()].copy_from_slice(&bytes);
         vm.stack.extend((0..11).map(Value::Int));
         let text_index = vm.stack.len() - 1 - 9;
@@ -15812,7 +16609,7 @@ mod tests {
         assert_eq!(vm.stack[text_index], Value::Str(expected.into()));
 
         // A line formatted with sprintf keeps them.
-        let formatted = 0x1200_3100;
+        let formatted = 0x0800_3100;
         vm.stack.clear();
         vm.stack.push(Value::Ptr(text_pointer));
         let rendered = vm.render_sprintf("%s");
@@ -15823,7 +16620,7 @@ mod tests {
     #[test]
     fn extended_icon_item_with_a_zero_first_word_is_never_hit() {
         let mut vm = Vm::new();
-        let (root, group, items) = (0x1200_4000_u32, 0x1200_4100_u32, 0x1200_4200_u32);
+        let (root, group, items) = (0x0800_4000_u32, 0x0800_4100_u32, 0x0800_4200_u32);
         vm.write_int(root, 2, 1).unwrap();
         vm.write_int(root + 4, 2, group).unwrap();
         vm.write_int(group, 2, 2).unwrap();
@@ -15850,8 +16647,8 @@ mod tests {
     #[test]
     fn graph92_render_text_normalizes_both_native_text_arguments() {
         let mut vm = Vm::new();
-        let primary = 0x1200_3000;
-        let auxiliary = 0x1200_3100;
+        let primary = 0x0800_3000;
+        let auxiliary = 0x0800_3100;
         vm.write_c_string(primary, "main text").unwrap();
         vm.write_c_string(auxiliary, "auxiliary text").unwrap();
         vm.stack.extend((0..21).map(Value::Int));
@@ -15872,8 +16669,8 @@ mod tests {
     #[test]
     fn native_text_arguments_across_an_operand_stack_wrap_are_converted() {
         let mut vm = Vm::new();
-        let primary = 0x1200_3000;
-        let auxiliary = 0x1200_3100;
+        let primary = 0x0800_3000;
+        let auxiliary = 0x0800_3100;
         vm.write_c_string(primary, "main text").unwrap();
         vm.write_c_string(auxiliary, "auxiliary text").unwrap();
         // Results nobody popped fill the ring up to ten slots before its end,
@@ -15927,7 +16724,7 @@ mod tests {
         // scrmsg passes a line's text as `pointer + 1`, an integer; some
         // lines have an empty text part. A sprite name 16 bytes on is in
         // reach of the descriptor search, which used to return it.
-        let text = 0x1200_3000_u32;
+        let text = 0x0800_3000_u32;
         let neighbour = text + 16;
         vm.write_c_string(text, "").unwrap();
         vm.write_c_string(neighbour, "ev0005a_l").unwrap();
@@ -15982,7 +16779,7 @@ mod tests {
         let destination = 0x3100;
         let mut vm = Vm::new();
         vm.mem_values
-            .insert(Vm::value_key(source), Value::Str("シナリオの台詞".into()));
+            .insert(vm.value_key(source), Value::Str("シナリオの台詞".into()));
         vm.stack
             .extend([Value::Ptr(destination), Value::Ptr(source)]);
 
@@ -16002,7 +16799,7 @@ mod tests {
         let mut vm = Vm::new();
         vm.set_native_abi_profile(super::NativeAbiProfile::Amachoco);
         vm.mem_values
-            .insert(Vm::value_key(source), Value::Str("シナリオの台詞".into()));
+            .insert(vm.value_key(source), Value::Str("シナリオの台詞".into()));
         vm.stack
             .extend([Value::Ptr(destination), Value::Ptr(source)]);
 
@@ -16014,7 +16811,7 @@ mod tests {
         assert!(vm.stack.is_empty());
         assert_eq!(vm.read_c_string_bytes(destination).unwrap(), "シナリオの台詞".as_bytes());
         assert_eq!(
-            vm.mem_values.get(&Vm::value_key(destination)),
+            vm.mem_values.get(&vm.value_key(destination)),
             Some(&Value::Str("シナリオの台詞".into()))
         );
     }
@@ -16055,6 +16852,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            code: Vec::new(),
         };
         let mut api = SchedulingApi::default();
         let mut vm = Vm::new();
@@ -16096,6 +16894,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            code: Vec::new(),
         };
         let mut api = SchedulingApi {
             bgm_state: Some((0, 9)),
@@ -16159,6 +16958,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            code: Vec::new(),
         };
         let mut api = SchedulingApi::default();
         let mut vm = Vm::new();
@@ -16203,6 +17003,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            code: Vec::new(),
         };
         let mut api = SchedulingApi::default();
         let mut vm = Vm::new();
@@ -16256,6 +17057,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            code: Vec::new(),
         };
         let mut api = SchedulingApi::default();
         let mut vm = Vm::new();
@@ -16323,6 +17125,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            code: Vec::new(),
         };
         let options = VmRunOptions {
             max_steps: 100,
@@ -16371,6 +17174,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            code: Vec::new(),
         };
         let mut api = SchedulingApi::default();
         let mut vm = Vm::new();
@@ -16902,9 +17706,13 @@ mod tests {
             Some(VmStopReason::WaitingForProcedure)
         );
 
+        // (serial, id, wParam, lParam): the newest one wins and stays for
+        // other waiters.
         api.window_messages.push_back((12, 0x0201, 0x1234, 1));
+        api.window_messages.push_back((13, 0x0201, 0x5678, 2));
         assert_eq!(vm.poll_current_procedure(&mut api, false), None);
-        assert_eq!(vm.stack, [Value::Int(0x1234), Value::Int(1)]);
+        assert_eq!(vm.stack, [Value::Int(0x5678), Value::Int(2)]);
+        assert_eq!(api.window_messages.len(), 4);
         assert!(vm.thread.current_procedure().is_none());
     }
 
@@ -16937,6 +17745,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            code: Vec::new(),
         };
         let mut vm = Vm::new();
         vm.start(&program);
@@ -17103,7 +17912,9 @@ mod tests {
     #[test]
     fn sys80_12_rejects_unterminated_descriptor_array() {
         let mut vm = Vm::new();
-        let descriptors = (MAX_MEMORY_SIZE - 8) as u32;
+        // The last two words of the global window: the terminator would lie
+        // past it.
+        let descriptors = LOCAL_MEMORY_BASE - 8;
         vm.write_int(descriptors, 2, 11).unwrap();
         vm.write_int(descriptors + 4, 2, 13).unwrap();
         vm.stack.push(Value::Ptr(descriptors));
@@ -17111,11 +17922,9 @@ mod tests {
         let error = vm
             .try_builtin_sys_with_api(&mut SchedulingApi::default(), 0x80, 0x12)
             .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("input descriptor array is not zero terminated")
-        );
+        // Reading past the window is an invalid pointer before the
+        // terminator check can run.
+        assert!(error.to_string().contains("無効なポインタ"), "{error}");
     }
 
     #[test]
@@ -17176,7 +17985,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("fullscreen hotkey descriptor list exceeds 15 entries")
+                .contains("キーの配列が長過ぎます")
         );
         assert!(!api.fullscreen_hotkeys_enabled);
         assert!(api.fullscreen_hotkeys.is_empty());
@@ -17527,6 +18336,78 @@ mod tests {
     }
 
     #[test]
+    fn script_errors_are_captured_with_the_target_header() {
+        let program = BpProgram {
+            script_name: Some("err-test".into()),
+            functions: Vec::new(),
+            strings: Vec::new(),
+            instructions: vec![
+                test_instruction(0x10, 0x00, "push_byte", vec![0x00, 0x00], vec![BpOperand::U8(0)]),
+                test_instruction(0x12, 0x14, "jmp", vec![0x14], Vec::new()),
+            ],
+            labels: [(0x10, 0), (0x12, 1)].into_iter().collect(),
+            warnings: Vec::new(),
+            module_size: 0,
+            code: Vec::new(),
+        };
+        let mut vm = Vm::new();
+        vm.system81_shared.lock().unwrap().error_capture_mode = 1;
+        let report = vm.run(&program, &mut SchedulingApi::default(), &VmRunOptions::default());
+        assert_eq!(report.stop_reason, VmStopReason::Error);
+        let captured = vm.system81_shared.lock().unwrap().captured_error.clone().unwrap();
+        assert!(captured.starts_with("Thread [ "), "{captured}");
+        assert!(captured.contains("Program [ err-test ] , IP [ $00000002 ] , Instruction [ $14 ]"), "{captured}");
+        assert!(captured.contains("jmp to null target"), "{captured}");
+    }
+
+    #[test]
+    fn captured_error_query_returns_zero_until_an_error_is_captured() {
+        let query = test_instruction(0x10, 0x81, "sys2", vec![0x81, 0x6b], Vec::new());
+        let mut vm = Vm::new();
+        vm.memory[0x100] = b'x';
+        vm.stack.push(Value::Ptr(0x100));
+        vm.dispatch(&query, &mut TraceApi).unwrap();
+        assert_eq!(vm.stack, [Value::Int(0)]);
+        assert_eq!(vm.memory[0x100], b'x');
+        vm.stack.clear();
+
+        vm.system81_shared.lock().unwrap().captured_error = Some("err".into());
+        vm.stack.push(Value::Ptr(0x100));
+        vm.dispatch(&query, &mut TraceApi).unwrap();
+        assert_eq!(vm.stack, [Value::Int(4)]);
+        assert_eq!(vm.read_c_string(0x100).unwrap(), "err");
+    }
+
+    #[test]
+    fn string_opcodes_measure_raw_bytes_behind_lossy_shadows() {
+        // GBK "恭介" is not valid Shift-JIS; scenario preprocessing shadows it
+        // with a lossy decoding while memory keeps the stored bytes.
+        let gbk = [0xb9, 0xa7, 0xbd, 0xe9];
+        let mut vm = Vm::new();
+        vm.memory[0x100..0x104].copy_from_slice(&gbk);
+        vm.memory[0x104] = 0;
+        let lossy = encoding_rs::SHIFT_JIS.decode(&gbk).0.into_owned();
+        vm.mem_values.insert(vm.value_key(0x100), Value::Str(lossy));
+
+        let strlen = test_instruction(0x10, 0x68, "strlen", vec![0x68], Vec::new());
+        vm.stack.push(Value::Ptr(0x100));
+        vm.dispatch(&strlen, &mut TraceApi).unwrap();
+        assert_eq!(vm.stack, [Value::Int(4)]);
+        vm.stack.clear();
+
+        let strconcat = test_instruction(0x10, 0x6b, "strconcat", vec![0x6b], Vec::new());
+        vm.stack
+            .extend([Value::Ptr(0x200), Value::Ptr(0x100), Value::Str("!".into())]);
+        vm.dispatch(&strconcat, &mut TraceApi).unwrap();
+        assert_eq!(&vm.memory[0x200..0x206], &[0xb9, 0xa7, 0xbd, 0xe9, b'!', 0]);
+
+        let streq = test_instruction(0x10, 0x69, "streq", vec![0x69], Vec::new());
+        vm.stack.extend([Value::Ptr(0x100), Value::Ptr(0x200)]);
+        vm.dispatch(&streq, &mut TraceApi).unwrap();
+        assert_eq!(vm.stack, [Value::Int(0)]);
+    }
+
+    #[test]
     fn native_fixed_block_find_returns_block_index() {
         let instruction = test_instruction(0x10, 0x65, "memfind", vec![0x65], Vec::new());
         let mut vm = Vm::new();
@@ -17597,6 +18478,26 @@ mod tests {
     }
 
     #[test]
+    fn freed_module_code_stays_callable_until_a_later_module_reuses_it() {
+        let mut vm = Vm::new();
+        vm.start(&empty_loaded_program("root._bp".into()));
+        let environ = vm.append_target_loaded_program(empty_loaded_program("environ._bp".into()));
+        let entry = (1, Vm::program_parser_code_start(&vm.programs[1]));
+        vm.free_last_target_program(false);
+
+        assert_eq!(vm.resolve_indirect_call_target(0, environ), entry);
+
+        assert_eq!(
+            vm.append_target_loaded_program(empty_loaded_program("bitmap._bp".into())),
+            environ
+        );
+        assert_eq!(
+            vm.resolve_indirect_call_target(0, environ),
+            (2, Vm::program_parser_code_start(&vm.programs[2]))
+        );
+    }
+
+    #[test]
     fn load_program_ex_creates_an_immediately_scheduled_native_thread() {
         let mut vm = Vm::new();
         let root = empty_loaded_program("root._bp".into());
@@ -17626,6 +18527,81 @@ mod tests {
         assert!(vm.async_tasks[0].runnable);
         assert!(vm.switch_to_async_program(handle, false).0);
         assert!(vm.async_tasks[0].runnable);
+    }
+
+    #[test]
+    fn terminate_interpreter_in_a_child_thread_ends_the_root() {
+        // endsys._bp quits with Sys80:6A from a child thread; status 6 ends
+        // the whole interpreter, not only that thread.
+        #[rustfmt::skip]
+        let code = vec![
+            0x02, 4, 0, 0, 0,          // operand slots
+            0x02, 0, 1, 0, 0,          // code bytes 0x100
+            0x02, 0, 1, 0, 0,          // data bytes 0x100
+            0x06, 0x0B, 0x00,          // 0x0F push_offset 0x1A (child entry)
+            0x81, 0x44,                // 0x12 Sys81:44
+            0x80, 0x5F,                // 0x14 Sys80:5F yield
+            0x06, 0xFE, 0xFF,          // 0x16 push_offset 0x14
+            0x14,                      // 0x19 jmp
+            0x80, 0x6A,                // 0x1A child: Sys80:6A
+            0x17,                      // ret
+        ];
+        let program = ethornell_script::parse_bp_program(Some("quit-root._bp".into()), &code);
+        let mut vm = Vm::new();
+        vm.start(&program);
+        let mut report = vm.run_loaded(&mut TraceApi, &VmRunOptions::default());
+        for _ in 0..4 {
+            if vm.halted {
+                break;
+            }
+            report = vm.run_loaded(&mut TraceApi, &VmRunOptions::default());
+        }
+        assert!(vm.halted, "{report:?}");
+        assert_eq!(report.stop_reason, VmStopReason::InterpreterTerminated, "{report:?}");
+    }
+
+    #[test]
+    fn child_thread_runs_parent_code_in_a_block_of_the_parent_regions() {
+        #[rustfmt::skip]
+        let code = vec![
+            0x02, 4, 0, 0, 0,          // operand slots
+            0x02, 0, 1, 0, 0,          // code bytes 0x100
+            0x02, 0, 1, 0, 0,          // data bytes 0x100
+            0x06, 0x06, 0x00,          // push_offset 0x15 (child entry)
+            0x81, 0x44,                // Sys81:44
+            0x17,                      // ret
+            // child entry 0x15
+            0x02, 0x10, 0, 0, 0, 0x00, 42, 0x09, 2,   // [0x10] = 42
+            0x04, 0, 0, 0x00, 7, 0x09, 2,             // [frame + 0] = 7
+            0x17,                                     // ret at the block base ends it
+        ];
+        let program = ethornell_script::parse_bp_program(Some("child-root._bp".into()), &code);
+        let mut vm = Vm::new();
+        vm.start(&program);
+        let report = vm.run_loaded(&mut TraceApi, &VmRunOptions::default());
+        assert_eq!(report.stop_reason, VmStopReason::Completed, "{report:?}");
+        assert_eq!(vm.async_tasks.len(), 1);
+        let child = &vm.async_tasks[0].vm;
+        // The blocks sit at the top of the 0x80000 / 0x40000 regions.
+        assert_eq!(child.mem_ptr, 0x3FF00);
+        assert_eq!(child.thread.frame_region_base(), 0x3FF00);
+        assert_eq!(vm.data_region_limit(), 0x3FF00);
+        vm.pump_async_programs(&mut TraceApi, false, &VmRunOptions::default());
+        assert!(vm.async_tasks.is_empty());
+        assert_eq!(vm.read_int(0x10, 2).unwrap(), 42);
+        assert_eq!(vm.read_int(crate::FRAME_SEGMENT | 0x3FF00, 2).unwrap(), 7);
+        // sub_445850 drops the blocks but not the lowered limit.
+        let regions = vm.region_reservations.lock().unwrap();
+        assert_eq!(regions.data_free_limit(), 0x3FF00);
+        drop(regions);
+        // A block that does not fit, and an IP past the child's code block.
+        let instruction = test_instruction(0, 0x81, "sys2", vec![0x81, 0x44], Vec::new());
+        vm.stack.extend([Value::Int(4), Value::Int(0x100), Value::Int(0x40001), Value::Int(0x15)]);
+        let error = vm.dispatch(&instruction, &mut TraceApi).unwrap_err();
+        assert!(error.to_string().contains("[ 262145 ] のスタック領域"), "{error}");
+        vm.stack.extend([Value::Int(4), Value::Int(0x100), Value::Int(0x10), Value::Int(0x80000)]);
+        let error = vm.dispatch(&instruction, &mut TraceApi).unwrap_err();
+        assert!(error.to_string().contains("$80000"), "{error}");
     }
 
     #[test]
@@ -17803,21 +18779,18 @@ mod tests {
         vm.dispatch(&size_instruction, &mut missing_api).unwrap();
         assert_eq!(vm.stack.pop(), Some(Value::Int(0)));
 
-        let mut null_archive_api = ArchiveBytesApi {
-            expected_archive: String::new(),
-            expected_file: "marker.dat".into(),
+        // A null archive looks for the loose file below the primary root.
+        let root = ensure_trailing_separator("/game");
+        let mut null_archive_api = RootFileBytesApi {
+            expected_file: format!("{root}marker.dat"),
             bytes: b"marker".to_vec(),
-            calls: Vec::new(),
+            primary_root: Some("/game".into()),
         };
         vm.stack
             .extend([Value::Int(0), Value::Str("marker.dat".into())]);
         vm.dispatch(&exists_instruction, &mut null_archive_api)
             .unwrap();
         assert_eq!(vm.stack.pop(), Some(Value::Int(1)));
-        assert_eq!(
-            null_archive_api.calls.first(),
-            Some(&(String::new(), "marker.dat".to_string()))
-        );
     }
 
     #[test]
@@ -17857,7 +18830,7 @@ mod tests {
     }
 
     #[test]
-    fn sys80_30_clears_target_header_when_resource_is_missing() {
+    fn sys80_30_clears_target_header_then_fails_when_resource_is_missing() {
         let instruction =
             test_instruction(0, 0x80, "sys1", vec![0x80, 0x30], vec![BpOperand::U8(0x30)]);
         let destination = 0x1900;
@@ -17875,13 +18848,42 @@ mod tests {
             calls: Vec::new(),
         };
 
-        vm.dispatch(&instruction, &mut api).unwrap();
-
-        assert_eq!(vm.stack, [Value::Int(0)]);
+        // sub_466010 -> sub_465F80: without a media root a missing file is
+        // a script error.
+        let error = vm.dispatch(&instruction, &mut api).unwrap_err();
+        assert!(error.to_string().contains("[ missing.arc : missing.bin ]"));
         assert_eq!(
             &vm.memory[destination as usize..destination as usize + 16],
             &[0; 16]
         );
+    }
+
+    #[test]
+    fn exclusive_child_owner_suspends_the_root_interpreter() {
+        let mut vm=Vm::new();
+        vm.start(&empty_loaded_program("exclusive-root._bp".into()));
+        vm.exclusive_thread_id=Some(vm.thread.thread_id()+1);
+        let report=vm.run_loaded(&mut TraceApi,&VmRunOptions::default());
+        assert_eq!(report.stop_reason,VmStopReason::WaitingForProcedure);
+        assert!(!vm.halted);
+        vm.exclusive_thread_id=None;
+        let report=vm.run_loaded(&mut TraceApi,&VmRunOptions::default());
+        assert_eq!(report.stop_reason,VmStopReason::Completed);
+    }
+
+    #[test]
+    fn sys80_cf_resolves_tagged_raw_input_and_returns_decoded_length() {
+        let mut vm=Vm::new();
+        let source=crate::CODE_SEGMENT|0x1000;
+        let destination=0x2000u32;
+        let at = vm.memory_addr(source) as usize; vm.memory[at..at + 4].copy_from_slice(b"data");
+        vm.stack.extend([Value::Ptr(destination),Value::Ptr(source),Value::Int(4)]);
+        let instruction=test_instruction(0,0x80,"sys1",vec![0x80,0xcf],Vec::new());
+        vm.dispatch(&instruction,&mut TraceApi).unwrap();
+        assert!(vm.stack.is_empty());
+        assert_eq!(&vm.memory[destination as usize..destination as usize+4],b"data");
+        assert_eq!(vm.poll_current_procedure(&mut TraceApi,false),None);
+        assert_eq!(vm.stack,[Value::Int(4)]);
     }
 
     #[test]
@@ -17922,8 +18924,10 @@ mod tests {
             Value::Int(2),
             Value::Int(3),
         ]);
-        let mut api = FileBytesApi {
+        let mut api = RootFileBytesApi {
+            expected_file: format!("{}sample.bin", ensure_trailing_separator("/game")),
             bytes: b"abcdefgh".to_vec(),
+            primary_root: Some("/game".into()),
         };
 
         assert_eq!(
@@ -17975,7 +18979,7 @@ mod tests {
             test_instruction(0, 0x80, "sys1", vec![0x80, 0x32], vec![BpOperand::U8(0x32)]);
         let mut vm = Vm::new();
         let mut api = WriteFileApi::default();
-        let path = 0x1200_1200;
+        let path = 0x0800_1200;
         vm.write_c_string(path, "UserData/slot.sud").unwrap();
         let source = vm.alloc_heap(8);
         let range = vm.resolve_write_range(source, 8).unwrap();
@@ -18011,9 +19015,10 @@ mod tests {
                 Value::Ptr(source),
                 Value::Int(length),
             ]);
+            // Past the global window (invalid pointer) or a huge length.
             assert!(matches!(
                 vm.dispatch(&instruction, &mut api),
-                Err(super::VmError::MemoryOutOfBounds { .. })
+                Err(super::VmError::MemoryOutOfBounds { .. } | super::VmError::Runtime(_))
             ));
             assert!(vm.stack.is_empty());
         }
@@ -18142,9 +19147,9 @@ mod tests {
 
     #[test]
     fn sys81_30_uses_target_pointer_and_string_pop_order_for_default_archive_entry() {
-        let destination = 0x2020_0000u32;
         let payload = b"SDC FORMAT 1.00\0payload".to_vec();
         let mut vm = Vm::new();
+        let destination = vm.alloc_heap(256);
         let mut api = ArchiveBytesApi {
             expected_archive: "data10000.arc".into(),
             expected_file: String::new(),
@@ -18174,9 +19179,9 @@ mod tests {
 
     #[test]
     fn sys81_30_named_archive_entry_treats_requested_length_as_capacity() {
-        let destination = 0x2020_0058u32;
         let payload = b"SDC FORMAT 1.00\0named-entry-payload".to_vec();
         let mut vm = Vm::new();
+        let destination = vm.alloc_heap(256) + 0x58;
         let mut api = ArchiveBytesApi {
             expected_archive: "data10000.arc".into(),
             expected_file: "evdb".into(),
@@ -18261,8 +19266,8 @@ mod tests {
         assert_eq!(vm.try_builtin_sys(0x80, 0x8a).unwrap(), Some(Value::Int(0)));
 
         vm.stack.extend([
-            Value::Str("main".into()),
             Value::Ptr(0x1000),
+            Value::Str("main".into()),
             Value::Int(11),
         ]);
         assert_eq!(vm.try_builtin_sys(0x80, 0x8b).unwrap(), Some(Value::Int(0)));
@@ -18276,8 +19281,8 @@ mod tests {
         ]);
         assert_eq!(vm.try_builtin_sys(0x80, 0x8a).unwrap(), Some(Value::Int(0)));
         vm.stack.extend([
-            Value::Str("main".into()),
             Value::Ptr(0x1000),
+            Value::Str("main".into()),
             Value::Int(11),
         ]);
         assert_eq!(vm.try_builtin_sys(0x80, 0x8b).unwrap(), Some(Value::Int(0)));
@@ -18287,8 +19292,8 @@ mod tests {
             .extend([Value::Str("main".into()), Value::Int(15), Value::Int(1)]);
         assert_eq!(vm.try_builtin_sys(0x80, 0x89).unwrap(), Some(Value::Int(0)));
         vm.stack.extend([
-            Value::Str("main".into()),
             Value::Ptr(0x1000),
+            Value::Str("main".into()),
             Value::Int(15),
         ]);
         assert_eq!(vm.try_builtin_sys(0x80, 0x8b).unwrap(), Some(Value::Int(0)));
@@ -18315,8 +19320,8 @@ mod tests {
         vm.stack.extend([Value::Str("main".into()), Value::Int(24)]);
         assert_eq!(vm.try_builtin_sys(0x80, 0x88).unwrap(), Some(Value::Int(1)));
         vm.stack.extend([
-            Value::Str("main".into()),
             Value::Ptr(0x1000),
+            Value::Str("main".into()),
             Value::Int(15),
         ]);
         assert_eq!(vm.try_builtin_sys(0x80, 0x8b).unwrap(), Some(Value::Int(0)));
@@ -18325,8 +19330,8 @@ mod tests {
         vm.stack.extend([Value::Str("main".into()), Value::Int(12)]);
         assert_eq!(vm.try_builtin_sys(0x80, 0x88).unwrap(), Some(Value::Int(1)));
         vm.stack.extend([
-            Value::Str("main".into()),
             Value::Ptr(0x1000),
+            Value::Str("main".into()),
             Value::Int(15),
         ]);
         assert_eq!(vm.try_builtin_sys(0x80, 0x8b).unwrap(), Some(Value::Int(2)));
@@ -18364,45 +19369,51 @@ mod tests {
         let mut vm = Vm::new();
         vm.write_int(0x1000, 2, 7).unwrap();
         vm.stack.extend([
-            Value::Str("missing".into()),
             Value::Ptr(0x1000),
+            Value::Str("missing".into()),
             Value::Int(3),
         ]);
         assert_eq!(vm.try_builtin_sys(0x80, 0x8b).unwrap(), Some(Value::Int(1)));
-        assert_eq!(vm.read_int(0x1000, 2).unwrap(), 0);
+        // sub_447230 leaves the output untouched on failure.
+        assert_eq!(vm.read_int(0x1000, 2).unwrap(), 7);
     }
 
     #[test]
     fn system_ext_display_calls_preserve_native_outputs_and_status_codes() {
         let mut vm = Vm::new();
+        // No host desktop mode: sub_45EAE0 reports it unchanged.
         vm.stack.push(Value::Ptr(0x1000));
         assert_eq!(vm.try_builtin_sys(0x81, 0x0e).unwrap(), Some(Value::None));
-        assert_eq!(vm.read_int(0x1000, 2).unwrap(), 1280);
-        assert_eq!(vm.read_int(0x1004, 2).unwrap(), 720);
+        assert_eq!(vm.read_int(0x1000, 2).unwrap(), 0);
 
-        vm.stack
-            .extend([Value::Int(3), Value::Int(1280), Value::Int(720)]);
+        vm.stack.extend([Value::Int(8), Value::Int(1280), Value::Int(720)]);
+        assert_eq!(vm.try_builtin_sys(0x81, 0x60).unwrap(), Some(Value::Int(1)));
+        vm.stack.extend([Value::Int(3), Value::Int(0), Value::Int(720)]);
+        assert_eq!(vm.try_builtin_sys(0x81, 0x60).unwrap(), Some(Value::Int(2)));
+        vm.stack.extend([Value::Int(3), Value::Int(1280), Value::Int(720)]);
         assert_eq!(vm.try_builtin_sys(0x81, 0x60).unwrap(), Some(Value::Int(0)));
-        assert_eq!(vm.display_mode_slots[3], Some((1280, 720)));
 
         vm.stack.push(Value::Int(2));
         assert_eq!(vm.try_builtin_sys(0x81, 0x62).unwrap(), Some(Value::Int(0)));
         vm.stack.push(Value::Int(1));
         assert_eq!(vm.try_builtin_sys(0x81, 0x62).unwrap(), Some(Value::Int(1)));
-
+        vm.stack.push(Value::Int(3));
+        assert_eq!(vm.try_builtin_sys(0x81, 0x63).unwrap(), Some(Value::Int(0)));
         vm.stack.push(Value::Int(2));
         assert_eq!(vm.try_builtin_sys(0x81, 0x63).unwrap(), Some(Value::Int(1)));
-        assert_eq!(vm.config_input_mode, 2);
 
+        // No D3DX effect framework on the host: the bicubic effect fails.
         vm.stack.push(Value::Int(1));
+        assert_eq!(vm.try_builtin_sys(0x81, 0x6f).unwrap(), Some(Value::Int(0)));
+        vm.stack.push(Value::Int(0));
         assert_eq!(vm.try_builtin_sys(0x81, 0x6f).unwrap(), Some(Value::Int(1)));
-        assert!(vm.shader_effect_enabled);
     }
     #[test]
     fn system81_wide_distance_preserves_target_empty_operand_behavior() {
         assert_eq!(super::wide_string_similarity(&[1, 2], &[]), 0);
-        assert_eq!(super::wide_string_similarity(&[], &[1, 2]), 2);
-        assert_eq!(super::wide_string_similarity(&[1, 2], &[1, 3]), 3);
+        assert_eq!(super::wide_string_similarity(&[], &[1, 2]), 0);
+        assert_eq!(super::wide_string_similarity(&[1, 2], &[1, 3]), 1);
+        assert_eq!(super::wide_string_similarity(&[1, 2, 3, 4], &[2, 4, 3]), 2);
     }
 
     #[test]
@@ -18419,3 +19430,6 @@ mod tests {
         );
     }
 }
+
+/// The protected string namespace (Sys80:D8 keeps it).
+pub(crate) const RESOURCE_NAMESPACE: i32 = i32::MIN;

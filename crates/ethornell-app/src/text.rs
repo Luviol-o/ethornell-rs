@@ -412,9 +412,32 @@ impl RuntimeTraceApi {
     /// `[0]` colour, `[1]` line-spacing percent, `[2]` kinsoku, `[3]` vertical,
     /// `[5]` horizontal percent, `[6]` font height, `[8]` ruby-record text,
     /// `[10]` text, `[11]` y, `[12]` x, `[13]` target bitmap.
-    pub(crate) fn graph91_draw_text(&mut self, args: &[ethornell_vm::Value], shift: usize) -> i32 {
+    /// 91:9C/9D (sub_485530 / sub_485740): sub_4986D0 on the bitmap,
+    /// sub_498660 on the font number (p6), then sub_403B10: a missing
+    /// bitmap, size outside 4..=200 (p7) or width outside 25..=200 (p8) are
+    /// script errors.
+    pub(crate) fn graph91_draw_text(
+        &mut self,
+        args: &[ethornell_vm::Value],
+        shift: usize,
+    ) -> ethornell_vm::VmResult<i32> {
         let at = |index: usize| args.get(index + shift).map(value_to_i32).unwrap_or_default();
         let target = at(13);
+        let fail = |text: String| Err(ethornell_vm::VmError::Runtime(text));
+        crate::target_checks::bitmap(target)?;
+        let font = at(7);
+        if self.native_user.font_face(font).is_none() {
+            return fail(format!("無効なフォント番号 [ {font} ] が指定されました"));
+        }
+        if ethornell_vm::GraphApi::query_bitmap_info(self, target).is_none() {
+            return fail(format!("指定されたビットマップ [ {target} ] は存在しません"));
+        }
+        if !(4..=200).contains(&at(6)) {
+            return fail(format!("指定されたフォントサイズ [ {} ] は無効です", at(6)));
+        }
+        if !(25..=200).contains(&at(5)) {
+            return fail(format!("指定されたフォント幅 [ {} ] は無効です", at(5)));
+        }
         let (x, y) = (at(12), at(11));
         let text = args.get(10 + shift).and_then(value_to_text_string);
         let size = Some(at(6))
@@ -428,7 +451,8 @@ impl RuntimeTraceApi {
             (packed_color & 0xff) as f32 / 255.0,
             1.0,
         ];
-        let lines = match text.as_deref().filter(|text| !text.is_empty()) {
+        // sub_403B10 advances the X it was handed; sub_485530 returns it.
+        let end_x = match text.as_deref().filter(|text| !text.is_empty()) {
             Some(text) => self
                 .draw_wrapped_bitmap_text(
                     target,
@@ -442,11 +466,11 @@ impl RuntimeTraceApi {
                     color,
                     None,
                 )
-                .map_or(1, |(lines, _)| lines),
-            None => 1,
+                .map_or(x, |(_, (end_x, _))| end_x),
+            None => x,
         };
-        tracing::info!(target, text = ?text, size, kinsoku = at(2) != 0, pitch_percent = at(1), lines, "GraphDrawTextEx");
-        lines
+        tracing::info!(target, text = ?text, size, kinsoku = at(2) != 0, pitch_percent = at(1), end_x, "GraphDrawTextEx");
+        Ok(end_x)
     }
 
     pub(crate) fn store_bitmap_text_run(&mut self, bitmap: i32, node: RuntimeTextNode) {
@@ -803,6 +827,92 @@ impl RuntimeTraceApi {
         true
     }
 
+    /// Graph90:A1 (sub_43BA30). The Window's text layer is cleared
+    /// (sub_42BDA0), then item `i` goes to row `i / columns` and column
+    /// `i % columns`. Column `c` starts at `left + c * width / columns` of the
+    /// text area; a centred item sits at that column's middle minus half its
+    /// width. Rows are one line pitch (glyph height plus line spacing) apart.
+    /// A glyph advances the full glyph height for a double-byte character and
+    /// half of it otherwise. The target can colour items from a per-Window
+    /// table (CDspObjWindow+0x394), which is not modelled; `color` is used.
+    pub(crate) fn draw_window_item_grid(
+        &mut self,
+        window: i32,
+        items: &[String],
+        columns: i32,
+        centered: bool,
+        color: i32,
+    ) -> bool {
+        if !Self::is_window_surface_handle(window) || columns < 1 {
+            return false;
+        }
+        let Some(surface) = self.graph_surfaces.get(&window) else {
+            return false;
+        };
+        let (left, top) = (surface.valid_left, surface.valid_top);
+        let area_width = surface.valid_right - left + 1;
+        let spacing_percent = surface.line_spacing_percent;
+        let state = self.window_text_state(Some(window));
+        let glyph = state.font_size.round().max(1.0) as i32;
+        let pitch = glyph + glyph * spacing_percent / 100;
+
+
+        for node in self.item_grid_nodes.remove(&window).unwrap_or_default() {
+            self.text_nodes.remove(&node);
+        }
+        self.clear_bitmap_text(window);
+
+        let mut nodes = Vec::with_capacity(items.len());
+        for (index, item) in items.iter().enumerate() {
+            let item_color = self.graph_item_selection_column_layouts.get(&window).map_or(color, |colors| colors[index]);
+            let color = [((item_color >> 16) & 255) as f32 / 255.0, ((item_color >> 8) & 255) as f32 / 255.0, (item_color & 255) as f32 / 255.0, 1.0];
+            let index = index as i32;
+            let column = index % columns;
+            let column_left = left + column * area_width / columns;
+            let width: i32 = item
+                .chars()
+                .map(|ch| {
+                    let double_byte = encoding_rs::SHIFT_JIS.encode(ch.encode_utf8(&mut [0; 4])).0.len() > 1;
+                    if double_byte { glyph } else { glyph / 2 }
+                })
+                .sum();
+            let x = if centered {
+                column_left + area_width / columns / 2 - (width as u32 >> 1) as i32
+            } else {
+                column_left
+            };
+            let y = top + pitch * (index / columns);
+            while self.text_nodes.contains_key(&self.next_screen_text_child) {
+                self.next_screen_text_child = self.next_screen_text_child.saturating_sub(1);
+            }
+            let node = self.next_screen_text_child;
+            self.next_screen_text_child = self.next_screen_text_child.saturating_sub(1);
+            self.text_nodes.insert(
+                node,
+                RuntimeTextNode {
+                    text: item.clone(),
+                    enabled: true,
+                    owner_object: None,
+                    screen_attached: false,
+                    target_surface: Some(window),
+                    x: x as f32,
+                    y: y as f32,
+                    size: glyph as f32,
+                    line_height: pitch as f32,
+                    formatted_layout: false,
+                    color,
+                    z: MESSAGE_TEXT_Z,
+                    ruby_spans: Vec::new(),
+                    style_spans: Vec::new(),
+                },
+            );
+            nodes.push(node);
+        }
+        tracing::debug!(window, items = items.len(), columns, centered, "GraphDrawItemSelectionGrid");
+        self.item_grid_nodes.insert(window, nodes);
+        true
+    }
+
     pub(crate) fn release_screen_text_node(&mut self, node: i32) -> bool {
         let root_was_text = self.text_nodes.remove(&node).is_some();
         let mut removed = root_was_text;
@@ -930,8 +1040,20 @@ impl RuntimeTraceApi {
                 .get(&surface.id)
                 .copied()
                 .unwrap_or_default();
-            state.x = cursor.cursor_x as f32;
-            state.y = cursor.cursor_y as f32;
+            // sub_435640 / sub_438790: a line starting on the valid edge is
+            // pushed in by the ruby margin (91:98 p4, dword_565BEC) at
+            // layout time; sub_42C990 itself resets to the bare edge.
+            let margin = self.graph_defaults.text_layout.boundary_offset;
+            let (mut x, mut y) = (cursor.cursor_x, cursor.cursor_y);
+            if surface.message_variant == 1 {
+                if y == surface.valid_top {
+                    y = y.saturating_add(margin);
+                }
+            } else if x == surface.valid_left {
+                x = x.saturating_add(margin);
+            }
+            state.x = x as f32;
+            state.y = y as f32;
             state.width = (surface.valid_right as f32 + 1.0 - state.x).max(1.0);
             state.height = (surface.valid_bottom as f32 + 1.0 - state.y).max(1.0);
             if cursor.font_size > 0 {
@@ -952,6 +1074,7 @@ impl RuntimeTraceApi {
     /// Records the colour and style a 92:90/92:91 call gives the text it
     /// draws in `target`.
     pub(crate) fn set_message_text_style(&mut self, target: i32, packed_rgb: i32, style: [i32; 5]) {
+        self.system92_text_colour = packed_rgb;
         let font_size = self.window_text_state(Some(target)).font_size.round() as i32;
         self.surface_text_states
             .entry(target)
@@ -979,11 +1102,13 @@ impl RuntimeTraceApi {
         }
     }
 
+    /// sub_42C990: horizontal windows restart at the valid rectangle's
+    /// top-left, vertical ones (variant 1) at its top-right.
     pub(crate) fn reset_window_text_cursor(&mut self, target: i32) {
         if let Some(surface) = self.graph_surfaces.get(&target) {
-            let offset = self.graph_defaults.text_layout.boundary_offset;
+            let x = if surface.message_variant == 1 { surface.valid_right } else { surface.valid_left };
             let state = self.surface_text_states.entry(target).or_default();
-            state.cursor_x = surface.valid_left.saturating_add(offset);
+            state.cursor_x = x;
             state.cursor_y = surface.valid_top;
         }
     }

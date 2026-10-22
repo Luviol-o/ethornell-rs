@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 pub const MAGIC_PACK_FILE: &[u8] = b"PackFile";
 pub const MAGIC_PACK_FILE_FULL: &[u8] = b"PackFile    ";
@@ -181,6 +181,17 @@ fn zeroed_buffer(size: usize) -> Result<Vec<u8>> {
     Ok(data)
 }
 
+/// An open archive: seekable bytes of a known length.
+pub trait ArchiveSource: Read + Seek + Send + std::fmt::Debug {
+    fn byte_len(&mut self) -> std::io::Result<u64>;
+}
+
+impl ArchiveSource for fs::File {
+    fn byte_len(&mut self) -> std::io::Result<u64> {
+        Ok(self.metadata()?.len())
+    }
+}
+
 #[derive(Debug)]
 struct ResourceManagerInner {
     limits: ResourceBudget,
@@ -197,7 +208,21 @@ struct ResourceManagerInner {
     /// Runtime archive handles. Resource reads are overwhelmingly random seeks
     /// into a small, stable set of ARC files; reopening the archive for every
     /// BP/image/audio entry is substantially more expensive than the seek/read.
-    archive_files: Vec<Mutex<fs::File>>,
+    archive_files: Vec<Mutex<Box<dyn ArchiveSource>>>,
+    /// Search state the scripts configure at run time (Sys80:36/37/38).
+    search: RwLock<RuntimeSearch>,
+}
+
+#[derive(Debug, Default)]
+struct RuntimeSearch {
+    /// DCArchiveComplex records: lower-cased name -> member archives in the
+    /// order the script registered them. sub_445F50 and its siblings try the
+    /// members in that order and stop at the first hit.
+    composites: Vec<(String, Vec<String>)>,
+    /// dword_506BE0: whether loose-file reads fall back to `loose_paths`.
+    loose_fallback_enabled: bool,
+    /// dword_566648: Sys80:37 prepends, so the newest directory comes first.
+    loose_paths: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -220,6 +245,20 @@ impl ResourceManager {
         files: Vec<(PathBuf, fs::File)>,
         limits: ResourceBudget,
     ) -> Result<Self> {
+        let sources = files
+            .into_iter()
+            .map(|(path, file)| (path, Box::new(file) as Box<dyn ArchiveSource>))
+            .collect();
+        Self::from_authorized_sources_with_limits(root, sources, limits)
+    }
+
+    /// Like `from_authorized_files_with_limits`, for archives that are not
+    /// host files (the web build reads the picked folder through JavaScript).
+    pub fn from_authorized_sources_with_limits(
+        root: PathBuf,
+        files: Vec<(PathBuf, Box<dyn ArchiveSource>)>,
+        limits: ResourceBudget,
+    ) -> Result<Self> {
         check_limit(
             files.len() as u64,
             limits.max_archives as u64,
@@ -231,7 +270,7 @@ impl ResourceManager {
         for (path, mut file) in files {
             file.seek(SeekFrom::Start(0))?;
             let mut magic = [0u8; 12];
-            if file.metadata()?.len() < magic.len() as u64 {
+            if file.byte_len()? < magic.len() as u64 {
                 continue;
             }
             file.read_exact(&mut magic)?;
@@ -239,7 +278,7 @@ impl ResourceManager {
             if format == ArchiveFormat::Unknown {
                 continue;
             }
-            let index = read_index_from_file(&path, &mut file, format, &limits, &mut usage)?;
+            let index = read_index_from_file(&path, file.as_mut(), format, &limits, &mut usage)?;
             archives.push(index);
             archive_files.push(Mutex::new(file));
         }
@@ -253,6 +292,7 @@ impl ResourceManager {
                 archive_by_name,
                 archive_by_path,
                 archive_files,
+                search: RwLock::default(),
             }),
         })
     }
@@ -336,11 +376,71 @@ impl ResourceManager {
     }
 
     pub fn first_in_archive(&self, archive_name: &str) -> Option<ResourceEntry> {
-        let archive_index = *self
-            .inner
-            .archive_by_name
-            .get(&archive_name_key(archive_name))?;
-        self.entry_at(archive_index, 0)
+        let first = |archive: &str| {
+            let archive_index = *self.inner.archive_by_name.get(&archive_name_key(archive))?;
+            self.entry_at(archive_index, 0)
+        };
+        match self.composite_members(archive_name) {
+            Some(members) => members.iter().find_map(|member| first(member)),
+            None => first(archive_name),
+        }
+    }
+
+    /// Sys80:38 (sub_466DE0): register a composite archive name over member
+    /// archives. Returns false when the name is already registered, like
+    /// sub_406BC0, or when there are no members (sub_445C50).
+    pub fn register_composite_archive(&self, name: &str, members: Vec<String>) -> bool {
+        if name.is_empty() || members.is_empty() {
+            return false;
+        }
+        let key = archive_name_key(name);
+        let mut search = self.inner.search.write().expect("resource search poisoned");
+        if search.composites.iter().any(|(existing, _)| *existing == key) {
+            return false;
+        }
+        search.composites.push((key, members));
+        true
+    }
+
+    /// The registered members of a composite archive, if `archive_name` is one.
+    pub fn composite_members(&self, archive_name: &str) -> Option<Vec<String>> {
+        let key = archive_name_key(archive_name);
+        let search = self.inner.search.read().expect("resource search poisoned");
+        search
+            .composites
+            .iter()
+            .find(|(name, _)| *name == key)
+            .map(|(_, members)| members.clone())
+    }
+
+    /// Sys80:36 (sub_4657A0).
+    pub fn set_loose_search_fallback(&self, enabled: bool) {
+        self.inner
+            .search
+            .write()
+            .expect("resource search poisoned")
+            .loose_fallback_enabled = enabled;
+    }
+
+    /// Sys80:37 (sub_4657F0) prepends a directory to the loose-file fallback.
+    pub fn prepend_loose_search_path(&self, directory: &str) {
+        self.inner
+            .search
+            .write()
+            .expect("resource search poisoned")
+            .loose_paths
+            .insert(0, directory.to_owned());
+    }
+
+    /// Directories a loose-file read tries after the root (sub_465E30), newest
+    /// first; empty while the fallback is disabled.
+    pub fn loose_search_paths(&self) -> Vec<String> {
+        let search = self.inner.search.read().expect("resource search poisoned");
+        if search.loose_fallback_enabled {
+            search.loose_paths.clone()
+        } else {
+            Vec::new()
+        }
     }
 
     pub fn read_decoded_from_archive(
@@ -434,7 +534,7 @@ impl ResourceManager {
         let actual=archive.entries.iter().find(|e|e.name==entry.entry_name && e.packed_size==entry.packed_size).ok_or_else(||EthornellError::Parse("entry not indexed".into()))?;
         checked_buffer_size(actual.packed_size,self.inner.limits.max_packed_bytes,"packed bytes")?;
         let mut file=self.inner.archive_files[index].lock().map_err(|_|EthornellError::Other("archive handle poisoned".into()))?;
-        if actual.offset.checked_add(actual.packed_size).is_none_or(|end|end>file.metadata().map(|m|m.len()).unwrap_or(0)) {return Err(EthornellError::Parse("entry range invalid".into()));}
+        if actual.offset.checked_add(actual.packed_size).is_none_or(|end|end>file.byte_len().unwrap_or(0)) {return Err(EthornellError::Parse("entry range invalid".into()));}
         file.seek(SeekFrom::Start(actual.offset))?;let mut header=[0u8;32];let count=actual.packed_size.min(32)as usize;file.read_exact(&mut header[..count])?;
         Ok(check_decoded_size(&header[..count],actual.packed_size,&self.inner.limits)? as u64)
     }
@@ -461,17 +561,19 @@ impl ResourceManager {
         archive_name: &str,
         entry_name: &str,
     ) -> Option<(usize, usize)> {
-        let archive_index = *self
-            .inner
-            .archive_by_name
-            .get(&archive_name_key(archive_name))?;
         let entry_key = normalize_resource_name(entry_name);
-        self.inner
-            .by_name
-            .get(&entry_key)?
-            .iter()
-            .copied()
-            .find(|&(candidate_archive, _)| candidate_archive == archive_index)
+        let locators = self.inner.by_name.get(&entry_key)?;
+        let find = |archive: &str| {
+            let archive_index = *self.inner.archive_by_name.get(&archive_name_key(archive))?;
+            locators
+                .iter()
+                .copied()
+                .find(|&(candidate_archive, _)| candidate_archive == archive_index)
+        };
+        match self.composite_members(archive_name) {
+            Some(members) => members.iter().find_map(|member| find(member)),
+            None => find(archive_name),
+        }
     }
 
     fn read_locator_raw(&self, archive_index: usize, entry_index: usize) -> Result<Vec<u8>> {
@@ -503,7 +605,7 @@ impl ResourceManager {
                 archive.path.display()
             ))
         })?;
-        read_entry_from_file(&mut file, entry, &self.inner.limits, decoded)
+        read_entry_from_file(&mut **file, entry, &self.inner.limits, decoded)
     }
 
     fn read_locator_decoded(&self, archive_index: usize, entry_index: usize) -> Result<Vec<u8>> {
@@ -674,9 +776,9 @@ pub fn read_archive_index_with_limits(path: &Path, limits: ResourceBudget) -> Re
     read_index_from_file(path, &mut file, format, &limits, &mut IndexUsage::default())
 }
 
-fn read_index_from_file(
+fn read_index_from_file<R: ArchiveSource + ?Sized>(
     path: &Path,
-    file: &mut fs::File,
+    file: &mut R,
     format: ArchiveFormat,
     limits: &ResourceBudget,
     usage: &mut IndexUsage,
@@ -698,7 +800,7 @@ fn read_index_from_file(
         .checked_mul(record_size)
         .ok_or_else(overflow)?;
     let base_offset = 0x10u64.checked_add(disk_bytes).ok_or_else(overflow)?;
-    let file_len = file.metadata()?.len();
+    let file_len = file.byte_len()?;
     // Reject bogus counts in a short file before reserving the entry vector.
     if base_offset > file_len {
         return Err(EthornellError::Parse(
@@ -770,7 +872,7 @@ fn read_index_from_file(
     })
 }
 
-fn read_name(file: &mut fs::File, len: usize) -> Result<String> {
+fn read_name<R: ArchiveSource + ?Sized>(file: &mut R, len: usize) -> Result<String> {
     let mut bytes = vec![0u8; len];
     file.read_exact(&mut bytes)?;
     let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
@@ -886,8 +988,8 @@ fn check_decoded_size(header: &[u8], packed_size: u64, limits: &ResourceBudget) 
     checked_buffer_size(decoded_size, limit, "decoded bytes")
 }
 
-fn read_entry_from_file(
-    file: &mut fs::File,
+fn read_entry_from_file<R: ArchiveSource + ?Sized>(
+    file: &mut R,
     entry: &ArchiveEntry,
     limits: &ResourceBudget,
     decoded: bool,
@@ -897,7 +999,7 @@ fn read_entry_from_file(
         .offset
         .checked_add(entry.packed_size)
         .ok_or_else(|| EthornellError::Parse("entry range overflows".into()))?;
-    if end > file.metadata()?.len() {
+    if end > file.byte_len()? {
         return Err(EthornellError::Parse(
             "entry extends past archive end".into(),
         ));
@@ -1793,6 +1895,7 @@ mod tests {
                 archive_by_name,
                 archive_by_path,
                 archive_files: Vec::new(),
+                search: RwLock::default(),
             }),
         };
 
@@ -1804,5 +1907,77 @@ mod tests {
         let entry = manager.find_in_archive("system.arc", "ipl._bp").unwrap();
         assert_eq!(entry.archive_path, PathBuf::from("game/system.arc"));
         assert_eq!(entry.packed_size, 64);
+    }
+
+    fn manager_over(archives: &[(&str, &[&str])]) -> ResourceManager {
+        let set = GameArchiveSet {
+            root: PathBuf::from("game"),
+            archives: archives
+                .iter()
+                .map(|(path, names)| ArchiveIndex {
+                    path: PathBuf::from(format!("game/{path}")),
+                    format: ArchiveFormat::BurikoArc20,
+                    entries: names
+                        .iter()
+                        .map(|name| ArchiveEntry {
+                            name: name.to_string(),
+                            offset: 0,
+                            packed_size: 1,
+                            unpacked_size: None,
+                            flags: 0,
+                            method: None,
+                        })
+                        .collect(),
+                })
+                .collect(),
+        };
+        let (by_name, archive_by_name, archive_by_path) = build_resource_lookup(&set);
+        ResourceManager {
+            inner: Arc::new(ResourceManagerInner {
+                limits: ResourceBudget::default(),
+                set,
+                by_name,
+                archive_by_name,
+                archive_by_path,
+                archive_files: Vec::new(),
+                search: RwLock::default(),
+            }),
+        }
+    }
+
+    #[test]
+    fn composite_archive_searches_members_in_registration_order() {
+        let manager = manager_over(&[
+            ("data03000.arc", &["shared", "only03"]),
+            ("data05000.arc", &["shared"]),
+        ]);
+        assert!(manager.find_in_archive("data05xxx.arc", "only03").is_none());
+
+        let members = vec!["data05000.arc".to_string(), "data03000.arc".to_string()];
+        assert!(manager.register_composite_archive("DATA05XXX.ARC", members.clone()));
+        assert!(!manager.register_composite_archive("data05xxx.arc", members));
+        assert!(!manager.register_composite_archive("empty.arc", Vec::new()));
+
+        let shared = manager.find_in_archive("data05xxx.arc", "shared").unwrap();
+        assert_eq!(shared.archive_path, PathBuf::from("game/data05000.arc"));
+        let fallback = manager.find_in_archive("data05xxx.arc", "only03").unwrap();
+        assert_eq!(fallback.archive_path, PathBuf::from("game/data03000.arc"));
+        assert_eq!(
+            manager.first_in_archive("data05xxx.arc").unwrap().archive_path,
+            PathBuf::from("game/data05000.arc")
+        );
+    }
+
+    #[test]
+    fn loose_search_paths_apply_newest_first_once_enabled() {
+        let manager = manager_over(&[]);
+        manager.prepend_loose_search_path("Graphic\\CVTD");
+        manager.prepend_loose_search_path("Script\\CVTD");
+        assert!(manager.loose_search_paths().is_empty());
+        manager.set_loose_search_fallback(true);
+        assert_eq!(
+            manager.loose_search_paths(),
+            ["Script\\CVTD", "Graphic\\CVTD"]
+        );
     }
 }

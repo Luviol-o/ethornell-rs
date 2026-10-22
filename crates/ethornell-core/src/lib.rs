@@ -1,3 +1,5 @@
+pub mod clock;
+
 use std::path::{Path, PathBuf};
 
 pub type Result<T> = std::result::Result<T, EthornellError>;
@@ -61,11 +63,13 @@ pub struct Version {
     pub compatibility: Option<String>,
 }
 
+/// Warnings and errors only by default; the per-frame engine trace is
+/// `RUST_LOG=ethornell=info` (or `debug`).
 pub fn init_tracing() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "ethornell=info,wgpu=warn".into()),
+                .unwrap_or_else(|_| "ethornell=warn,wgpu=warn".into()),
         )
         .try_init();
 }

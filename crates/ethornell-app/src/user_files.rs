@@ -123,6 +123,16 @@ pub(crate) fn find_runtime_file_from_root(
     if let Some(loose) = resolve_existing_path_case_insensitive(&game_root, path) {
         return Some(loose);
     }
+    // sub_465E30: a loose file missing below the root is retried as
+    // `root + dir + "\\" + file` for each Sys80:37 directory, newest first.
+    for directory in manager.loose_search_paths() {
+        let directory = directory.replace('\\', std::path::MAIN_SEPARATOR_STR);
+        if let Some(loose) =
+            resolve_existing_path_case_insensitive(&game_root, &Path::new(&directory).join(path))
+        {
+            return Some(loose);
+        }
+    }
 
     manager.archives().archives.iter().find_map(|archive| {
         let relative = archive
@@ -328,13 +338,7 @@ pub(crate) fn read_runtime_bytes(
             return None;
         }
         if let Some(container) = authorized_container_name(manager, file) {
-            let f = policy.open_resource(&container).ok()?;
-            if f.metadata().ok()?.len() > 256 * 1024 * 1024 {
-                return None;
-            }
-            let mut bytes = Vec::new();
-            f.take(256 * 1024 * 1024 + 1).read_to_end(&mut bytes).ok()?;
-            return (bytes.len() <= 256 * 1024 * 1024).then_some(bytes);
+            return policy.read_resource(&container, 256 * 1024 * 1024).ok();
         }
         let entry = find_runtime_resource(manager, archive, file)?;
         if entry.packed_size > 256 * 1024 * 1024
@@ -421,6 +425,8 @@ mod tests {
         let manager = ResourceManager::open_game(&root).unwrap();
         let mut api =
             super::super::RuntimeTraceApi::new_with_native_root(manager, native_root.clone());
+        // CreateFileA does not create directories (sub_42D940).
+        std::fs::create_dir_all(native_root.join("UserData")).unwrap();
         let absolute = native_root
             .join("UserData/slot.sud")
             .to_string_lossy()

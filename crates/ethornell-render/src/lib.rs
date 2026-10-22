@@ -254,6 +254,10 @@ fn native_pipeline_kind(blend_mode: i32, opacity: f32, texture_opaque: bool) -> 
 }
 
 pub struct Renderer<'w> {
+    /// The adapter's driver description (wgpu `AdapterInfo::name`).
+    adapter_name: String,
+    /// How the game frame fills the surface (Sys81:61's effective mode).
+    presentation_scale: PresentationScale,
     surface: wgpu::Surface<'w>,
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -279,6 +283,12 @@ pub struct Renderer<'w> {
 }
 
 impl<'w> Renderer<'w> {
+    /// The adapter's description, the host counterpart of
+    /// D3DADAPTER_IDENTIFIER9::Description.
+    pub fn adapter_name(&self) -> &str {
+        &self.adapter_name
+    }
+
     #[cfg(feature = "desktop-window")]
     pub async fn new(window: std::sync::Arc<dyn Window>) -> Result<Self> {
         Self::new_with_font(window, load_system_cjk_font()?).await
@@ -312,6 +322,7 @@ impl<'w> Renderer<'w> {
             })
             .await
             .ok_or_else(|| EthornellError::Other("no compatible wgpu adapter".into()))?;
+        let adapter_name = adapter.get_info().name;
         let adapter_limits = adapter.limits();
         let required_limits = renderer_limits(&adapter_limits)?;
         let (device, queue) = adapter
@@ -466,6 +477,8 @@ impl<'w> Renderer<'w> {
         });
 
         let renderer = Self {
+            adapter_name,
+            presentation_scale: PresentationScale::Fit,
             surface,
             device,
             queue,
@@ -539,6 +552,26 @@ impl<'w> Renderer<'w> {
         Self::from_surface(&instance, surface, width, height, font).await
     }
 
+    /// A renderer on a canvas the page transferred to the engine's worker,
+    /// drawn with WebGL2.
+    #[cfg(target_arch = "wasm32")]
+    pub async fn new_web(
+        canvas: web_sys::OffscreenCanvas,
+        width: u32,
+        height: u32,
+        font: FontArc,
+    ) -> Result<Self> {
+        validate_surface_size(width, height, u32::MAX)?;
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::GL,
+            ..Default::default()
+        });
+        let surface = instance
+            .create_surface(wgpu::SurfaceTarget::OffscreenCanvas(canvas))
+            .map_err(|err| EthornellError::Other(format!("create canvas surface failed: {err}")))?;
+        Self::from_surface(&instance, surface, width, height, font).await
+    }
+
     /// A renderer on a UIKit view. wgpu draws through the view's
     /// `CAMetalLayer` (adding one when its layer is not).
     ///
@@ -574,6 +607,21 @@ impl<'w> Renderer<'w> {
         Self::from_surface(&instance, surface, width, height, font).await
     }
 
+    pub fn set_presentation_scale(&mut self, scale: PresentationScale) {
+        self.presentation_scale = scale;
+    }
+
+    /// Game-to-surface scale (x, y) and offset (x, y).
+    fn viewport(&self) -> (f32, f32, f32, f32) {
+        presentation_viewport(
+            self.presentation_scale,
+            self.config.width as f32,
+            self.config.height as f32,
+            self.virtual_width,
+            self.virtual_height,
+        )
+    }
+
     pub fn set_virtual_size(&mut self, width: f32, height: f32) {
         self.virtual_width = width.max(1.0);
         self.virtual_height = height.max(1.0);
@@ -598,26 +646,21 @@ impl<'w> Renderer<'w> {
         width: f32,
         height: f32,
     ) -> (f32, f32, f32, f32) {
-        let (scale, offset_x, offset_y) = viewport_transform(
-            self.config.width as f32,
-            self.config.height as f32,
-            self.virtual_width,
-            self.virtual_height,
-        );
+        let (scale_x, scale_y, offset_x, offset_y) = self.viewport();
         (
-            offset_x + x * scale,
-            offset_y + y * scale,
-            width * scale,
-            height * scale,
+            offset_x + x * scale_x,
+            offset_y + y * scale_y,
+            width * scale_x,
+            height * scale_y,
         )
     }
 
     pub fn surface_to_game_point(&self, x: f32, y: f32) -> Option<(f32, f32)> {
-        surface_to_virtual_point(
+        let (scale_x, scale_y, offset_x, offset_y) = self.viewport();
+        viewport_to_virtual_point(
             x,
             y,
-            self.config.width as f32,
-            self.config.height as f32,
+            (scale_x, scale_y, offset_x, offset_y),
             self.virtual_width,
             self.virtual_height,
         )
@@ -954,13 +997,8 @@ impl<'w> Renderer<'w> {
                 RenderCommand::Clear { .. } => continue,
             };
             let surface_destination_quad = destination_quad.map(|quad| {
-                let (scale, offset_x, offset_y) = viewport_transform(
-                    self.config.width as f32,
-                    self.config.height as f32,
-                    self.virtual_width,
-                    self.virtual_height,
-                );
-                quad.map(|[game_x, game_y]| [offset_x + game_x * scale, offset_y + game_y * scale])
+                let (scale_x, scale_y, offset_x, offset_y) = self.viewport();
+                quad.map(|[game_x, game_y]| [offset_x + game_x * scale_x, offset_y + game_y * scale_y])
             });
             let (x, y, width, height) = self.game_to_surface_rect(x, y, width, height);
             // Every draw stays inside the game frame, so the letterbox bars
@@ -1120,8 +1158,9 @@ impl<'w> Renderer<'w> {
     }
 
     fn game_clip_to_scissor(&self, clip: [f32; 4]) -> Option<(u32, u32, u32, u32)> {
-        game_clip_to_scissor(
+        game_clip_to_scissor_in(
             clip,
+            self.viewport(),
             self.config.width as f32,
             self.config.height as f32,
             self.virtual_width,
@@ -1145,10 +1184,82 @@ fn gamma_space_surface_format(formats: &[wgpu::TextureFormat]) -> wgpu::TextureF
         .unwrap_or(formats[0])
 }
 
+/// How the game frame fills the surface in full screen (sub_45F110 /
+/// sub_45EE30 by the effective Sys81:61 mode).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PresentationScale {
+    /// Mode 0: uniform scale, centred (letterbox).
+    Fit,
+    /// Mode 1: each axis scaled to the surface.
+    Stretch,
+    /// Mode 2: 1:1, centred.
+    Center,
+}
+
+fn presentation_viewport(
+    mode: PresentationScale,
+    surface_width: f32,
+    surface_height: f32,
+    virtual_width: f32,
+    virtual_height: f32,
+) -> (f32, f32, f32, f32) {
+    match mode {
+        PresentationScale::Fit => {
+            let (scale, offset_x, offset_y) =
+                viewport_transform(surface_width, surface_height, virtual_width, virtual_height);
+            (scale, scale, offset_x, offset_y)
+        }
+        PresentationScale::Stretch => (
+            (surface_width / virtual_width).max(0.01),
+            (surface_height / virtual_height).max(0.01),
+            0.0,
+            0.0,
+        ),
+        PresentationScale::Center => (
+            1.0,
+            1.0,
+            ((surface_width - virtual_width) * 0.5).floor(),
+            ((surface_height - virtual_height) * 0.5).floor(),
+        ),
+    }
+}
+
+fn viewport_to_virtual_point(
+    x: f32,
+    y: f32,
+    (scale_x, scale_y, offset_x, offset_y): (f32, f32, f32, f32),
+    virtual_width: f32,
+    virtual_height: f32,
+) -> Option<(f32, f32)> {
+    let virtual_x = (x - offset_x) / scale_x;
+    let virtual_y = (y - offset_y) / scale_y;
+    ((0.0..=virtual_width).contains(&virtual_x) && (0.0..=virtual_height).contains(&virtual_y))
+        .then_some((virtual_x, virtual_y))
+}
+
 /// A clip rectangle in game coordinates as a surface scissor, cut to the
 /// game frame: nothing is drawn into the letterbox bars.
+#[cfg(test)]
 fn game_clip_to_scissor(
     clip: [f32; 4],
+    surface_width: f32,
+    surface_height: f32,
+    virtual_width: f32,
+    virtual_height: f32,
+) -> Option<(u32, u32, u32, u32)> {
+    let viewport = presentation_viewport(
+        PresentationScale::Fit,
+        surface_width,
+        surface_height,
+        virtual_width,
+        virtual_height,
+    );
+    game_clip_to_scissor_in(clip, viewport, surface_width, surface_height, virtual_width, virtual_height)
+}
+
+fn game_clip_to_scissor_in(
+    clip: [f32; 4],
+    (scale_x, scale_y, offset_x, offset_y): (f32, f32, f32, f32),
     surface_width: f32,
     surface_height: f32,
     virtual_width: f32,
@@ -1161,21 +1272,19 @@ fn game_clip_to_scissor(
     if right <= left || bottom <= top {
         return None;
     }
-    let (scale, offset_x, offset_y) =
-        viewport_transform(surface_width, surface_height, virtual_width, virtual_height);
-    let x0 = (offset_x + left * scale)
+    let x0 = (offset_x + left * scale_x)
         .floor()
         .max(0.0)
         .min(surface_width) as u32;
-    let y0 = (offset_y + top * scale)
+    let y0 = (offset_y + top * scale_y)
         .floor()
         .max(0.0)
         .min(surface_height) as u32;
-    let x1 = (offset_x + right * scale)
+    let x1 = (offset_x + right * scale_x)
         .ceil()
         .max(0.0)
         .min(surface_width) as u32;
-    let y1 = (offset_y + bottom * scale)
+    let y1 = (offset_y + bottom * scale_y)
         .ceil()
         .max(0.0)
         .min(surface_height) as u32;
@@ -1196,6 +1305,7 @@ fn viewport_transform(
     (scale, offset_x, offset_y)
 }
 
+#[cfg(test)]
 fn surface_to_virtual_point(
     x: f32,
     y: f32,
