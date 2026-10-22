@@ -15488,7 +15488,15 @@ mod input_tests {
         assert_eq!(after_first.cursor_y, home.cursor_y);
         assert!(after_first.cursor_x > home.cursor_x);
 
+        let first_layout = api.text_runtime.current_visible_text();
         api.start_native_message(" part two.".into(), Some(window));
+        // The page keeps the window's whole width: the first part doesn't
+        // reflow.
+        assert!(api.text_runtime.current_visible_text().starts_with(&first_layout));
+        assert_eq!(
+            api.window_text_state(Some(window)).width,
+            1128.0 - api.surface_text_states[&window].cursor_x as f32
+        );
         // The first part stays on screen while the second is typed out.
         assert_eq!(shown_message(&api), "Part one,");
         api.tick_text(10_000);
