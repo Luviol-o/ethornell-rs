@@ -14,8 +14,8 @@ store them, concatenate them and hand them back.
 
 ADR 0003 rule 2 said: where the host has no equivalent service, behave as
 the target does when that service fails. For directories and paths that is
-the wrong model (user decision, 2026-10-22: "目录相关的，在其他平台应该是想办法
-模拟行为"). Concretely:
+the wrong model (user decision, 2026-10-22: directory behaviour should be emulated on
+other platforms). Concretely:
 
 * Sys80:3A mode 0 (`GetWindowsDirectoryA`) and 4 (`CSIDL_PROGRAM_FILES`)
   always report success; "failure" leaves the script with an untouched

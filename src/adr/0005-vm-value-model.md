@@ -1,6 +1,6 @@
 # 0005. The VM uses BGI 1.622's value and address model
 
-**Status:** Accepted, done 2026-10-22 (decided the same day: "如果简单尝试后现在的没法和原版等价导致很多功能接入有问题，那就优先修").
+**Status:** Accepted, done 2026-10-22 (user decision the same day: if a simple attempt shows the current model cannot match the original and keeps breaking features, fix it first).
 
 ## Context
 

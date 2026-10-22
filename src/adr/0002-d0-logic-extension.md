@@ -7,7 +7,7 @@
 The 0xD0 native table was carried as "legacy 3D" (`execute_legacy_3d` in
 `crates/ethornell-vm/src/extended_opcodes.rs`): it pops the right number of
 arguments, hands out handles for create calls and returns 0 for the rest.
-RTTI in BGI 1.622 shows it is a strategy-game (SLG, 战棋) toolkit instead:
+RTTI in BGI 1.622 shows it is a strategy-game (SLG, grid tactics) toolkit instead:
 
 | Selectors | Class | Object | Handle list |
 |---|---|---|---|
