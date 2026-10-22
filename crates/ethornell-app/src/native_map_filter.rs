@@ -577,4 +577,31 @@ mod tests {
             &[0, 0, 255, 255]
         );
     }
+
+    #[test]
+    fn a_released_filter_leaves_the_display_list() {
+        // senmomo's scene start fades in through filter 0x90000002 and
+        // releases it; its last raster (black) must not stay on screen.
+        let manager = ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let mut api = RuntimeTraceApi::new(manager);
+        api.screen_width = 4;
+        api.screen_height = 2;
+        let call = |api: &mut RuntimeTraceApi, id, args: &[i32]| {
+            GraphApi::call_graph(
+                api,
+                &mut NativeCallFrame::new(
+                    NativeOpcode { group: 0x90, id },
+                    args.iter().copied().map(Value::Int).collect(),
+                ),
+            )
+            .unwrap()
+        };
+        let filter = call(&mut api, 0x60, &[]).as_i32();
+        call(&mut api, 0x66, &[filter, 0, 0, -1, 0, 0, 1216]);
+        call(&mut api, 0x64, &[filter, 1]);
+        assert!(api.graph_output_draw_items().iter().any(|item| item.owner_object == Some(filter)));
+        call(&mut api, 0x61, &[filter]);
+        assert!(!api.graph_layers.contains_key(&filter));
+        assert!(api.graph_output_draw_items().iter().all(|item| item.owner_object != Some(filter)));
+    }
 }

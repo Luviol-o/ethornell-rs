@@ -3504,6 +3504,17 @@ impl RuntimeTraceApi {
             }
             trace_graph!(self, "finalize object #{object}");
         }
+        // Filter, map, effector and BackML rasters keep their layer under the
+        // object's own handle, outside graph_object_layers. A released object
+        // is no longer in the display list, so its layer must not be drawn.
+        if self
+            .graph_layers
+            .get(&object)
+            .is_some_and(|layer| layer.owner_object == Some(object))
+        {
+            self.graph_layers.remove(&object);
+            removed = true;
+        }
         removed
     }
 
