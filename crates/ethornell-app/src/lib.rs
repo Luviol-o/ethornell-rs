@@ -16740,6 +16740,7 @@ mod input_tests {
             super::graph_input::RuntimeGraphInputObject::new_extended(surface),
         );
         let descriptor = GraphInputDescriptor {
+            groups: vec![Default::default()],
             regions: vec![GraphInputRegion {
                 group: 0,
                 index: 0,
@@ -22518,6 +22519,11 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
     }
 
     fn invoke_graph_effect_process(&mut self, process: i32) -> ethornell_vm::GraphEffectInvocation {
+        // 91:F1 -> sub_408420: an invalid or empty bitmap slot is 4, a slot
+        // without a movie 1.
+        if let Err(status) = self.movie_slot(process) {
+            return ethornell_vm::GraphEffectInvocation { status, duration_ms: 0 };
+        }
         let invocation = self.graph_effects.invoke(process);
         let source = self
             .graph_effects
@@ -22535,6 +22541,17 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
 
     fn query_movie_position(&self, bitmap: i32) -> std::result::Result<i32, i32> {
         self.graph_effects.position_ms(bitmap)
+    }
+
+    fn query_movie_slot_position(&self, bitmap: i32) -> Option<i32> {
+        match self.movie_slot(bitmap) {
+            Err(4) => None,
+            Err(_) => Some(-1),
+            Ok(()) if self.graph_effects.movie_playing(bitmap) => {
+                self.graph_effects.position_ms(bitmap).ok()
+            }
+            Ok(()) => Some(-1),
+        }
     }
 
     fn load_buriko_movie_resource(

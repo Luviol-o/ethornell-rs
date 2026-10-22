@@ -505,6 +505,18 @@ impl RuntimeTraceApi {
         Some(Ok(value))
     }
 
+    /// The slot test shared by sub_408420/sub_4084A0/sub_408540: a bitmap
+    /// outside the table or not allocated is 4, one without a movie is 1.
+    pub(super) fn movie_slot(&self, bitmap: i32) -> std::result::Result<(), i32> {
+        if !(0..0x4000).contains(&bitmap) || !self.graph_resources.contains_key(&bitmap) {
+            return Err(4);
+        }
+        if !self.graph_effects.is_movie(bitmap) {
+            return Err(1);
+        }
+        Ok(())
+    }
+
     pub(super) fn dispatch_system91_b8_f7(
         &mut self,
         call: &mut ethornell_vm::NativeCallFrame,
@@ -517,17 +529,13 @@ impl RuntimeTraceApi {
         let id = call.id();
         let stack = call.args_mut();
         let value = match id {
+            // sub_4859F0 -> sub_46CB90(window, 1): like 90:B8, the window
+            // lookup result is not checked before the DCIPIconEx is built.
             0xb8 => {
                 let window = pop_int_value(stack).unwrap_or_default();
-                let object = if <Self as ethornell_vm::GraphApi>::graph_window_exists(self, window)
-                {
-                    let object = self.alloc_input_processor_handle();
-                    self.graph_input_objects
-                        .insert(object, RuntimeGraphInputObject::new_extended(window));
-                    object
-                } else {
-                    0
-                };
+                let object = self.alloc_input_processor_handle();
+                self.graph_input_objects
+                    .insert(object, RuntimeGraphInputObject::new_extended(window));
                 tracing::debug!(window, object, "Graph91CreateExtendedIconInputProcessor");
                 ethornell_vm::Value::Int(object)
             }
@@ -618,11 +626,16 @@ impl RuntimeTraceApi {
                 // The VM owns the duration output pointer.
                 let bitmap = pop_int_value(stack).unwrap_or_default();
                 let _duration_out = stack.pop();
-                ethornell_vm::Value::Int(self.graph_effects.invoke(bitmap).status)
+                ethornell_vm::Value::Int(
+                    <Self as ethornell_vm::GraphApi>::invoke_graph_effect_process(self, bitmap).status,
+                )
             }
             0xf2 => {
                 let bitmap = pop_int_value(stack).unwrap_or_default();
-                let status = self.graph_effects.close_movie_slot(bitmap);
+                let status = match self.movie_slot(bitmap) {
+                    Err(status) => status,
+                    Ok(()) => self.graph_effects.close_movie_slot(bitmap),
+                };
                 if status == 0 {
                     self.graph_process_handles.remove(&bitmap);
                 }
@@ -632,7 +645,12 @@ impl RuntimeTraceApi {
             0xf3 => {
                 let paused = pop_int_value(stack).unwrap_or_default() != 0;
                 let bitmap = pop_int_value(stack).unwrap_or_default();
-                let status = self.graph_effects.set_paused(bitmap, paused);
+                // sub_408540: no "started" requirement; pausing a stopped
+                // DirectShow graph succeeds.
+                let status = match self.movie_slot(bitmap) {
+                    Err(status) => status,
+                    Ok(()) => self.graph_effects.set_paused(bitmap, paused),
+                };
                 tracing::debug!(bitmap, paused, status, "Graph91SetDirectShowMoviePaused");
                 ethornell_vm::Value::Int(status)
             }
@@ -724,7 +742,9 @@ impl RuntimeTraceApi {
                 // The VM owns the output pointer and writes the position.
                 let bitmap = pop_int_value(stack).unwrap_or_default();
                 let _position_out = stack.pop();
-                ethornell_vm::Value::Int(i32::from(self.graph_effects.position_ms(bitmap).is_ok()))
+                ethornell_vm::Value::Int(i32::from(
+                    <Self as ethornell_vm::GraphApi>::query_movie_slot_position(self, bitmap).is_some(),
+                ))
             }
             _ => unreachable!(),
         };

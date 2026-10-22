@@ -142,12 +142,9 @@ impl RuntimeGraphInputObject {
         if !self.extended {
             return Err(4);
         }
-        let group_exists = self
-            .descriptor
-            .regions
-            .iter()
-            .any(|region| region.group == group);
-        if !group_exists {
+        // sub_44B8A0: the group against the configured group count (2),
+        // then the item against that group's item count (3), unsigned.
+        if group as u32 >= self.descriptor.groups.len() as u32 {
             return Err(2);
         }
         if !self
@@ -831,6 +828,7 @@ mod tests {
         let mut extended = RuntimeGraphInputObject::new_extended(7);
         extended.configure(GraphInputDescriptor {
             initial_group: 0,
+            groups: vec![Default::default()],
             regions: vec![region()],
             ..GraphInputDescriptor::default()
         });

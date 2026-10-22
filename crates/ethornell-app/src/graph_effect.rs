@@ -497,7 +497,7 @@ impl GraphEffectRegistry {
         let Some(process) = self.processes.get_mut(&handle) else {
             return 1;
         };
-        if process.movie.is_none() || !process.active {
+        if process.movie.is_none() {
             return 1;
         }
         process.paused = paused;
@@ -515,6 +515,13 @@ impl GraphEffectRegistry {
             }
             _ => 1,
         }
+    }
+
+    /// Whether a bitmap-slot movie is running (sub_44DAF0).
+    pub(crate) fn movie_playing(&self, handle: i32) -> bool {
+        self.processes
+            .get(&handle)
+            .is_some_and(|process| process.movie.is_some() && process.active && !process.paused)
     }
 
     pub(crate) fn is_movie(&self, handle: i32) -> bool {

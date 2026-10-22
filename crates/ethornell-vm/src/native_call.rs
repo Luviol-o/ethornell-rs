@@ -17678,7 +17678,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_EXTENDED_ICON_CREATE_PARAMETERS,
         returns: "input processor handle or 0",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_484EF0 -> sub_46C630(window, 1): constructs a DCIPIconEx and registers it; pushes the handle.",
+        notes: "sub_4859F0 -> sub_46CB90(window, 1): DCIPIconEx built without checking the window, like 90:B8.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_CONFIGURE_EXTENDED_ICON_INPUT_PROCESSOR,
@@ -17686,7 +17686,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_EXTENDED_ICON_CONFIGURE_PARAMETERS,
         returns: "i32 status 0/1/2/3/4",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_484F20 -> sub_46CB60: 1 unknown handle, 4 not extended, 2/3 descriptor errors (low-word item counts in sub_46C9D0, then sub_44A900 empties the processor and rechecks the whole group-count dwords). The initial group and per-group initial items are kept only when in range.",
+        notes: "sub_485A20 -> sub_46D0C0: missing 1, not extended 4, descriptor statuses, 2/3 from sub_44AD40.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_SET_EXTENDED_ICON_INPUT_ITEM_STATE,
@@ -17694,7 +17694,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_EXTENDED_ICON_ITEM_STATE_PARAMETERS,
         returns: "i32 status 0/1/2/3/4",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "0x00484F60 -> sub_46CCA0 -> sub_44B460 resolves the live item record and calls sub_42C060, which applies CDspObj::SetEnabled (sub_41AD60) to that item's materialized child Sprite, then invalidates the owning DCIPIconEx. state=0 therefore removes that child from drawing/hit eligibility; nonzero re-enables it. The state belongs to the live child and is reset when sub_44A900 rebuilds the descriptor children.",
+        notes: "sub_485A60 -> sub_46D200 -> sub_44B8A0: missing 1, not extended 4, group count 2, item count 3.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_REGISTER_KEY_ASSIGNMENT_TABLE,
@@ -17702,7 +17702,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_KEY_ASSIGNMENT_PARAMETERS,
         returns: "void; invalid IDs raise a script error",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "0x00484FB0 -> sub_447BB0 accepts IDs 4..7 and copies exactly 24 DWORDs.",
+        notes: "sub_485AB0 -> sub_448010: assignments 4..=7, target text otherwise.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_GET_ACTIVE_KNOB_HANDLE,
@@ -17710,7 +17710,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: NO_PARAMETERS,
         returns: "active 0xF0000000 Knob handle or 0",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "0x00485020 -> sub_4639A0/sub_463820 returns the current active input node created by the Graph90:D0 Knob path.",
+        notes: "sub_485B20 -> sub_463F00: handle in the active knob record (dword_565FDC) or 0.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_OPEN_DIRECTSHOW_MOVIE,
@@ -17718,7 +17718,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_MOVIE_OPEN_PARAMETERS,
         returns: "i32 status 0..4",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "0x00485040 resolves the movie path, constructs DCMovieRenderer, sets loop and volume, and binds it to one of 0x4000 bitmap slots.",
+        notes: "sub_485B40 -> sub_4902B0 -> sub_408880: bitmap, path, two options; DirectShow decode is the app's (host item); an unresolved path returns an uninitialized local in the target.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_START_DIRECTSHOW_MOVIE,
@@ -17726,7 +17726,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_MOVIE_START_PARAMETERS,
         returns: "i32 status 0/1/4",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "0x00485100 -> sub_408430/sub_44D110 prepares/runs the media graph and writes duration milliseconds through the first source argument.",
+        notes: "sub_485C00 -> sub_408420: invalid/empty slot 4, no movie 1, duration written on start.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_CLOSE_DIRECTSHOW_MOVIE,
@@ -17734,7 +17734,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_MOVIE_HANDLE_PARAMETERS,
         returns: "i32 status 0/1/4",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "0x00485170 -> sub_4084B0 stops and releases the renderer, then clears the slot's async object.",
+        notes: "sub_485C70 -> sub_4084A0: invalid/empty slot 4, no movie 1.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_SET_DIRECTSHOW_MOVIE_PAUSED,
@@ -17742,7 +17742,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_MOVIE_PAUSE_PARAMETERS,
         returns: "i32 status 0/1/4",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "0x004851D0 -> sub_408550/sub_44D240 resumes for zero and pauses for nonzero after preparation.",
+        notes: "sub_485CD0 -> sub_408540: invalid/empty slot 4, no movie 1; a stopped movie can be paused.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_CREATE_FLASH_CONTROL,
@@ -17750,7 +17750,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_FLASH_CREATE_PARAMETERS,
         returns: "i32 status 0/1/2/4",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "0x00485240 constructs an ATL-hosted Shockwave Flash ActiveX control, assigns the SWF path and creates a type-1 destination bitmap. The portable backend loads the same SWF bytes into an embedded Ruffle offscreen wgpu player; exact ATL COM, audio and host callback behavior remains partial.",
+        notes: "sub_485D40 -> sub_408AC0: Flash control (host item): bitmap, width, height, path, parameter; capture fail 1, allocation fail 4.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_START_FLASH_CONTROL,
@@ -17758,7 +17758,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_MOVIE_HANDLE_PARAMETERS,
         returns: "i32 status 0/1/2/4",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "0x00485300 sends command 32 to the SCFlashControl. The portable backend resumes the embedded Ruffle player and advances it from the engine native-tick clock.",
+        notes: "sub_485E00 -> sub_408B70: Flash start (host item).",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_CAPTURE_AND_RELEASE_FLASH_CONTROL,
@@ -17766,7 +17766,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_MOVIE_HANDLE_PARAMETERS,
         returns: "i32 status 0/1/4",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "0x00485380 sends command 33, copies the ActiveX DIB into the destination bitmap, then destroys and clears the control. The portable backend renders and captures the final Ruffle TextureTarget frame before removing the player.",
+        notes: "sub_485E80 -> sub_408BD0: Flash capture and release (host item).",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_GET_MOVIE_POSITION,
@@ -17774,7 +17774,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_MOVIE_POSITION_PARAMETERS,
         returns: "i32 boolean",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "0x004853F0 -> sub_407FB0 writes the live DirectShow position, cached slot position, or -1 according to the slot state.",
+        notes: "sub_485EF0 -> sub_407FA0: invalid/empty slot false; no movie or stopped movie writes -1 and returns true.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH_SET_GLYPH_REVEAL_DELAY,
@@ -20171,6 +20171,14 @@ const PORTABLE_EQUIVALENT_OPCODES: &[NativeOpcode] = &[
     opcodes::GRAPH91_MEASURE_TEXT,
     opcodes::GRAPH91_DRAW_TEXT,
     opcodes::GRAPH91_DRAW_TEXT_WITH_STYLE_MODE,
+    opcodes::GRAPH91_SET_EXTENDED_ICON_INPUT_ITEM_STATE,
+    opcodes::GRAPH91_GET_ACTIVE_KNOB_HANDLE,
+    opcodes::GRAPH91_OPEN_DIRECTSHOW_MOVIE,
+    opcodes::GRAPH91_START_DIRECTSHOW_MOVIE,
+    opcodes::GRAPH91_CREATE_FLASH_CONTROL,
+    opcodes::GRAPH91_START_FLASH_CONTROL,
+    opcodes::GRAPH91_CAPTURE_AND_RELEASE_FLASH_CONTROL,
+    opcodes::GRAPH91_GET_MOVIE_POSITION,
 ];
 
 const PARTIAL_IMPLEMENTATION_OPCODES: &[NativeOpcode] = &[
@@ -20230,14 +20238,6 @@ const PARTIAL_IMPLEMENTATION_OPCODES: &[NativeOpcode] = &[
     opcodes::SYS_DELETE_INSTALLED_REGISTRY_KEY,
     opcodes::SYS_REGISTER_FILE_ASSOCIATION,
     opcodes::SYS_WRITE_WINDOWS_DIRECTORY,
-    opcodes::GRAPH91_CREATE_FLASH_CONTROL,
-    opcodes::GRAPH91_START_FLASH_CONTROL,
-    opcodes::GRAPH91_CAPTURE_AND_RELEASE_FLASH_CONTROL,
-    opcodes::GRAPH91_SET_EXTENDED_ICON_INPUT_ITEM_STATE,
-    opcodes::GRAPH91_GET_ACTIVE_KNOB_HANDLE,
-    opcodes::GRAPH91_OPEN_DIRECTSHOW_MOVIE,
-    opcodes::GRAPH91_START_DIRECTSHOW_MOVIE,
-    opcodes::GRAPH91_GET_MOVIE_POSITION,
     opcodes::GRAPH90_SET_DISPLAY_OPTIONS,
     opcodes::GRAPH90_UPLOAD_MAP_TILE_DATA,
     opcodes::GRAPH90_IMPORT_EXTERNAL_IMAGE,

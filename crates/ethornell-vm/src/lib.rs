@@ -1320,6 +1320,12 @@ pub trait GraphApi {
         Err(4)
     }
 
+    /// sub_407FA0 (91:F7): `None` for an invalid or empty bitmap slot; a
+    /// slot without a movie or a stopped movie reports -1.
+    fn query_movie_slot_position(&self, _bitmap: i32) -> Option<i32> {
+        None
+    }
+
     /// Load and validate one target BF_Movie resource. The VM owns the two
     /// caller output pointers and writes the returned handle/metadata record.
     fn load_buriko_movie_resource(
@@ -1680,7 +1686,7 @@ impl Default for GraphInputDescriptor {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct GraphInputGroup {
     /// Grid columns: compact count high word, extended group+4; zero uses item count.
     pub navigation_columns: i32,
@@ -4669,12 +4675,12 @@ impl Vm {
                     // The public return value is a boolean success flag.
                     let bitmap = self.pop_int()?;
                     let destination = self.pop_ptr()?;
-                    match api.query_movie_position(bitmap) {
-                        Ok(position) => {
+                    match api.query_movie_slot_position(bitmap) {
+                        Some(position) => {
                             self.write_int(destination, 2, position as u32)?;
                             Value::Int(1)
                         }
-                        Err(_) => Value::Int(0),
+                        None => Value::Int(0),
                     }
                 } else if (code, id) == (0x92, 0x12) {
                     // funcs_486FEE[0x12] -> sub_4857F0 -> sub_402440.
@@ -5113,7 +5119,7 @@ impl Vm {
                     }
                     if !api.set_graph_key_assignment(assignment, values) {
                         return Err(VmError::Runtime(format!(
-                            "Graph91:BF invalid key assignment [{assignment}]"
+                            "無効なキーアサインメント [ {assignment} ] が指定されました"
                         )));
                     }
                     Value::None
