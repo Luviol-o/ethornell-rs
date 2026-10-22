@@ -1029,6 +1029,16 @@ impl RuntimeTraceApi {
         }
     }
 
+    /// What Graph92:8E (`sub_440F80`) and a page feed (`sub_433890`) both do
+    /// to a window: `sub_42B9B0` clears its text bitmap, which holds the text
+    /// Graph92:91 drew into it as well as the messages', and `sub_42C5B0`
+    /// sends its text cursor home.
+    pub(crate) fn clear_window_text(&mut self, window: i32) {
+        self.reset_window_text_cursor(window);
+        self.clear_bitmap_text(window);
+        self.surface_text_buffers.insert(window, String::new());
+    }
+
     /// Lay out a message drawn on `window` after the text its page already
     /// holds. Returns the layout state (the page's origin), the page's whole
     /// wrapped text and how many of its characters were already drawn. The
@@ -1040,7 +1050,7 @@ impl RuntimeTraceApi {
     ) -> (TextState, ParsedMessageMarkup, usize) {
         let text = match text.rfind('\x0c') {
             Some(page_feed) => {
-                self.reset_window_text_cursor(window);
+                self.clear_window_text(window);
                 &text[page_feed + 1..]
             }
             None => text,
@@ -1107,6 +1117,58 @@ impl RuntimeTraceApi {
         parsed
     }
 
+    /// The message text node, laid out from `state` on `target_surface`'s
+    /// page (or on the screen).
+    fn place_message_text_node(&mut self, target_surface: Option<i32>, state: &TextState) -> i32 {
+        let target = self.ensure_message_text_node();
+        if let Some(node) = self.text_nodes.get_mut(&target) {
+            node.owner_object = target_surface;
+            node.screen_attached = target_surface.is_none();
+            node.target_surface = target_surface;
+            node.x = state.x;
+            node.y = state.y;
+            node.size = state.font_size.max(1.0);
+            node.line_height = state.line_height.max(node.size);
+            node.formatted_layout = true;
+            node.color = state.color;
+            node.z = target_surface
+                .and_then(|surface| self.graph_surfaces.get(&surface))
+                .map(|surface| surface.z)
+                .unwrap_or(MESSAGE_TEXT_Z);
+        }
+        target
+    }
+
+    /// Whether the message text node can take `window`'s page: the engine
+    /// keeps one, so while it shows another window's text, that text stays.
+    pub(crate) fn message_text_node_is_free_for(&self, window: i32) -> bool {
+        self.text_runtime
+            .target_node
+            .and_then(|node| self.text_nodes.get(&node))
+            .map_or(true, |node| {
+                node.target_surface == Some(window) || node.text.is_empty()
+            })
+    }
+
+    /// Graph92:91 on a window (`sub_486500` -> `sub_42B710`): the text is
+    /// drawn at once into the window's text bitmap at its text cursor, and
+    /// the cursor is left after it (`sub_42C700`), as a message's glyphs
+    /// are. So it joins the window's page: a message or another draw after
+    /// it continues after it, and Graph92:8E or a page feed clears it with
+    /// the rest of the page.
+    pub(crate) fn draw_window_text_at_once(&mut self, window: i32, text: &str) {
+        let (state, parsed, _) = self.continue_message_page(window, text);
+        let page_chars = parsed.text.chars().count();
+        self.native_message_surface_target = Some(window);
+        let target = self.place_message_text_node(Some(window), &state);
+        self.text_runtime
+            .start_continued_message(parsed, target, page_chars);
+        let text = self.text_runtime.current_visible_text();
+        self.apply_text_to_node(target, text);
+        self.apply_visible_ruby_to_node(target);
+        self.apply_visible_styles_to_node(target);
+    }
+
     pub(crate) fn start_native_message(
         &mut self,
         text: String,
@@ -1126,22 +1188,7 @@ impl RuntimeTraceApi {
         self.user_controls.remove(&MESSAGE_INPUT_OBJECT_ID);
         // The caret belongs to the previous message's wait.
         self.message_caret = None;
-        let target = self.ensure_message_text_node();
-        if let Some(node) = self.text_nodes.get_mut(&target) {
-            node.owner_object = target_surface;
-            node.screen_attached = target_surface.is_none();
-            node.target_surface = target_surface;
-            node.x = state.x;
-            node.y = state.y;
-            node.size = state.font_size.max(1.0);
-            node.line_height = state.line_height.max(node.size);
-            node.formatted_layout = true;
-            node.color = state.color;
-            node.z = target_surface
-                .and_then(|surface| self.graph_surfaces.get(&surface))
-                .map(|surface| surface.z)
-                .unwrap_or(MESSAGE_TEXT_Z);
-        }
+        let target = self.place_message_text_node(target_surface, &state);
         self.text_runtime
             .set_glyph_delay_ms(self.graph_defaults.text_animation.glyph_delay_ms);
         let message_text = parsed
