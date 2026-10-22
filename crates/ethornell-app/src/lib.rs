@@ -10758,6 +10758,10 @@ mod input_tests {
         call_graph(&mut api, 0x91, 0x88, &mut font).unwrap();
         let mut text_property = vec![Value::Int(0x8000_0000_u32 as i32), Value::Int(1)];
         call_graph(&mut api, 0x91, 0x9a, &mut text_property).unwrap();
+        // Wonderful Everyday's boot script sets 0x80000004: ignored.
+        let mut unknown_property = vec![Value::Int(0x8000_0004_u32 as i32), Value::Int(1)];
+        call_graph(&mut api, 0x91, 0x9a, &mut unknown_property).unwrap();
+        assert!(!api.graph_config.text_global_properties.contains_key(&0x8000_0004));
 
         assert!(api.graph_surfaces[&surface].isolated_group);
         assert_eq!(api.graph_surfaces[&surface].line_spacing_percent, 50);
