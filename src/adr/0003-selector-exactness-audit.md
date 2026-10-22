@@ -330,3 +330,38 @@ file layer (80:3A, 80:F0..FC, 81:28..3E, 81:F2/F7, 90:C4/C5, 92:1F) and the
 VM model (80:20/21/40/41/44/60/70/71, 81:44/6A/6B, 92:14/15/F1).
 Next: the kernel pass (port each kernel, compare against the target under
 Unicorn), then ADR 0004, then the VM.
+
+Kernel pass (2026-10-22): 90:0C, 90:CD, 91:18, 91:19, 91:1A..1E verified;
+90:CE format 0 done. Every kernel is a literal port in
+`crates/ethornell-app/src/bitmap_kernels.rs` (CBG v1 in
+`crates/ethornell-image/src/cbg_encode.rs`), checked byte for byte by the
+ignored test `bitmap_kernels::tests::kernels_match_the_target_vectors`
+against vectors from `src/tools/emu_kernels.py` (the 1.622 code under
+Unicorn; ~600 vectors, kinds 1..9 documented in the script). Notes:
+
+* The emulation sets the x87 control word to the Windows default 0x27F
+  (53-bit precision) before the rotate-zoom walk (sub_4169D0); sin/cos then
+  agree with Rust's f64. Tables the CRT start-up fills (qword_50B0F0,
+  qword_50B900, dword_50A8D0 from sub_407760) are written by the script;
+  operator new/delete and GetTickCount are hooked.
+* The target splits large destinations over its worker threads
+  (sub_41A120: bands when w*h >= 0xA00 and the pool has >= 2 threads; the
+  band count depends on the host CPU). The ports run the single-band path.
+* `rcpps` (sub_40B330 / sub_40BD00) is modelled as the exact reciprocal, as
+  Unicorn computes it; real CPUs approximate it to 12 bits, per vendor.
+* sub_469B70 (CBG v1 zero runs) reads one byte past its input; taken as 0.
+* Found on the way: 1.622's format-2 alpha blits (mode 0 2->1 sub_40B1B0,
+  2->2 sub_40B330, mode 1 2->2 sub_40BD00) work on pixel pairs: a pair is
+  skipped when both alphas are 0 and copied raw when both are 255 (2->2) or
+  >= 254 (2->1); otherwise both pixels take the SSE path, the odd last
+  pixel the scalar one. `bitmap_blend.rs` now follows this (it had the
+  older engine's per-pixel kernels). 90:CD's tone-curve tables are indexed
+  by BGRA lane (the old `RuntimeColorLut::apply` used RGBA and is gone).
+* 90:0C: windows (0xB000000x) draw their own buffer only after 90:0C(1, t)
+  (dword_565B54 starts at 0); senmomo calls 90:0C(1, 0) at boot.
+
+Left in the kernel pass: 90:CE format 1 (sub_4A1930, the CompressedBG v2
+DCT encoder: float YCbCr tables sub_49BBB0, quality tables sub_49BE00,
+strips through the worker pool sub_49D730/sub_49D320, Huffman sub_4A0ED0..).
+Then ADR 0004 (file layer), then the VM value model (needs the user's
+decision, see above).
