@@ -1109,7 +1109,7 @@ impl RuntimeTraceApi {
                 let count = if id == 0x9c { 14 } else { 15 };
                 let args = pop_args(stack, count);
                 match self.graph91_draw_text(&args, usize::from(id == 0x9d)) {
-                    Ok(lines) => ethornell_vm::Value::Int(lines),
+                    Ok(end_x) => ethornell_vm::Value::Int(end_x),
                     Err(error) => return Some(Err(error)),
                 }
             }
@@ -1614,6 +1614,13 @@ impl RuntimeTraceApi {
             }
             0x46 => {
                 let args = Self::graph91_source_ints(stack, 4);
+                // sub_482C60 checks the bitmap number first (sub_4986D0,
+                // unsigned < 0x4000), so -1 is fatal here.
+                if let Some(&bitmap) = args.get(1)
+                    && let Err(error) = target_checks::bitmap(bitmap)
+                {
+                    return Some(Err(error));
+                }
                 if let [layer, bitmap, source_x, source_y] = args.as_slice() {
                     self.graph91_set_multilayer_bitmap(*layer, *bitmap, *source_x, *source_y);
                 }

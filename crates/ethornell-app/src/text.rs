@@ -451,7 +451,8 @@ impl RuntimeTraceApi {
             (packed_color & 0xff) as f32 / 255.0,
             1.0,
         ];
-        let lines = match text.as_deref().filter(|text| !text.is_empty()) {
+        // sub_403B10 advances the X it was handed; sub_485530 returns it.
+        let end_x = match text.as_deref().filter(|text| !text.is_empty()) {
             Some(text) => self
                 .draw_wrapped_bitmap_text(
                     target,
@@ -465,11 +466,11 @@ impl RuntimeTraceApi {
                     color,
                     None,
                 )
-                .map_or(1, |(lines, _)| lines),
-            None => 1,
+                .map_or(x, |(_, (end_x, _))| end_x),
+            None => x,
         };
-        tracing::info!(target, text = ?text, size, kinsoku = at(2) != 0, pitch_percent = at(1), lines, "GraphDrawTextEx");
-        Ok(lines)
+        tracing::info!(target, text = ?text, size, kinsoku = at(2) != 0, pitch_percent = at(1), end_x, "GraphDrawTextEx");
+        Ok(end_x)
     }
 
     pub(crate) fn store_bitmap_text_run(&mut self, bitmap: i32, node: RuntimeTextNode) {

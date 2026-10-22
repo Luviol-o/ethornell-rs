@@ -260,10 +260,10 @@ selector,handler,symbol,status
 90:0B,47A100,Graph90_0B_SetCurrentBitmap,verified
 90:0C,47A120,Graph90_0C_SetDisplayOptions,verified
 90:0D,47A160,Graph90_0D_SetRasterFormatMode,verified
-90:0E,47A1C0,Graph90_0E_RegisterFont,todo
+90:0E,47A1C0,Graph90_0E_RegisterFont,verified
 90:0F,47A2C0,Graph90_0F_SetBitmapUnblendColor,verified
 90:10,47A2E0,Graph90_10_LoadBitmap,verified
-90:11,47A4B0,Graph90_11_CreateBitmap,todo
+90:11,47A4B0,Graph90_11_CreateBitmap,verified
 90:12,47A550,Graph90_12_ReleaseBitmap,verified
 90:13,47A580,Graph90_13_FillBitmap,verified
 90:14,47A5C0,Graph90_14_CreateBitmapFromPixels,verified
@@ -468,7 +468,7 @@ selector,handler,symbol,status
 91:43,482AB0,Graph91_43_SetMultiLayerPosition,verified
 91:44,482B40,Graph91_44_SetMultiLayerBlendMode,verified
 91:45,482BD0,Graph91_45_SetMultiLayerBlendParameter,verified
-91:46,482C60,Graph91_46_SetMultiLayerBitmap,todo
+91:46,482C60,Graph91_46_SetMultiLayerBitmap,verified
 91:47,482D30,Graph91_47_SetMultiLayerTransform,verified
 91:48,482E10,Graph91_48_SetMultiLayerAuxiliaryPair,verified
 91:49,482EA0,Graph91_49_SetMultiLayerSourceVelocity,verified
@@ -515,8 +515,8 @@ selector,handler,symbol,status
 91:99,4853E0,Graph91_99_SetTextScaleDivisor,verified
 91:9A,485410,Graph91_9A_SetTextGlobalProperty,verified
 91:9B,4854B0,Graph91_9B_MeasureText,verified
-91:9C,485530,Graph91_9C_DrawText,todo
-91:9D,485740,Graph91_9D_DrawTextWithStyleMode,todo
+91:9C,485530,Graph91_9C_DrawText,verified
+91:9D,485740,Graph91_9D_DrawTextWithStyleMode,verified
 91:9E,485990,Graph91_9E_ExtractTextLabels,verified
 91:9F,4859C0,Graph91_9F_StripTextMarkup,verified
 91:B8,4859F0,Graph91_B8_CreateExtendedIconInputProcessor,verified

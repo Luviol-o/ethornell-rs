@@ -24266,9 +24266,13 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                 // error. Handle 0 is an ordinary slot.
                 target_checks::bitmap(bitmap_id)?;
                 let format_id = if format_id == 7 { 1 } else { format_id };
+                // sub_407D90 fails for a format above 7 or when the pixel
+                // buffer cannot be allocated (negative sizes); sub_47A4B0
+                // reports both with the format value.
                 if !(0..=6).contains(&format_id) || width < 0 || height < 0 {
                     return Err(ethornell_vm::VmError::Runtime(format!(
-                        "Graph90:11 cannot create bitmap {bitmap_id} ({width}x{height}, format {format_id})"
+                        "無効なピクセルモード [ {} ] が指定されています",
+                        format.as_ref().map(value_to_i32).unwrap_or_default()
                     )));
                 }
                 {
@@ -25538,8 +25542,8 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                 // sub_47A1C0 -> sub_462340 -> sub_42F340: pops cache count,
                 // italic, width %, height, face id. Unknown face, height
                 // outside 4..=200, width outside 25..=200 or a cache count
-                // below 2 are fatal (the width message prints the italic
-                // value, as the target does).
+                // below 2 are fatal; each message prints the checked value
+                // (the width one pushes ebx, the third pop).
                 let font_id = pop_int_value(stack).unwrap_or_default();
                 let italic_value = pop_int_value(stack).unwrap_or_default();
                 let weight_percent = pop_int_value(stack).unwrap_or_default();
@@ -25553,7 +25557,7 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                     return fatal(format!("無効なフォントサイズ [ {height} ] が指定されました"));
                 }
                 if (weight_percent - 25) as u32 > 0xAF {
-                    return fatal(format!("無効なフォント幅 [ {italic_value} ] が指定されました"));
+                    return fatal(format!("無効なフォント幅 [ {weight_percent} ] が指定されました"));
                 }
                 if font_id < 2 {
                     return fatal(format!("無効なキャッシュ量 [ {font_id} ] が指定されました"));
