@@ -16542,7 +16542,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_CREATE_KNOB_PARAMETERS,
         returns: "0xF0000000 tagged knob handle",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_463400/sub_442100 resolve any valid target CDspObj and allocate one of 32 CDspObjKnob slots; the target may already belong to a member chain and multiple Knobs may reference it. sub_420EC0 stores only a raw target pointer at Knob+0x134, copies target mask-alpha/transparency/priority, queries the target rectangle through vtable+0x20 and initializes the Knob range to that exact width/height through sub_421200, inherits the target raw vtable+0x30 position, and aligns the target through sub_421430. The target is not a Knob member. sub_4636A0 inserts the Knob into priority order; vtable+0x1C/sub_421090 delegates the live sort key to the controlled target.",
+        notes: "BGI 1.622 sub_480620 -> sub_4424C0: a target with an owner (+0x130), 32 knobs, unknown target, virtual target class are fatal; the knob starts at the target's base position with its size as range.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_RELEASE_KNOB_OBJECT,
@@ -16550,7 +16550,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_KNOB_HANDLE_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Removes watch/order records and releases the tagged CDspObjKnob slot.",
+        notes: "sub_4806A0: unwatches, releases; unknown knob fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_SET_KNOB_ENABLED,
@@ -16558,7 +16558,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_KNOB_ENABLED_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_4422B0 reaches CDspObjKnob vtable+4/sub_4210E0. It changes draw visibility and forwards the identical value to the controlled display object; this is not the separate CDspObj enabled field.",
+        notes: "sub_4806E0 -> sub_4639C0: draw enable (vtable+4); unknown knob fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_SET_KNOB_BASE_POSITION,
@@ -16566,7 +16566,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_KNOB_PAIR_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_442320 invokes Knob vtable+0x2C/sub_421110 -> sub_41B1B0; virtual +0x28 dispatch then enters sub_421120, updating the Knob base and moving the controlled target through the target position virtual to base plus the current logical slider offset.",
+        notes: "sub_480720 -> sub_4639D0: base position; unknown knob fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_SET_KNOB_POSITION,
@@ -16574,7 +16574,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_KNOB_PAIR_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_421430 validates logical coordinates, applies the 16.16 precision/range mapping, reads the Knob raw base through vtable+0x30, and invokes the controlled target vtable+0x2C at base plus the pixel offset. The target native display-object state must be updated, not just renderer layer coordinates.",
+        notes: "sub_480770 -> sub_4639E0: logical position; unknown knob fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_GET_KNOB_POSITION,
@@ -16582,7 +16582,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_KNOB_HANDLE_PARAMETERS,
         returns: "two i32 values",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_421500 returns CDspObjKnob+312/+316.",
+        notes: "sub_4807C0 -> sub_4639F0: pushes x and y; unknown knob fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_SET_KNOB_MOVEMENT_PRECISION,
@@ -16590,7 +16590,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_KNOB_PAIR_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_4211E0 rejects negative X/Y precision and stores +332/+336.",
+        notes: "sub_480810 -> sub_463A10: movement precision; unknown knob (-1), invalid precision (4) fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_SET_KNOB_MOVEMENT_RANGE,
@@ -16598,7 +16598,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_KNOB_PAIR_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_421200 requires a range at least as large as the controlled target and stores inclusive maxima.",
+        notes: "sub_4808A0 -> sub_463A50: movement range; unknown knob (-1), invalid range (5) fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_TAKE_KNOB_VERTICAL_EVENT,
@@ -16606,7 +16606,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_KNOB_HANDLE_PARAMETERS,
         returns: "i32 event delta",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_442490 calls sub_421570 and clears all four event fields. Mouse-wheel sub_421520 records dy=+/-1 on every watched step and marks event-kind nonzero only when sub_421430 rejects the step at a range boundary, so DA returns only the unconsumed boundary delta.",
+        notes: "sub_480930 -> sub_463A00: takes the vertical event; unknown knob fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_TAKE_CHANGED_KNOB_HANDLE,
@@ -16614,7 +16614,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: NO_PARAMETERS,
         returns: "knob handle or zero",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_463970 scans the ordered knob records, clears changed flags and returns the last user-moved handle; drag movement through sub_421300 marks the manager record changed.",
+        notes: "sub_480970 -> sub_463ED0: the changed knob handle.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_SET_KNOB_RELATIVE_MODE,
@@ -16622,7 +16622,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_KNOB_MODE_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_421290 stores the relative pointer-offset mode at CDspObjKnob+320.",
+        notes: "sub_480990: relative mode; unknown knob fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_SWAP_KNOB_INPUT_MODE,
@@ -16630,7 +16630,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_SWAP_KNOB_INPUT_MODE_PARAMETERS,
         returns: "previous i32 mode",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Reads dword_507204, stores the new value and returns the previous process-global mode.",
+        notes: "sub_4809D0 -> sub_463DA0: swaps the knob input mode, old value pushed.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_WATCH_KNOB_OBJECT,
@@ -16638,7 +16638,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_KNOB_HANDLE_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_4638E0 resolves the Knob and prepends a new watch node without deduplicating. WM_MOUSEWHEEL sub_463920 uses the first watch node, maps positive wheel delta to logical -1 and negative delta to +1, and calls sub_421520.",
+        notes: "sub_480A00 -> sub_463E40: watch list (prepend); unknown knob fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_UNWATCH_KNOB_OBJECT,
@@ -16646,7 +16646,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_KNOB_HANDLE_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_463890 removes only the first watch-list node whose resolved Knob pointer matches, so duplicate registrations require matching removals.",
+        notes: "sub_480A30 -> sub_463DF0: unwatch; a knob not watched is fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_CREATE_GROUP_OBJECT,
@@ -16654,7 +16654,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: NO_PARAMETERS,
         returns: "0xF1000000 tagged group handle",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_442560 allocates one of eight CDspObjGroup slots. sub_420DE0 uses CDspObj sort_class=9 (base manager-key generation clamps it to 7) and a separate monotonic Group construction index at CDspObj+0x20 rather than the reusable group handle slot.",
+        notes: "sub_480A60 -> sub_463AA0: group slot; none left is fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_RELEASE_GROUP_OBJECT,
@@ -16662,7 +16662,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_GROUP_HANDLE_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_442650 releases the tagged CDspObjGroup and its member records.",
+        notes: "sub_480A90 -> sub_463AB0: release, members detached; unknown group fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_SET_GROUP_ENABLED,
@@ -16670,7 +16670,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_GROUP_ENABLED_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_4426A0 invokes group vtable+0x04; CDspObj::sub_41AE00 writes +0x14 draw_enabled and recursively calls the same virtual on current member records. This is distinct from the base +0x04 object-enabled field.",
+        notes: "sub_480AC0 -> sub_463AC0: draw enable through members; unknown group fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_CONFIGURE_GROUP_OBJECT,
@@ -16678,7 +16678,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_CONFIGURE_GROUP_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_442710 calls group vtable+0x2C SetPosition(x,y), then vtable+0x48 SetAlpha(alpha_parameter). The fourth ABI value is transparency, not priority; both setters propagate through the group member list according to the CDspObj base semantics.",
+        notes: "sub_480B00 -> sub_442AD0: transparency check, position and alpha through members; unknown group fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_ADD_OBJECT_TO_GROUP,
@@ -16686,7 +16686,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_ADD_GROUP_OBJECT_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_442780 rejects invalid/self/already-owned objects. sub_41AB40 records local offsets, samples the parent's live composite position through vtable+0x30/sub_41B260, and calls the child's vtable+0x28 position setter with parent+local coordinates; that setter may recursively materialize the new resolved position into existing child members.",
+        notes: "sub_480B70 -> sub_463AF0: group, object, itself, existing owner are fatal; local offset kept.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_REMOVE_OBJECT_FROM_GROUP,
@@ -16694,7 +16694,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_REMOVE_GROUP_OBJECT_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_4427F0 requires an existing membership and removes it through sub_41AC40.",
+        notes: "sub_480C00 -> sub_463B60: group, object, not a member are fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_OPEN_DIRECTSHOW_MOVIE,
@@ -20114,6 +20114,10 @@ const PORTABLE_EQUIVALENT_OPCODES: &[NativeOpcode] = &[
     opcodes::GRAPH90_LOAD_CACHED_BG_BITMAP,
     opcodes::GRAPH90_TRANSFORM_BITMAP_GENERAL,
     opcodes::GRAPH90_SCALE_BITMAP_ASPECT_FIT,
+    opcodes::GRAPH90_TAKE_KNOB_VERTICAL_EVENT,
+    opcodes::GRAPH90_TAKE_CHANGED_KNOB_HANDLE,
+    opcodes::GRAPH90_WATCH_KNOB_OBJECT,
+    opcodes::GRAPH90_UNWATCH_KNOB_OBJECT,
 ];
 
 const PARTIAL_IMPLEMENTATION_OPCODES: &[NativeOpcode] = &[
@@ -20225,10 +20229,6 @@ const PARTIAL_IMPLEMENTATION_OPCODES: &[NativeOpcode] = &[
     opcodes::GRAPH90_SAVE_BITMAP_TO_IMAGE_FILE,
     opcodes::GRAPH90_APPLY_TONE_CURVE_EFFECT,
     opcodes::GRAPH90_ENCODE_BITMAP_TO_BUFFER,
-    opcodes::GRAPH90_TAKE_KNOB_VERTICAL_EVENT,
-    opcodes::GRAPH90_TAKE_CHANGED_KNOB_HANDLE,
-    opcodes::GRAPH90_WATCH_KNOB_OBJECT,
-    opcodes::GRAPH90_UNWATCH_KNOB_OBJECT,
     opcodes::GRAPH90_OPEN_DIRECTSHOW_MOVIE,
     opcodes::GRAPH90_LOAD_BURIKO_MOVIE_RESOURCE,
     opcodes::GRAPH90_DECODE_BURIKO_MOVIE_FRAME,

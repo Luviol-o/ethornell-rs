@@ -13639,7 +13639,7 @@ mod input_tests {
     }
 
     #[test]
-    fn knob_target_can_keep_a_real_native_owner_and_multiple_knobs_may_reference_it() {
+    fn knob_target_must_not_have_an_owner_and_multiple_knobs_may_reference_it() {
         let manager =
             ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
         let mut api = super::RuntimeTraceApi::new(manager);
@@ -13672,6 +13672,11 @@ mod input_tests {
         );
         api.graph_native_owners.insert(target, real_parent);
 
+        // sub_480620 -> sub_443FA0: a target with an owner (+0x130) is fatal.
+        let mut create = vec![Value::Int(target)];
+        let error = call_graph(&mut api, 0x90, 0xd0, &mut create).unwrap_err();
+        assert!(error.to_string().contains("オーナーが存在します"));
+        api.graph_native_owners.remove(&target);
         let mut first_create = vec![Value::Int(target)];
         let first = match call_graph(&mut api, 0x90, 0xd0, &mut first_create).unwrap() {
             Value::Int(handle) => handle,
@@ -13685,7 +13690,6 @@ mod input_tests {
         assert_ne!(first, 0);
         assert_ne!(second, 0);
         assert_ne!(first, second);
-        assert_eq!(api.graph_native_owners.get(&target), Some(&real_parent));
     }
 
     #[test]
@@ -24557,6 +24561,25 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
             }
             (0x90, 0xd0) => {
                 let target = pop_int_value(stack).unwrap_or_default();
+                // sub_480620: a target with an owner (sub_443FA0) is fatal;
+                // sub_4424C0: 32 knobs at most (1), unknown target (2), a
+                // virtual target class >= 8 (3) are fatal.
+                let fatal = |message: &str| Err(ethornell_vm::VmError::Runtime(message.into()));
+                if self.graph_native_owners.contains_key(&target) {
+                    return fatal("指定されたオブジェクトにはオーナーが存在します");
+                }
+                if self.graph_knob_states.len() >= 32 {
+                    return fatal("これ以上、ノブオブジェクトを生成する事は出来ません");
+                }
+                if !self.graph_handle_exists(target) {
+                    return fatal("無効なターゲットハンドルが指定されました");
+                }
+                if matches!(
+                    self.display_tree.kind(target),
+                    Some(NativeDisplayKind::Knob | NativeDisplayKind::Group)
+                ) {
+                    return fatal("仮想オブジェクトはターゲットに指定できません");
+                }
                 // Target sub_442100 only resolves the supplied CDspObj and
                 // allocates a Knob slot. It does not require the target to be
                 // unparented and does not claim it as a member child.
@@ -24653,6 +24676,10 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
             (0x90, 0xd1) => {
                 let handle = pop_int_value(stack).unwrap_or_default();
                 let removed = self.graph_knob_states.remove(&handle);
+                // sub_4806A0: an unknown knob is fatal.
+                if removed.is_none() {
+                    return Err(ethornell_vm::VmError::Runtime("無効なノブハンドルが指定されました".into()));
+                }
                 if removed.is_some() {
                     self.unregister_pointer_object_node(handle);
                 }
@@ -24678,6 +24705,9 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
             (0x90, 0xd4) => {
                 let enabled = pop_int_value(stack).unwrap_or_default() != 0;
                 let handle = pop_int_value(stack).unwrap_or_default();
+                if !self.graph_knob_states.contains_key(&handle) {
+                    return Err(ethornell_vm::VmError::Runtime("無効なノブハンドルが指定されました".into()));
+                }
                 let valid = self.graph_knob_states.contains_key(&handle);
                 if valid {
                     // Selector D4 reaches CDspObjKnob vtable+4 (sub_4210E0),
@@ -24691,6 +24721,9 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                 let y = pop_int_value(stack).unwrap_or_default();
                 let x = pop_int_value(stack).unwrap_or_default();
                 let handle = pop_int_value(stack).unwrap_or_default();
+                if !self.graph_knob_states.contains_key(&handle) {
+                    return Err(ethornell_vm::VmError::Runtime("無効なノブハンドルが指定されました".into()));
+                }
                 let updated = if let Some(state) = self.graph_knob_states.get_mut(&handle) {
                     // Graph90:D5 -> sub_442320 -> Knob vtable+0x2C
                     // (sub_421110) -> sub_41B1B0 -> virtual vtable+0x28.
@@ -24728,6 +24761,9 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                 let y = pop_int_value(stack).unwrap_or_default();
                 let x = pop_int_value(stack).unwrap_or_default();
                 let handle = pop_int_value(stack).unwrap_or_default();
+                if !self.graph_knob_states.contains_key(&handle) {
+                    return Err(ethornell_vm::VmError::Runtime("無効なノブハンドルが指定されました".into()));
+                }
                 let dimensions = self
                     .graph_knob_states
                     .get(&handle)
@@ -24759,6 +24795,9 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
             }
             (0x90, 0xd7) => {
                 let handle = pop_int_value(stack).unwrap_or_default();
+                if !self.graph_knob_states.contains_key(&handle) {
+                    return Err(ethornell_vm::VmError::Runtime("無効なノブハンドルが指定されました".into()));
+                }
                 let (x, y) = self
                     .graph_knob_states
                     .get(&handle)
@@ -24772,11 +24811,21 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                 let precision_y = pop_int_value(stack).unwrap_or_default();
                 let precision_x = pop_int_value(stack).unwrap_or_default();
                 let handle = pop_int_value(stack).unwrap_or_default();
+                // sub_480810 -> sub_463A10: unknown knob (-1), invalid
+                // precision (4).
+                if !self.graph_knob_states.contains_key(&handle) {
+                    return Err(ethornell_vm::VmError::Runtime("無効なノブハンドルが指定されました".into()));
+                }
                 let accepted = self
                     .graph_knob_states
                     .get_mut(&handle)
                     .map(|state| state.set_extent(precision_x, precision_y))
                     .unwrap_or(false);
+                if !accepted {
+                    return Err(ethornell_vm::VmError::Runtime(format!(
+                        "無効な移動精度 [ {precision_x} , {precision_y} ] が指定されました"
+                    )));
+                }
                 tracing::debug!(
                     handle,
                     precision_x,
@@ -24789,6 +24838,11 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                 let range_height = pop_int_value(stack).unwrap_or_default();
                 let range_width = pop_int_value(stack).unwrap_or_default();
                 let handle = pop_int_value(stack).unwrap_or_default();
+                // sub_4808A0 -> sub_463A50: unknown knob (-1), invalid
+                // range (5).
+                if !self.graph_knob_states.contains_key(&handle) {
+                    return Err(ethornell_vm::VmError::Runtime("無効なノブハンドルが指定されました".into()));
+                }
                 let dimensions = self
                     .graph_knob_states
                     .get(&handle)
@@ -24801,6 +24855,11 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                         state.set_bounds(range_width, range_height, dimensions.0, dimensions.1)
                     })
                     .unwrap_or(false);
+                if !accepted {
+                    return Err(ethornell_vm::VmError::Runtime(format!(
+                        "無効な可動範囲 [ {range_width} , {range_height} ] が指定されました"
+                    )));
+                }
                 if accepted {
                     self.apply_graph_knob_position(handle);
                 }
@@ -24814,6 +24873,9 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
             }
             (0x90, 0xda) => {
                 let handle = pop_int_value(stack).unwrap_or_default();
+                if !self.graph_knob_states.contains_key(&handle) {
+                    return Err(ethornell_vm::VmError::Runtime("無効なノブハンドルが指定されました".into()));
+                }
                 let value = self
                     .graph_knob_states
                     .get_mut(&handle)
@@ -24835,6 +24897,9 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
             (0x90, 0xdc) => {
                 let relative_mode = pop_int_value(stack).unwrap_or_default();
                 let handle = pop_int_value(stack).unwrap_or_default();
+                if !self.graph_knob_states.contains_key(&handle) {
+                    return Err(ethornell_vm::VmError::Runtime("無効なノブハンドルが指定されました".into()));
+                }
                 let valid = self
                     .graph_knob_states
                     .get_mut(&handle)
@@ -24852,6 +24917,9 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
             }
             (0x90, 0xde) => {
                 let handle = pop_int_value(stack).unwrap_or_default();
+                if !self.graph_knob_states.contains_key(&handle) {
+                    return Err(ethornell_vm::VmError::Runtime("無効なノブハンドルが指定されました".into()));
+                }
                 let watched = if self.graph_knob_states.contains_key(&handle) {
                     // sub_4638E0 allocates a new 8-byte list node and prepends
                     // it unconditionally. Preserve order and duplicates: the
@@ -24871,6 +24939,10 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                     .position(|watched| *watched == handle)
                     .and_then(|index| self.graph_knob_watches.remove(index))
                     .is_some();
+                // sub_480A30 -> sub_463DF0: not watched is fatal.
+                if !removed {
+                    return Err(ethornell_vm::VmError::Runtime("無効なノブハンドルが指定されました".into()));
+                }
                 tracing::debug!(handle, removed, "GraphUnwatchKnobObject");
             }
             (0x90, 0xbc) => {
@@ -25007,12 +25079,17 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                         }
                     })
                     .unwrap_or_default();
-                tracing::info!(handle, "GraphCreateGroupObject");
+                if handle == 0 {
+                    return Err(ethornell_vm::VmError::Runtime("これ以上、グループオブジェクトを生成する事は出来ません".into()));
+                }
                 return Ok(ethornell_vm::Value::Int(handle));
             }
             (0x90, 0xe1) => {
                 let handle = pop_int_value(stack).unwrap_or_default();
                 let removed = self.graph_groups.remove(&handle);
+                if removed.is_none() {
+                    return Err(ethornell_vm::VmError::Runtime("無効なグループハンドルが指定されました".into()));
+                }
                 if let Some(group) = removed.as_ref() {
                     for &object in group.members.keys() {
                         if self.graph_native_owners.get(&object) == Some(&handle) {
@@ -25039,6 +25116,9 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                     group.draw_enabled = enabled;
                     true
                 });
+                if !valid {
+                    return Err(ethornell_vm::VmError::Runtime("無効なグループハンドルが指定されました".into()));
+                }
                 if valid {
                     // Current target sub_4426A0 calls group vtable+4;
                     // CDspObj::sub_41AE00 writes +0x14 and recursively invokes
@@ -25055,6 +25135,10 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                 let y = pop_int_value(stack).unwrap_or_default();
                 let x = pop_int_value(stack).unwrap_or_default();
                 let handle = pop_int_value(stack).unwrap_or_default();
+                target_checks::effect_level(alpha_parameter)?;
+                if !self.graph_groups.contains_key(&handle) {
+                    return Err(ethornell_vm::VmError::Runtime("無効なグループハンドルが指定されました".into()));
+                }
                 let valid = self.graph_groups.get_mut(&handle).is_some_and(|group| {
                     group.x = x;
                     group.y = y;
@@ -25081,10 +25165,21 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                 let local_x = pop_int_value(stack).unwrap_or_default();
                 let object = pop_int_value(stack).unwrap_or_default();
                 let handle = pop_int_value(stack).unwrap_or_default();
-                let valid = self.graph_groups.contains_key(&handle)
-                    && object != handle
-                    && self.graph_handle_exists(object)
-                    && !self.graph_native_owners.contains_key(&object);
+                // sub_480B70 -> sub_463AF0: group (-1), object (1), itself
+                // (3), an owner already set (4) are fatal.
+                if !self.graph_groups.contains_key(&handle) {
+                    return Err(ethornell_vm::VmError::Runtime("無効なグループハンドルが指定されました".into()));
+                }
+                if !self.graph_handle_exists(object) {
+                    return Err(ethornell_vm::VmError::Runtime("無効なオブジェクトハンドルが指定されました".into()));
+                }
+                if object == handle {
+                    return Err(ethornell_vm::VmError::Runtime("自分自身をグループに登録することはできません".into()));
+                }
+                if self.graph_native_owners.contains_key(&object) {
+                    return Err(ethornell_vm::VmError::Runtime("指定されたオブジェクトにはオーナーが存在します".into()));
+                }
+                let valid = true;
                 if valid {
                     // sub_41AB40 samples the parent's live composite
                     // position (vtable+0x30/sub_41B260), not a constructor or
@@ -25129,6 +25224,17 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
             (0x90, 0xe9) => {
                 let object = pop_int_value(stack).unwrap_or_default();
                 let handle = pop_int_value(stack).unwrap_or_default();
+                // sub_480C00 -> sub_463B60: group (-1), object (1), not a
+                // member (2) are fatal.
+                if !self.graph_groups.contains_key(&handle) {
+                    return Err(ethornell_vm::VmError::Runtime("無効なグループハンドルが指定されました".into()));
+                }
+                if !self.graph_handle_exists(object) {
+                    return Err(ethornell_vm::VmError::Runtime("無効なオブジェクトハンドルが指定されました".into()));
+                }
+                if !self.graph_groups[&handle].members.contains_key(&object) {
+                    return Err(ethornell_vm::VmError::Runtime("指定されたオブジェクトはグループに登録されていません".into()));
+                }
                 let removed = self
                     .graph_groups
                     .get_mut(&handle)
