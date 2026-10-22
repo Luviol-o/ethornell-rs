@@ -1004,6 +1004,16 @@ impl RuntimeTraceApi {
         }
     }
 
+    /// What Graph92:8E (`sub_440F80`) and a page feed (`sub_433890`) both do
+    /// to a window: `sub_42B9B0` clears its text bitmap, which holds the text
+    /// Graph92:91 drew into it as well as the messages', and `sub_42C5B0`
+    /// sends its text cursor home.
+    pub(crate) fn clear_window_text(&mut self, window: i32) {
+        self.reset_window_text_cursor(window);
+        self.clear_bitmap_text(window);
+        self.surface_text_buffers.insert(window, String::new());
+    }
+
     /// Lay out a message drawn on `window` after the text its page already
     /// holds. Returns the layout state (the page's origin), the page's whole
     /// wrapped text and how many of its characters were already drawn. The
@@ -1015,7 +1025,7 @@ impl RuntimeTraceApi {
     ) -> (TextState, ParsedMessageMarkup, usize) {
         let text = match text.rfind('\x0c') {
             Some(page_feed) => {
-                self.reset_window_text_cursor(window);
+                self.clear_window_text(window);
                 &text[page_feed + 1..]
             }
             None => text,
