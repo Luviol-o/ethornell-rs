@@ -323,3 +323,10 @@ Compatibility kept on purpose: 92:89/8D/90/91 with a handle that is not a
 CDspObjWindow keep the older engines' bitmap behaviour (Wonderful
 Everyday's scrmsg._bp); 1.622 itself raises "無効なウィンドウハンドル".
 
+Status 2026-10-22 (after 0x91/92/A0/B0/C0/D0): every selector is verified
+except the renderer kernels (90:0C, 90:CD, 90:CE, 91:18..1E — their checks,
+texts and argument order are done) and the deferred ones: the ADR 0004
+file layer (80:3A, 80:F0..FC, 81:28..3E, 81:F2/F7, 90:C4/C5, 92:1F) and the
+VM model (80:20/21/40/41/44/60/70/71, 81:44/6A/6B, 92:14/15/F1).
+Next: the kernel pass (port each kernel, compare against the target under
+Unicorn), then ADR 0004, then the VM.
