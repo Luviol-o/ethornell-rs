@@ -172,6 +172,17 @@ impl RuntimeTraceApi {
         {
             return None;
         }
+        // The pyramid belongs to the bitmaps it was built from. A Graph90:5C
+        // that changes the primary reprojects once with the old bitmap (from
+        // the common-state setters) before the new one is recorded; the new
+        // binding replaces that pyramid instead of failing against it.
+        if self
+            .native_projection_mips
+            .get(&object)
+            .is_some_and(|cache| cache.bindings.iter().map(|b| b.0).ne(ids.iter().copied()))
+        {
+            self.native_projection_mips.remove(&object);
+        }
         if !self.native_projection_mips.contains_key(&object) {
             let bindings = ids
                 .iter()
