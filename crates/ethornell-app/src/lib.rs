@@ -16192,6 +16192,132 @@ mod input_tests {
     }
 
     #[test]
+    fn a_program_hands_graph92_1b_exactly_its_three_arguments() {
+        // logwnd._bp calls 92:1B(B, X, 1) once per entry; through the VM the
+        // call must receive all three arguments (it was a stub without an
+        // arity, which got none).
+        let instruction = |offset: u64, name: &'static str, raw: Vec<u8>, operands| BpInstruction {
+            offset,
+            opcode: BpOpcode::Known { code: raw[0], name },
+            opcode_hex: format!("0x{:02X}", raw[0]),
+            opcode_name: name.into(),
+            operands,
+            known_call: None,
+            raw,
+            warning: None,
+        };
+        let push = |offset: u64, value: u32| {
+            instruction(
+                offset,
+                "push_dword",
+                [vec![0x02], value.to_le_bytes().to_vec()].concat(),
+                vec![BpOperand::U32(value)],
+            )
+        };
+        let manager =
+            ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let mut api = super::RuntimeTraceApi::new(manager);
+        let (text, halo) = (1429, 1431);
+        let mut glyph = DecodedImage {
+            width: 5,
+            height: 5,
+            rgba: vec![0; 5 * 5 * 4],
+        };
+        glyph.rgba[(2 * 5 + 2) * 4..][..4].copy_from_slice(&[0, 0, 0, 255]);
+        api.store_runtime_bitmap(text, glyph, 2);
+        let program = BpProgram {
+            script_name: Some("outline-halo".into()),
+            functions: Vec::new(),
+            strings: Vec::new(),
+            instructions: std::sync::Arc::new(vec![
+                push(0x10, halo as u32),
+                push(0x15, text as u32),
+                push(0x1A, 1),
+                instruction(0x1F, "grp3", vec![0x92, 0x1B], Vec::new()),
+                instruction(0x21, "push_byte", vec![0x00, 2], vec![BpOperand::U8(2)]),
+            ]),
+            labels: std::sync::Arc::new(std::collections::HashMap::new()),
+            warnings: Vec::new(),
+            module_size: 0,
+            code: std::sync::Arc::new(Vec::new()),
+        };
+        let mut vm = ethornell_vm::Vm::new();
+        vm.start(&program);
+        let mut runtime = super::RuntimeEngine {
+            vm,
+            api,
+            options: ethornell_vm::VmRunOptions::default(),
+            last_report: None,
+        };
+        runtime.run_frame(super::RuntimeFramePacing, 16, 16);
+
+        let image = runtime.api.graph_bitmap_image(halo).unwrap();
+        assert_eq!((image.width, image.height), (21, 21));
+        assert_eq!(image.rgba[(9 * 21 + 10) * 4..][..4], [255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn graph92_1b_outlines_log_text_in_white_around_its_glyphs() {
+        // logwnd._bp: 92:1B(B, X, 1), then B blended over X at (-8, -8) with
+        // transparency 64 (90:18 mode 1). The stub drew nothing.
+        let manager =
+            ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let mut api = super::RuntimeTraceApi::new(manager);
+        let (text, halo) = (1429, 1431);
+        let mut glyph = DecodedImage {
+            width: 5,
+            height: 5,
+            rgba: vec![0; 5 * 5 * 4],
+        };
+        glyph.rgba[(2 * 5 + 2) * 4..][..4].copy_from_slice(&[0, 0, 0, 255]);
+        api.store_runtime_bitmap(text, glyph.clone(), 2);
+        let mut stack = vec![Value::Int(halo), Value::Int(text), Value::Int(1)];
+        call_graph(&mut api, 0x92, 0x1b, &mut stack).unwrap();
+        assert!(stack.is_empty());
+        let image = api.graph_bitmap_image(halo).unwrap();
+        assert_eq!((image.width, image.height), (21, 21));
+        let pixel = |x: u32, y: u32| image.rgba[((y * 21 + x) * 4) as usize..][..4].to_vec();
+        // The glyph itself is not covered; a one-pixel ring around it is.
+        assert_eq!(pixel(10, 10)[3], 0);
+        for (x, y) in [(9, 9), (10, 9), (11, 10), (11, 11)] {
+            assert_eq!(pixel(x, y), [255, 255, 255, 255]);
+        }
+        assert_eq!(pixel(8, 10)[3], 0);
+
+        // The script then copies B into a cleared bitmap of its size with
+        // 91:1D type 0 (sub_40AF50, a plain copy: the halo stays white)
+        // and blends that over the text.
+        let copy = 1432;
+        api.store_runtime_bitmap(
+            copy,
+            DecodedImage {
+                width: 21,
+                height: 21,
+                rgba: vec![0; 21 * 21 * 4],
+            },
+            2,
+        );
+        let mut stack = vec![
+            Value::Int(copy),
+            Value::Int(halo),
+            Value::Int(0),
+            Value::Int(0xFF_FFFF),
+            Value::Int(0),
+        ];
+        call_graph(&mut api, 0x91, 0x1d, &mut stack).unwrap();
+        let copied = api.graph_bitmap_image(copy).unwrap();
+        assert_eq!(copied.rgba, image.rgba);
+        let mut composed = glyph;
+        assert!(crate::bitmap_blend::blit_alpha_over_parameter(
+            &mut composed, 2, &copied, 2, -8, -8, 64
+        ));
+        let at = |x: usize, y: usize| composed.rgba[(y * 5 + x) * 4..][..4].to_vec();
+        assert_eq!(at(2, 2), [0, 0, 0, 255]);
+        assert_eq!(at(3, 2), [255, 255, 255, 191]);
+        assert_eq!(at(4, 2)[3], 0);
+    }
+
+    #[test]
     fn graph90_11_replaces_stale_same_handle_bitmap_storage() {
         let manager =
             ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
