@@ -140,6 +140,10 @@ pub enum RenderCommand {
         y: f32,
         color: [f32; 4],
         size: f32,
+        /// Distance between the tops of consecutive lines, e.g. a window's
+        /// font height plus its Graph91:89 spacing; `None` for the font's own
+        /// line height.
+        line_height: Option<f32>,
         styles: Vec<TextStyleSpan>,
         glow: Option<TextGlow>,
         clip: Option<[f32; 4]>,
@@ -167,6 +171,7 @@ struct TextureRecord {
 struct TextCacheKey {
     text: String,
     size_bits: u32,
+    line_height_bits: Option<u32>,
     color_bits: [u32; 4],
     styles: Vec<TextStyleSpan>,
     glow: Option<TextGlow>,
@@ -176,6 +181,7 @@ impl TextCacheKey {
     fn new(
         text: &str,
         size: f32,
+        line_height: Option<f32>,
         color: [f32; 4],
         styles: &[TextStyleSpan],
         glow: Option<TextGlow>,
@@ -183,6 +189,7 @@ impl TextCacheKey {
         Self {
             text: text.to_string(),
             size_bits: size.to_bits(),
+            line_height_bits: line_height.map(f32::to_bits),
             color_bits: color.map(f32::to_bits),
             styles: styles.to_vec(),
             glow,
@@ -913,18 +920,20 @@ impl<'w> Renderer<'w> {
                     y,
                     color,
                     size,
+                    line_height,
                     styles,
                     glow,
                     clip,
                     ..
                 } => {
                     FontProvider::require_coverage(&self.font, &text)?;
-                    let key = TextCacheKey::new(&text, size, color, &styles, glow);
+                    let key = TextCacheKey::new(&text, size, line_height, color, &styles, glow);
                     active_text_keys.insert(key.clone());
                     let handle = if let Some(handle) = self.text_cache.get(&key).cloned() {
                         handle
                     } else {
-                        let mut image = rasterize_text(&self.font, &text, size, color, &styles);
+                        let mut image =
+                            rasterize_text(&self.font, &text, size, line_height, color, &styles);
                         if let Some(glow) = glow {
                             image = apply_text_glow(&image, glow);
                         }
@@ -1366,6 +1375,7 @@ fn rasterize_text(
     font: &FontArc,
     text: &str,
     px_height: f32,
+    line_pitch: Option<f32>,
     color: [f32; 4],
     styles: &[TextStyleSpan],
 ) -> DecodedImage {
@@ -1375,6 +1385,9 @@ fn rasterize_text(
     let line_height = (scaled.ascent() - scaled.descent() + scaled.line_gap())
         .ceil()
         .max(px_height.ceil()) as u32;
+    let line_pitch = line_pitch
+        .filter(|pitch| pitch.is_finite() && *pitch > 0.0)
+        .unwrap_or(line_height as f32);
     let widths: Vec<u32> = lines
         .iter()
         .map(|line| measure_line(font, line, px_height))
@@ -1391,12 +1404,12 @@ fn rasterize_text(
         .unwrap_or(1)
         .saturating_add(style_overhang)
         .max(1);
-    let height = (line_height * lines.len().max(1) as u32).max(1);
+    let height = ((lines.len().max(1) - 1) as f32 * line_pitch).ceil() as u32 + line_height;
     let mut rgba = vec![0u8; width as usize * height as usize * 4];
 
     let mut char_index = 0usize;
     for (line_index, line) in lines.iter().enumerate() {
-        let baseline_y = line_index as f32 * line_height as f32 + scaled.ascent();
+        let baseline_y = (line_index as f32 * line_pitch).round() + scaled.ascent();
         let mut cursor_x = 0.0f32;
         for ch in line.chars() {
             let style = text_style_at(styles, char_index);
@@ -1588,12 +1601,35 @@ mod font_tests {
     }
 
     #[test]
+    fn lines_are_a_given_pitch_apart() {
+        // A message window at font 28 with Graph91:89 spacing 25 starts a
+        // line every 35 pixels (sub_42C4A0), not at the font's own height.
+        let font = load_system_cjk_font().expect("system CJK font");
+        let ink_rows = |image: &DecodedImage| {
+            (0..image.height)
+                .filter(|&y| {
+                    (0..image.width)
+                        .any(|x| image.rgba[((y * image.width + x) * 4 + 3) as usize] > 128)
+                })
+                .collect::<Vec<_>>()
+        };
+        let one = rasterize_text(&font, "H", 28.0, Some(35.0), [1.0; 4], &[]);
+        let two = rasterize_text(&font, "H\nH", 28.0, Some(35.0), [1.0; 4], &[]);
+        let first = ink_rows(&one);
+        let both = ink_rows(&two);
+        assert_eq!(both.len(), 2 * first.len());
+        assert_eq!(both[first.len()], first[0] + 35);
+        assert_eq!(two.height, one.height + 35);
+    }
+
+    #[test]
     fn styled_text_rasterizer_applies_per_character_color_and_shape() {
         let font = load_system_cjk_font().expect("system CJK font");
         let image = rasterize_text(
             &font,
             "AB",
             32.0,
+            None,
             [1.0; 4],
             &[TextStyleSpan {
                 start_char: 1,
