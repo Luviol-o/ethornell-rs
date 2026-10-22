@@ -270,7 +270,12 @@ for sfmt in (1, 2):
 # More plain blits of format 2 over format 2 (sub_40B330's SSE pairs and
 # its scalar odd pixel).
 rotate_cases += [(2, 2, 0, 0, 0)] * 24
-for n, (sfmt, dfmt, filt, alpha, shape) in enumerate(rotate_cases):
+# kind 7: sub_4179B0 (91:19), same arguments and layout as kind 6.
+rotate_cases = [(6, 0x416B60) + case for case in rotate_cases]
+rotate_cases += [(7, 0x4179B0, sfmt, dfmt, filt, alpha, shape)
+                 for sfmt in (1, 2) for dfmt in (1, 2) for filt in (0, 1)
+                 for alpha in (0, 96, 255, 256) for shape in range(3)]
+for n, (kind, address, sfmt, dfmt, filt, alpha, shape) in enumerate(rotate_cases):
     heap_top = global_heap
     sw, sh = rng.randrange(1, 16), rng.randrange(1, 16)
     dw, dh = rng.randrange(1, 16), rng.randrange(1, 16)
@@ -299,8 +304,8 @@ for n, (sfmt, dfmt, filt, alpha, shape) in enumerate(rotate_cases):
     dst_desc, dst_data = bitmap(dw, dh, dst_before, dfmt)
     call(FPU, [], {})
     dx, dy, sx, sy, angle, xs, ys = params
-    call(0x416B60, [dst_desc, dx, dy, src_desc, sx, sy, angle, xs, ys, alpha, filt, 0], {})
+    call(address, [dst_desc, dx, dy, src_desc, sx, sy, angle, xs, ys, alpha, filt, 0], {})
     after = mu.mem_read(dst_data, dw * dh * 4)
-    emit_extra(f"rotate_{n:03}", 6, sw, sh, dw, dh, (filt << 16 | dfmt << 8 | sfmt, alpha, 7), params,
+    emit_extra(f"rotate_{n:03}", kind, sw, sh, dw, dh, (filt << 16 | dfmt << 8 | sfmt, alpha, 7), params,
                src, dst_before, after)
 print("rotates done", len(rotate_cases))

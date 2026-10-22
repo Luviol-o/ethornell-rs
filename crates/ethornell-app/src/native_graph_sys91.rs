@@ -406,11 +406,7 @@ impl RuntimeTraceApi {
                 if let Err(error) = self.graph91_check_bitmap_operation(id, &args) {
                     return Some(Err(error));
                 }
-                if id == 0x18 {
-                    self.graph91_rotate_blit(&args);
-                } else {
-                    self.graph91_composite_rect(&args, true);
-                }
+                self.graph91_rotate_blit(&args, id == 0x19);
                 ethornell_vm::Value::None
             }
             0x1a => {
@@ -2264,10 +2260,11 @@ impl RuntimeTraceApi {
         Ok(())
     }
 
-    /// 91:18 -> sub_402F30 -> sub_416B60 (bitmap_kernels::rotate_blit):
+    /// 91:18 -> sub_402F30 -> sub_416B60 (bitmap_kernels::rotate_blit) and
+    /// 91:19 -> sub_402FD0 -> sub_4179B0 (bitmap_kernels::rotate_copy):
     /// destination, dx, dy, source, sx, sy, angle, x scale, y scale,
     /// alpha, filter.
-    fn graph91_rotate_blit(&mut self, args: &[i32]) {
+    fn graph91_rotate_blit(&mut self, args: &[i32], copy: bool) {
         let &[destination, dx, dy, source, sx, sy, angle, x_scale, y_scale, alpha, filter] = args else {
             return;
         };
@@ -2280,7 +2277,8 @@ impl RuntimeTraceApi {
         let destination_format = self.bitmap_formats.get(&destination).copied().unwrap_or(2);
         let source_bitmap = crate::bitmap_kernels::TargetBitmap::from_image(&source_image);
         let mut target = crate::bitmap_kernels::TargetBitmap::from_image(&destination_image);
-        crate::bitmap_kernels::rotate_blit(
+        let kernel = if copy { crate::bitmap_kernels::rotate_copy } else { crate::bitmap_kernels::rotate_blit };
+        kernel(
             &mut target,
             destination_format as u32,
             &source_bitmap,
@@ -2293,91 +2291,6 @@ impl RuntimeTraceApi {
             filter != 0,
         );
         self.graph91_store_bitmap(destination, target.to_image(destination_format == 1), destination_format);
-    }
-
-    fn graph91_composite_rect(&mut self, args: &[i32], conversion_variant: bool) {
-        let [
-            destination,
-            destination_x,
-            destination_y,
-            source,
-            source_x,
-            source_y,
-            _mode,
-            width,
-            height,
-            alpha,
-            source_alpha_gate,
-        ] = args
-        else {
-            return;
-        };
-        if *width <= 0 || *height <= 0 || !(0..=256).contains(alpha) {
-            return;
-        }
-        let Some(source_image) = self.graph_bitmap_image(*source) else {
-            return;
-        };
-        let mut destination_image = self.graph_bitmap_image(*destination).unwrap_or_else(|| {
-            let (w, h) = self
-                .bitmap_dimensions
-                .get(destination)
-                .copied()
-                .unwrap_or((source_image.width, source_image.height));
-            DecodedImage {
-                width: w.max(1),
-                height: h.max(1),
-                rgba: vec![0; w.max(1) as usize * h.max(1) as usize * 4],
-            }
-        });
-        for row in 0..*height {
-            let sy = source_y.saturating_add(row);
-            let dy = destination_y.saturating_add(row);
-            if sy < 0
-                || dy < 0
-                || sy >= source_image.height as i32
-                || dy >= destination_image.height as i32
-            {
-                continue;
-            }
-            for column in 0..*width {
-                let sx = source_x.saturating_add(column);
-                let dx = destination_x.saturating_add(column);
-                if sx < 0
-                    || dx < 0
-                    || sx >= source_image.width as i32
-                    || dx >= destination_image.width as i32
-                {
-                    continue;
-                }
-                let so = (sy as usize * source_image.width as usize + sx as usize) * 4;
-                let doff = (dy as usize * destination_image.width as usize + dx as usize) * 4;
-                let source_alpha = if *source_alpha_gate != 0 {
-                    source_image.rgba[so + 3] as u32
-                } else {
-                    255
-                };
-                let mix = (*alpha as u32).saturating_mul(source_alpha) / 256;
-                for channel in 0..3 {
-                    let src = source_image.rgba[so + channel] as u32;
-                    let dst = destination_image.rgba[doff + channel] as u32;
-                    destination_image.rgba[doff + channel] = if conversion_variant && *alpha >= 256
-                    {
-                        src as u8
-                    } else {
-                        ((src * mix + dst * (255 - mix.min(255))) / 255) as u8
-                    };
-                }
-                if conversion_variant {
-                    destination_image.rgba[doff + 3] = source_image.rgba[so + 3];
-                } else {
-                    destination_image.rgba[doff + 3] =
-                        destination_image.rgba[doff + 3].max(mix as u8);
-                }
-            }
-        }
-        let format = self.bitmap_formats.get(destination).copied().unwrap_or(2);
-        self.graph91_store_bitmap(*destination, destination_image, format);
     }
 
     fn graph91_replace_rgb(&mut self, destination: i32, source: i32, packed_rgb: i32) {

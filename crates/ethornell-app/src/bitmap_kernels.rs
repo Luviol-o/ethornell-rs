@@ -711,10 +711,15 @@ fn for_each_walk(
     }
 }
 
-/// Source pixel (x, y) when both are unsigned-below the size, else 0.
-fn sample_guarded(source: &TargetBitmap, x: i32, y: i32) -> [i32; 4] {
+/// Source pixel (x, y) when both are unsigned-below the size, else 0;
+/// `opaque` sets the alpha byte of a pixel that is read (`por 0xFF000000`).
+fn sample_guarded(source: &TargetBitmap, x: i32, y: i32, opaque: bool) -> [i32; 4] {
     if (x as u32) < source.width as u32 && (y as u32) < source.height as u32 {
-        read_pixel(source, y as usize * source.stride + 4 * x as usize).map(i32::from)
+        let mut pixel = read_pixel(source, y as usize * source.stride + 4 * x as usize);
+        if opaque {
+            pixel[3] = 255;
+        }
+        pixel.map(i32::from)
     } else {
         [0; 4]
     }
@@ -728,14 +733,14 @@ fn lerp16(a: i32, b: i32, k: usize) -> i32 {
 /// The 4-bit bilinear sample of `sub_417ED0` / `sub_416E20` / `sub_4174E0`
 /// (unsaturated 16-bit lanes). The kernels' early exits all coincide with
 /// four zero neighbours.
-fn sample_bilinear4(source: &TargetBitmap, x: i32, y: i32, fx: usize, fy: usize) -> [i32; 4] {
+fn sample_bilinear4(source: &TargetBitmap, x: i32, y: i32, fx: usize, fy: usize, opaque: bool) -> [i32; 4] {
     if y <= -2 || y >= source.height as i32 || (y >= 0 && (x <= -2 || x >= source.width as i32)) {
         return [0; 4];
     }
-    let p00 = sample_guarded(source, x, y);
-    let p01 = sample_guarded(source, x + 1, y);
-    let p10 = sample_guarded(source, x, y + 1);
-    let p11 = sample_guarded(source, x + 1, y + 1);
+    let p00 = sample_guarded(source, x, y, opaque);
+    let p01 = sample_guarded(source, x + 1, y, opaque);
+    let p10 = sample_guarded(source, x, y + 1, opaque);
+    let p11 = sample_guarded(source, x + 1, y + 1, opaque);
     std::array::from_fn(|lane| {
         let top = lerp16(p00[lane], p01[lane], fx);
         let bottom = lerp16(p10[lane], p11[lane], fx);
@@ -806,7 +811,7 @@ pub(crate) fn rotate_blit(
     match (source_format, filter) {
         // sub_418500 / sub_4173B0: nearest, 0 outside.
         (1, false) => for_each_walk(destination, walk, |pixel, x, y, _, _| {
-            let value = sample_guarded(source, x, y);
+            let value = sample_guarded(source, x, y, false);
             for lane in 0..4 {
                 pixel[lane] = if alpha == 0 {
                     value[lane] as u8
@@ -819,7 +824,7 @@ pub(crate) fn rotate_blit(
         }),
         // sub_417ED0 / sub_416E20: bilinear, 0 outside.
         (1, true) => for_each_walk(destination, walk, |pixel, x, y, fx, fy| {
-            let value = sample_bilinear4(source, x, y, fx, fy);
+            let value = sample_bilinear4(source, x, y, fx, fy, false);
             for lane in 0..4 {
                 pixel[lane] = if alpha == 0 {
                     value[lane].clamp(0, 255) as u8
@@ -835,7 +840,7 @@ pub(crate) fn rotate_blit(
             if (x as u32) >= source.width as u32 || (y as u32) >= source.height as u32 {
                 return;
             }
-            let value = sample_guarded(source, x, y);
+            let value = sample_guarded(source, x, y, false);
             let k = value[3] as u32 >> 1;
             if k != 0 {
                 let weight = alpha_weight(k, alpha);
@@ -846,7 +851,7 @@ pub(crate) fn rotate_blit(
         }),
         // sub_4174E0: bilinear, blended by the sampled alpha.
         (2, true) => for_each_walk(destination, walk, |pixel, x, y, fx, fy| {
-            let value = sample_bilinear4(source, x, y, fx, fy);
+            let value = sample_bilinear4(source, x, y, fx, fy, false);
             let k = value[3].clamp(0, 255) as u32 >> 1;
             if k != 0 {
                 let weight = alpha_weight(k, alpha);
@@ -857,6 +862,100 @@ pub(crate) fn rotate_blit(
         }),
         _ => {}
     }
+}
+
+/// `sub_4179B0` (91:19, single-threaded): the rotate-zoom of 91:18 as a
+/// copy faded by `alpha` (`[256 - alpha] * colour >> 8`, alpha kept),
+/// written over the whole destination (0 outside the source). The plain
+/// path (`sub_418A80`) converts (`sub_40AF70`) or fades (`sub_418AB0`) the
+/// covering source rectangle; otherwise equal formats 1/2 are drawn
+/// (`sub_418500`/`sub_4183E0` nearest, `sub_417ED0`/`sub_417C20` bilinear,
+/// alpha 256 clears through `sub_40A610`) and a format-1 source into a
+/// format-2 destination becomes opaque (`sub_4185F0` / `sub_418140`).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn rotate_copy(
+    destination: &mut TargetBitmap,
+    destination_format: u32,
+    source: &TargetBitmap,
+    source_format: u32,
+    [dx, dy, sx, sy]: [i32; 4],
+    angle: i32,
+    x_scale: u32,
+    y_scale: u32,
+    alpha: u32,
+    filter: bool,
+) {
+    if x_scale == 0 || y_scale == 0 {
+        return;
+    }
+    let keep = 256u32.wrapping_sub(alpha) as u16;
+    let fade = |value: [i32; 4]| -> [u8; 4] {
+        std::array::from_fn(|lane| {
+            let weight = if lane == 3 { 256 } else { keep };
+            ((value[lane] as u16).wrapping_mul(weight) >> 8).min(255) as u8
+        })
+    };
+    if dx as u16 == 0 && dy as u16 == 0 && sx as u16 == 0 && sy as u16 == 0 && angle % 23592960 == 0
+        && x_scale == 0x10000 && y_scale == 0x10000
+    {
+        let (left, top) = ((sx >> 16).wrapping_sub(dx >> 16), (sy >> 16).wrapping_sub(dy >> 16));
+        let right = left.wrapping_add(destination.width as i32 - 1);
+        let bottom = top.wrapping_add(destination.height as i32 - 1);
+        if left >= 0 && top >= 0 && right <= source.width as i32 - 1 && bottom <= source.height as i32 - 1 {
+            let view = TargetBitmap {
+                pixels: source.pixels[top as usize * source.stride + 4 * left as usize..].to_vec(),
+                stride: source.stride,
+                width: destination.width,
+                height: destination.height,
+            };
+            if alpha == 0 {
+                convert_copy(destination, destination_format, &view, source_format);
+            } else if destination_format == source_format && matches!(source_format, 1 | 2) {
+                for y in 0..destination.height {
+                    for x in 0..destination.width {
+                        let pixel = read_pixel(&view, y * view.stride + 4 * x).map(i32::from);
+                        write_pixel(destination, y * destination.stride + 4 * x, u32::from_le_bytes(fade(pixel)));
+                    }
+                }
+            }
+            return;
+        }
+    }
+    let walk = affine_walk(dx, dy, sx, sy, angle, x_scale, y_scale);
+    let write = |pixel: &mut [u8], value: [u8; 4]| pixel.copy_from_slice(&value);
+    if destination_format != source_format {
+        if source_format == 1 && destination_format == 2 {
+            for_each_walk(destination, walk, |pixel, x, y, fx, fy| {
+                let value = if filter {
+                    sample_bilinear4(source, x, y, fx, fy, true)
+                } else {
+                    sample_guarded(source, x, y, true)
+                };
+                write(pixel, value.map(|lane| lane.clamp(0, 255) as u8));
+            });
+        }
+        return;
+    }
+    if !matches!(source_format, 1 | 2) {
+        return;
+    }
+    if alpha >= 0x100 {
+        for y in 0..destination.height {
+            let at = y * destination.stride;
+            let end = (at + destination.width * 4).min(destination.pixels.len());
+            destination.pixels[at.min(end)..end].fill(0);
+        }
+        return;
+    }
+    for_each_walk(destination, walk, |pixel, x, y, fx, fy| {
+        let value = if filter {
+            sample_bilinear4(source, x, y, fx, fy, false)
+        } else {
+            sample_guarded(source, x, y, false)
+        };
+        let value = if alpha == 0 { value.map(|lane| lane.clamp(0, 255) as u8) } else { fade(value) };
+        write(pixel, value);
+    });
 }
 
 /// `sub_40B560`: the source rectangle at (left, top) of the destination's
@@ -926,8 +1025,8 @@ mod tests {
                 unreachable!()
             };
             let (sw, sh, dw, dh) = (sw as usize, sh as usize, dw as usize, dh as usize);
-            // Kind 6 carries p2 more words after the header.
-            let extra = if kind == 6 { words(&data[32..], p2 as usize) } else { Vec::new() };
+            // Kinds 6 and 7 carry p2 more words after the header.
+            let extra = if kind == 6 || kind == 7 { words(&data[32..], p2 as usize) } else { Vec::new() };
             let mut at = 32 + 4 * extra.len();
             let mut take = |n: usize| {
                 let slice = data[at..at + n].to_vec();
@@ -946,6 +1045,18 @@ mod tests {
                 2 => scale_nearest(&mut destination, &source, p0, p1),
                 3 => scale_filtered(&mut destination, &source, p2, p0, p1),
                 6 => rotate_blit(
+                    &mut destination,
+                    p0 >> 8 & 0xFF,
+                    &source,
+                    p0 & 0xFF,
+                    [extra[0] as i32, extra[1] as i32, extra[2] as i32, extra[3] as i32],
+                    extra[4] as i32,
+                    extra[5],
+                    extra[6],
+                    p1,
+                    p0 >> 16 != 0,
+                ),
+                7 => rotate_copy(
                     &mut destination,
                     p0 >> 8 & 0xFF,
                     &source,
