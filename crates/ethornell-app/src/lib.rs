@@ -23335,7 +23335,7 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                     .map(|surface| (surface.width.max(1.0) as u32, surface.height.max(1.0) as u32))
                 else {
                     return Err(ethornell_vm::VmError::Runtime(format!(
-                        "Graph90:83 #{source_window} is not a window object"
+                        "無効なウィンドウハンドルが指定されました"
                     )));
                 };
                 self.bitmap_dimensions.insert(destination_bitmap, window_size);
@@ -23366,18 +23366,19 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                     .flatten()
                     .map(|surface| (surface.width as u32, surface.height as u32))
                 else {
-                    return Err(ethornell_vm::VmError::Runtime(format!(
-                        "Graph90:86 #{window} is not a window object"
-                    )));
+                    return Err(ethornell_vm::VmError::Runtime("無効なウィンドウハンドルが指定されました".into()));
                 };
                 if width == 0 || height == 0 {
-                    return Err(ethornell_vm::VmError::Runtime(format!(
-                        "Graph90:86 window #{window} has no bitmap"
-                    )));
+                    return Err(ethornell_vm::VmError::Runtime(
+                        "指定されたウィンドウは必要なリソースが確保されていません".into(),
+                    ));
                 }
                 if source_bitmap != -1 && self.graph_bitmap_image(source_bitmap).is_none() {
                     return Err(ethornell_vm::VmError::Runtime(format!(
-                        "Graph90:86 bitmap {source_bitmap} does not exist ({decoration_error_context}, {frame_error_context})"
+                        "指定されたビットマップのうち、いずれかは登録されていません{}", {
+                            let _ = (decoration_error_context, frame_error_context);
+                            ""
+                        }
                     )));
                 }
                 let retained = if source_bitmap == -1 {
@@ -23714,41 +23715,28 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                 self.graph_redraw_requested = Some(true);
             }
             (0x90, 0x80) => {
+                // sub_47E5C0 -> sub_440970/sub_42B5D0: at most 16 windows
+                // (9 -> fatal); a width below 32 or a height below 20 counts
+                // in units of 32 pixels; then 1..=1920 x 1..=32768
+                // (unsigned) or the size is fatal.
                 let height = pop_int_value(stack).unwrap_or_default();
                 let width = pop_int_value(stack).unwrap_or_default();
-                // Target dimensions below 32 are promoted to 32-pixel units.
-                let native_width = if width < 32 {
-                    width.saturating_mul(32)
-                } else {
-                    width
-                };
-                let native_height = if height < 32 {
-                    height.saturating_mul(32)
-                } else {
-                    height
-                };
-                let valid =
-                    (1..=1920).contains(&native_width) && (1..=32768).contains(&native_height);
+                if self.graph_surfaces.keys().filter(|handle| Self::is_window_surface_handle(**handle)).count() >= 16 {
+                    return Err(ethornell_vm::VmError::Runtime(
+                        "これ以上、ウィンドウオブジェクトを生成することはできません".into(),
+                    ));
+                }
+                let native_width = if (width as u32) < 32 { (width as u32).wrapping_mul(32) } else { width as u32 };
+                let native_height = if (height as u32) < 20 { (height as u32).wrapping_mul(32) } else { height as u32 };
+                let valid = native_width.wrapping_sub(1) <= 0x77F && native_height.wrapping_sub(1) <= 0x7FFF;
                 let handle = valid
-                    .then(|| self.alloc_window_surface(native_width, native_height))
-                    .flatten()
-                    .unwrap_or_default();
-                tracing::info!(
-                    handle,
-                    width,
-                    height,
-                    native_width,
-                    native_height,
-                    "GraphCreateWindowObject"
-                );
-                trace_graph!(
-                    self,
-                    "create window #{handle} source={}x{} native={}x{} valid={valid}",
-                    width,
-                    height,
-                    native_width,
-                    native_height
-                );
+                    .then(|| self.alloc_window_surface(native_width as i32, native_height as i32))
+                    .flatten();
+                let Some(handle) = handle else {
+                    return Err(ethornell_vm::VmError::Runtime(format!(
+                        "無効なウィンドウ幅 [ {width} , {height} ] が指定されました"
+                    )));
+                };
                 return Ok(ethornell_vm::Value::Int(handle));
             }
             (0x90, 0x81) => {
@@ -23758,7 +23746,15 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                 // a script error.
                 let window = pop_int_value(stack).unwrap_or_default();
                 let fail = |what: &str| {
-                    Err(ethornell_vm::VmError::Runtime(format!("Graph90:81 window #{window} {what}")))
+                    Err(ethornell_vm::VmError::Runtime(match what {
+                        "is still used by an input processor" => {
+                            "指定されたウィンドウには協調しているプロシージャが存在します".to_string()
+                        }
+                        "is still attached to a parent object" => {
+                            "指定されたウィンドウにはオーナーが存在します".to_string()
+                        }
+                        _ => "無効なウィンドウハンドルが指定されました".to_string(),
+                    }))
                 };
                 let exists =
                     Self::is_window_surface_handle(window) && self.graph_surfaces.contains_key(&window);
@@ -23784,6 +23780,11 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                 let window = pop_int_value(stack).unwrap_or_default();
                 let updated = Self::is_window_surface_handle(window)
                     && self.graph_surfaces.contains_key(&window);
+                if !updated {
+                    return Err(ethornell_vm::VmError::Runtime(
+                        "無効なウィンドウハンドルが指定されました".into(),
+                    ));
+                }
                 if updated {
                     // sub_47DC90 -> sub_462CA0 -> sub_440A90 -> vtable+4 ->
                     // CDspObj::sub_41AE00. This writes +0x14 and recursively
@@ -23808,24 +23809,17 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                     // sub_47DCD0: priority, reserved, transparency and blend
                     // checks (sub_497BB0/497DB0/497C40), then a missing window
                     // (sub_462AF0) - every failure is a script error.
-                    if reserved as u32 > 0x100 {
-                        return Err(ethornell_vm::VmError::Runtime(format!(
-                            "Graph90:85 value {reserved} exceeds 256"
-                        )));
-                    }
-                    Self::graph90_validate_sprite_arguments(
-                        0x85,
-                        priority,
-                        transparency,
-                        blend_mode,
-                        &[],
-                    )?;
+                    // sub_47E7D0: priority, two levels, blend mode.
+                    target_checks::priority(priority)?;
+                    target_checks::effect_level(reserved)?;
+                    target_checks::effect_level(transparency)?;
+                    target_checks::effect_mode(blend_mode)?;
                     let valid = Self::is_window_surface_handle(window)
                         && self.graph_surfaces.contains_key(&window);
                     if !valid {
-                        return Err(ethornell_vm::VmError::Runtime(format!(
-                            "Graph90:85 #{window} is not a window object"
-                        )));
+                        return Err(ethornell_vm::VmError::Runtime(
+                            "無効なウィンドウハンドルが指定されました".into(),
+                        ));
                     }
                     if valid {
                         if let Some(surface) = self.graph_surfaces.get_mut(&window) {
@@ -23867,6 +23861,10 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                         record.isolated_group = value != 0;
                         true
                     });
+                // sub_47E950 -> sub_463070: unknown window fatal.
+                if !updated {
+                    return Err(ethornell_vm::VmError::Runtime("無効なウィンドウハンドルが指定されました".into()));
+                }
                 tracing::info!(window, value, updated, "GraphSetWindowIsolatedComposition");
                 trace_graph!(
                     self,
@@ -23892,9 +23890,7 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                         .flatten()
                         .map(|surface| (surface.width as i32, surface.height as i32))
                     else {
-                        return Err(ethornell_vm::VmError::Runtime(format!(
-                            "Graph90:88 #{window} is not a window object"
-                        )));
+                        return Err(ethornell_vm::VmError::Runtime("無効なウィンドウハンドルが指定されました".into()));
                     };
                     let right = x.wrapping_add(width).wrapping_sub(1);
                     let bottom = y.wrapping_add(height).wrapping_sub(1);
@@ -23904,9 +23900,9 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                         && inside(y, surface_height)
                         && inside(bottom, surface_height);
                     if !valid {
-                        return Err(ethornell_vm::VmError::Runtime(format!(
-                            "Graph90:88 valid region ({x}, {y}) {width}x{height} is outside window #{window}"
-                        )));
+                        return Err(ethornell_vm::VmError::Runtime(
+                            "ウィンドウの有効範囲として指定された値は無効です".into(),
+                        ));
                     }
                     if valid {
                         if let Some(surface) = self.graph_surfaces.get_mut(&window) {
@@ -23958,6 +23954,13 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                 });
                 match text.as_deref() {
                     Some(text) => {
+                        // sub_47EAA0: an unknown window is fatal.
+                        let window = args.get(5).map(value_to_i32).unwrap_or_default();
+                        if !(Self::is_window_surface_handle(window) && self.graph_surfaces.contains_key(&window)) {
+                            return Err(ethornell_vm::VmError::Runtime(
+                                "無効なウィンドウハンドルが指定されました".into(),
+                            ));
+                        }
                         // sub_47DFA0 has no wrapper-level special case for
                         // form-feed or "\c" strings. Those bytes belong to
                         // the target message parser and the call still installs
@@ -24359,6 +24362,16 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                 // Native pop order is scope value first, then mode.
                 let scope_value = pop_int_value(stack).unwrap_or_default();
                 let mode = pop_int_value(stack).unwrap_or_default();
+                // sub_433150: 0x80000004 invalid mode, 0x80000005 scope
+                // priority >= 0x10000, both fatal.
+                if !matches!(mode, 0..=2) {
+                    return Err(ethornell_vm::VmError::Runtime(format!(
+                        "無効なモード [ {mode} ] が指定されました"
+                    )));
+                }
+                if mode == 1 {
+                    target_checks::priority(scope_value)?;
+                }
                 let accepted = self
                     .graph_defaults
                     .configure_message_input_scope(mode, scope_value);
@@ -24382,6 +24395,8 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                 // reverse order by the native calling convention.
                 let step_delay_ms = pop_int_value(stack).unwrap_or_default();
                 let steps = pop_int_value(stack).unwrap_or_default();
+                // sub_47EC60: sub_498600 (1..=256).
+                target_checks::division_count(steps)?;
                 self.graph_defaults
                     .text_animation
                     .set_settle(steps, step_delay_ms);
@@ -24415,6 +24430,8 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                 // Graph90:0x95(steps, step_delay_ms): glyph reveal animation.
                 let step_delay_ms = pop_int_value(stack).unwrap_or_default();
                 let steps = pop_int_value(stack).unwrap_or_default();
+                // sub_47EC20: sub_498600 (1..=256).
+                target_checks::division_count(steps)?;
                 self.graph_defaults
                     .text_animation
                     .set_reveal(steps, step_delay_ms);
@@ -25522,12 +25539,19 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                     5 => Some([2, 1, 0]),
                     _ => None,
                 };
-                let updated = order.is_some_and(|order| {
-                    Self::is_window_surface_handle(window)
-                        && self.graph_surfaces.get_mut(&window).is_some_and(|surface| {
-                            surface.composition_order = order;
-                            true
-                        })
+                // sub_47E710 -> sub_463420: unknown window (-1), order
+                // outside 0..=5 (1) are fatal.
+                if !(Self::is_window_surface_handle(window) && self.graph_surfaces.contains_key(&window)) {
+                    return Err(ethornell_vm::VmError::Runtime("無効なウィンドウハンドルが指定されました".into()));
+                }
+                let Some(order) = order else {
+                    return Err(ethornell_vm::VmError::Runtime(format!(
+                        "無効な描画順序 [ {mode} ] が指定されました"
+                    )));
+                };
+                let updated = self.graph_surfaces.get_mut(&window).is_some_and(|surface| {
+                    surface.composition_order = order;
+                    true
                 });
                 tracing::info!(
                     window,
@@ -25703,6 +25727,18 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                 let alpha = pop_int_value(stack).unwrap_or_default();
                 let y = pop_int_value(stack).unwrap_or_default();
                 let x = pop_int_value(stack).unwrap_or_default();
+                // sub_47EE00: negative coordinates and a density above 256
+                // (signed) are fatal.
+                if x < 0 || y < 0 {
+                    return Err(ethornell_vm::VmError::Runtime(format!(
+                        "無効な座標 [ {x} , {y} ] が指定されました"
+                    )));
+                }
+                if alpha > 0x100 {
+                    return Err(ethornell_vm::VmError::Runtime(format!(
+                        "無効な濃度 [ {alpha} ] が指定されました"
+                    )));
+                }
                 self.graph_defaults.configure_shadow(x, y, alpha);
                 tracing::info!(x, y, alpha, "GraphSetTextShadowParameters");
             }

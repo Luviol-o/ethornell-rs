@@ -16150,7 +16150,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_CREATE_WINDOW_OBJECT_PARAMETERS,
         returns: "0xB0000000-tagged window handle; target errors on invalid dimensions or exhausted 16-slot pool",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target sub_47DAC0 -> sub_4405B0 constructs CDspObjWindow. Values below 32 are multiplied by 32; final dimensions are bounded to width<=1920 and height<=32768. sub_42AE20 uses CDspObj sort_class=3 and the window registry supplies a monotonic construction index at CDspObj+0x20, independent of the reusable 0xB0000000 handle slot. Before returning, sub_42AE20 calls sub_41B600(window, 1) and sub_41B620(window, 0): a new Window is draw-enabled with zero transparency and does not require Graph90:84 to become drawable.",
+        notes: "BGI 1.622 sub_47E5C0 -> sub_440970/sub_42B5D0: at most 16 windows; width < 32 / height < 20 count in 32-pixel units; 1..=1920 x 1..=32768 or fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_RELEASE_WINDOW_OBJECT,
@@ -16158,7 +16158,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_WINDOW_HANDLE_PARAMETER,
         returns: "void; target errors for invalid, procedure-bound, or owned windows",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_47DB60: a window still locked by an input processor (+0x130), attached to a parent (+0x11C) or missing (sub_440700) is fatal; otherwise sub_440700 unlinks and deletes it.",
+        notes: "sub_47E660: cooperating procedure, owner, unknown window are fatal; else released.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_SET_WINDOW_COMPOSITION_ORDER,
@@ -16166,7 +16166,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_SET_WINDOW_COMPOSITION_ORDER_PARAMETERS,
         returns: "void; target errors for modes outside 0..=5 or invalid window",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target sub_47DC10 -> sub_440D60 -> sub_42C870 writes one of six permutations of 0,1,2 to CDspObjWindow+0x3C0/+0x3C4/+0x3C8. These values order the three composition passes in sub_42CA30.",
+        notes: "sub_47E710 -> sub_463420: composition order 0..=5; unknown window (-1) and invalid order (1) fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_SET_WINDOW_DRAW_ENABLED,
@@ -16174,7 +16174,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_SET_WINDOW_ENABLED_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target sub_47DC90 -> sub_440A90 invokes the window draw-enable virtual setter and invalidates the object when the value changes.",
+        notes: "sub_47E790 -> sub_463200: draw enable; unknown window fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_CONFIGURE_WINDOW_OBJECT,
@@ -16182,7 +16182,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_CONFIGURE_WINDOW_OBJECT_PARAMETERS,
         returns: "void; target validates blend, transparency, reserved value, priority and handle",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_47DCD0: priority >= 0x10000, reserved > 256, transparency > 256, an invalid blend mode and a missing window are fatal; sub_42B360 sets position, blend, transparency and priority (reserved is not forwarded).",
+        notes: "sub_47E7D0 -> sub_463050: priority, two levels, blend mode checks; unknown window fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_SET_WINDOW_ISOLATED_COMPOSITION,
@@ -16190,7 +16190,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_SET_WINDOW_ISOLATED_COMPOSITION_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target sub_47DE50 -> sub_42B3A0 writes CDspObjWindow+956. sub_42CA30 uses it to precompose backing, frame and text/children into an isolated buffer.",
+        notes: "sub_47E950 -> sub_463070: isolated composition; unknown window fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_SET_WINDOW_VALID_REGION,
@@ -16198,7 +16198,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_SET_WINDOW_VALID_REGION_PARAMETERS,
         returns: "void; target errors when the inclusive rectangle exceeds the window",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_47DE90 -> sub_4408D0 -> sub_42B970/sub_42B900: (x, y, x+w-1, y+h-1) is accepted when every corner lies inside the window bitmap (left <= right is not required); a rejected rect and a missing window are fatal. Stores the valid rect and resets the text cursor.",
+        notes: "sub_47E990 -> sub_463080: valid region inside the window bitmap, else fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_GET_WINDOW_VALID_REGION,
@@ -16206,7 +16206,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_GET_WINDOW_VALID_REGION_PARAMETERS,
         returns: "one on success; target writes four i32 coordinates through out_rect",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target sub_47DF50 resolves the BP pointer then sub_440910/sub_42C2A0 copies CDspObjWindow+416..+428. The portable VM now performs the same four-DWORD BP write and success return.",
+        notes: "sub_47EA50 -> sub_4630C0: valid region into four DWORDs; unknown window fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_START_WINDOW_MESSAGE_PROCEDURE,
@@ -16214,7 +16214,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_START_WINDOW_MESSAGE_PROCEDURE_PARAMETERS,
         returns: "cooperative procedure result",
         scheduling: NativeSchedulingEffect::WaitProcedure,
-        notes: "Target sub_47DFA0 validates a CDspObjWindow and configured font, then sub_4911E0 installs CProcDspMsg and returns scheduler status 2. Constructor fields +0x30/+0x38/+0x3C are completion_control/end_wait_policy/allow_high_bit_input; +0x40 is forced to one by the wrapper. CProcDspMsg stores +0x78 as literal 2 or an already-packed input scope, registers that exact value in both native scope chains, immediately drains sub_46DF00 once, and removes the exact value from both chains in its destructor. Byte 0x0A is a zero-delay layout control handled by sub_433960, not a timed glyph.",
+        notes: "sub_47EAA0: CProcDspMsg on a window; unknown window fatal; returns 2.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_CONFIGURE_MESSAGE_CARET_FRAMES,
@@ -16222,7 +16222,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_CONFIGURE_CARET_FRAMES_PARAMETERS,
         returns: "void; target errors on an invalid bitmap entry",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target sub_47E1D0 -> sub_433300 clears the old global caret array, copies each bitmap into a 24-byte frame record, and accepts -1 as an empty frame. The portable VM now copies and validates the BP bitmap table; target caret-frame raster composition remains partial.",
+        notes: "sub_47ECD0 -> sub_4336D0: caret frames; a bitmap that is missing or incompatible is fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_SET_MESSAGE_CARET_FRAME_DELAY,
@@ -16230,7 +16230,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_CARET_DELAY_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target sub_47E250 -> sub_433480 stores dword_50765C; CProcDspMsg caret animation consumes it on each frame transition.",
+        notes: "sub_47ED50 -> sub_433850: caret frame delay.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_SET_MESSAGE_CARET_POSITION,
@@ -16238,7 +16238,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_CARET_POSITION_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target sub_47E270 -> sub_433490 stores mode/x/y in dword_565B84/88/8C. Mode 1 is absolute; other values add the offsets to the window's current message position.",
+        notes: "sub_47ED70 -> sub_433860: caret position triple.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_SET_TEXT_SHADOW_ENABLED,
@@ -16246,7 +16246,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: BOOLEAN_PARAMETER,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target sub_47E2E0 -> sub_433520 writes dword_507674, consumed by the message glyph shadow/effect path in sub_433A70.",
+        notes: "sub_47EDE0 -> sub_4338F0: text shadow enable.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_SET_TEXT_SHADOW_PARAMETERS,
@@ -16254,7 +16254,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_SHADOW_PARAMETERS,
         returns: "void; target errors for offsets above 100 or concentration above 256",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target sub_47E300 -> sub_433530 stores two font-height percentage offsets and the concentration. Portable CPU/GPU text paths now resolve both offsets from font height and use (256-concentration)/256 alpha; target font raster pixels remain non-bit-exact.",
+        notes: "sub_47EE00 -> sub_463790: negative coordinates and a density above 256 are fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_REGISTER_FULLWIDTH_GLYPH_STRIP,
@@ -16262,7 +16262,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_GLYPH_STRIP_PARAMETERS,
         returns: "void; target errors for count>255, invalid bitmap, or indivisible strip width",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target sub_47E3A0 -> sub_432F50 clears the fixed atlas for nonpositive count. Otherwise it splits a horizontal bitmap into equal cells and registers them at private codepoints 0xFF01 onward. This selector is not a bitmap-backing copy.",
+        notes: "sub_47EEA0 -> sub_433320: full-width strip; count > 0xFF, missing bitmap, indivisible width fatal; 0 clears.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_START_ITEM_SELECTION,
@@ -16806,7 +16806,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH_RENDER_OBJECT_TO_BITMAP_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_47DBC0: bitmap >= 0x4000 and a missing window are fatal; sub_440C80 recreates the bitmap at the window's size in format 2 and copies the window's composed image into it (sub_42C940).",
+        notes: "sub_47E6C0 -> sub_4633E0: bitmap check, window rendered into the bitmap; unknown window fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH_BIND_BITMAP_TO_SURFACE,
@@ -16814,7 +16814,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH_BIND_BITMAP_TO_SURFACE_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_47DD80 -> sub_42B2A0: a missing window, a window without its own bitmap and a missing bitmap are fatal; -1 clears the window back bitmap, otherwise it is cleared and the bitmap copied in at (0, 0) (a snapshot, clipped to the window). The two middle arguments are only error-message context.",
+        notes: "sub_47E880 -> sub_462EF0: frame bitmaps; unknown window, missing resources, unregistered bitmap errors.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH92_CONFIGURE_COMPACT_WAVE_TABLE,
@@ -16958,7 +16958,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: MESSAGE_INPUT_SCOPE_PARAMETERS,
         returns: "void; target emits a script error for invalid mode/value",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target 0x0047E040 pops scope_value then mode and calls sub_432D80. Mode 1 requires scope_value < 0x10000; modes 0 and 2 ignore it.",
+        notes: "sub_47EB40 -> sub_433150: input scope mode 0..=2, mode 1 priority < 0x10000, both fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH_SET_MESSAGE_INPUT_FILTER,
@@ -16966,7 +16966,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: MESSAGE_INPUT_FILTER_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target 0x0047E0E0 writes dword_565BAC through sub_432DC0. CProcDspMsg vtable slot 4 bypasses its base host-notify call when nonzero.",
+        notes: "sub_47EBE0 -> sub_433190: dword_565BBC.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_CACHE_BINARY_RESOURCE,
@@ -17782,7 +17782,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GLYPH_DELAY_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target helper 0x004334C0 (MessageConfig_SetGlyphDelay) configures the per-glyph delay. The portable text runtime implements the setting, but exact tick rounding remains under target comparison.",
+        notes: "sub_47EC00 -> sub_433890: dword_507660 glyph delay.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH_SET_TEXT_REVEAL_ANIMATION,
@@ -17790,7 +17790,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: TEXT_ANIMATION_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target helper 0x004334D0 (MessageConfig_SetRevealTiming) confirms reveal steps/delay semantics. Parameters are listed in BP push order; the native handler pops step_delay_ms first.",
+        notes: "sub_47EC20 -> sub_4338A0: division count 1..=256 (fatal) and step delay.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH_SET_TEXT_SETTLE_ANIMATION,
@@ -17798,7 +17798,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: TEXT_ANIMATION_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target helper 0x004334F0 (MessageConfig_SetSettleTiming) confirms post-reveal settle steps/delay semantics.",
+        notes: "sub_47EC60 -> sub_4338C0: division count 1..=256 (fatal) and step delay.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH_SET_TEXT_AUTO_ADVANCE,
@@ -17806,7 +17806,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: TEXT_ENABLE_DELAY_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target helper 0x00433510 (MessageConfig_SetAutoCompletion) confirms enabled/delay semantics. Runtime traces show enabled=0 and delay_ms=273 for the testcase, so continued skipping must come from another path.",
+        notes: "sub_47ECA0 -> sub_4338E0: auto advance pair.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH_SET_MESSAGE_START_DELAY,
@@ -17814,7 +17814,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: TEXT_ENABLE_DELAY_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target sub_47E2B0 -> sub_4334B0 stores enabled/delay in dword_565B90/94. CProcDspMsg copies them to +0x44/+0x48; sub_433E40 consults this delay only in the end-wait path and ordinary input can bypass it. It is procedure wait state, not a second glyph/typewriter start delay.",
+        notes: "sub_47EDB0 -> sub_433880: message start delay pair.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH_SET_MESSAGE_INPUT_FORCES_COMPLETION,
@@ -17822,7 +17822,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: BOOLEAN_PARAMETER,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Nonzero allows an ordinary message input to complete CProcDspMsg even while glyph reveal is still active. It does not globally reveal text and is independent of AUTO.",
+        notes: "sub_47EF60 -> sub_433140: dword_565BB0.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH92_SET_TEXT_OBJECT_VALUE,
@@ -20084,6 +20084,18 @@ const PORTABLE_EQUIVALENT_OPCODES: &[NativeOpcode] = &[
     opcodes::GRAPH90_INITIALIZE_MAP_GRID,
     opcodes::GRAPH90_SET_MAP_VIEWPORT,
     opcodes::GRAPH90_REPLACE_MAP_TILE_ID,
+    opcodes::GRAPH90_START_WINDOW_MESSAGE_PROCEDURE,
+    opcodes::GRAPH_SET_MESSAGE_INPUT_SCOPE,
+    opcodes::GRAPH_SET_MESSAGE_INPUT_FILTER,
+    opcodes::GRAPH_SET_GLYPH_REVEAL_DELAY,
+    opcodes::GRAPH_SET_TEXT_REVEAL_ANIMATION,
+    opcodes::GRAPH_SET_TEXT_SETTLE_ANIMATION,
+    opcodes::GRAPH_SET_TEXT_AUTO_ADVANCE,
+    opcodes::GRAPH90_CONFIGURE_MESSAGE_CARET_FRAMES,
+    opcodes::GRAPH_SET_MESSAGE_START_DELAY,
+    opcodes::GRAPH90_SET_TEXT_SHADOW_PARAMETERS,
+    opcodes::GRAPH90_REGISTER_FULLWIDTH_GLYPH_STRIP,
+    opcodes::GRAPH_SET_MESSAGE_INPUT_FORCES_COMPLETION,
 ];
 
 const PARTIAL_IMPLEMENTATION_OPCODES: &[NativeOpcode] = &[
@@ -20191,11 +20203,6 @@ const PARTIAL_IMPLEMENTATION_OPCODES: &[NativeOpcode] = &[
     opcodes::GRAPH91_SET_MULTILAYER_LAYER_TRANSFORM_VELOCITY,
     opcodes::GRAPH90_SET_DISPLAY_OPTIONS,
     opcodes::GRAPH90_UPLOAD_MAP_TILE_DATA,
-    opcodes::GRAPH90_START_WINDOW_MESSAGE_PROCEDURE,
-    opcodes::GRAPH90_CONFIGURE_MESSAGE_CARET_FRAMES,
-    opcodes::GRAPH_SET_MESSAGE_START_DELAY,
-    opcodes::GRAPH90_SET_TEXT_SHADOW_PARAMETERS,
-    opcodes::GRAPH90_REGISTER_FULLWIDTH_GLYPH_STRIP,
     opcodes::GRAPH90_START_ITEM_SELECTION,
     opcodes::GRAPH90_DRAW_ITEM_SELECTION_GRID,
     opcodes::GRAPH90_START_ITEM_SELECTION_EX,
@@ -20275,8 +20282,6 @@ const PARTIAL_IMPLEMENTATION_OPCODES: &[NativeOpcode] = &[
     opcodes::SYS_SHELL_OPEN,
     opcodes::SYS_REMOVE_INSTALLER_SHORTCUTS,
     opcodes::SYS_READ_WINDOWS_PATH_FILE,
-    opcodes::GRAPH_SET_MESSAGE_INPUT_SCOPE,
-    opcodes::GRAPH_SET_MESSAGE_INPUT_FILTER,
     opcodes::GRAPH92_PRELOAD_BITMAP_RESOURCE,
     opcodes::GRAPH92_CANCEL_PENDING_BITMAP_PRELOADS,
     opcodes::GRAPH92_READ_BITMAP_PIXEL_VALUE,
@@ -20284,11 +20289,6 @@ const PARTIAL_IMPLEMENTATION_OPCODES: &[NativeOpcode] = &[
     opcodes::GRAPH92_DRAW_BITMAP_TEXT_MEASURE,
     opcodes::GRAPH92_DRAW_WRAPPED_BITMAP_TEXT,
     opcodes::GRAPH92_LOAD_EXTERNAL_BMP,
-    opcodes::GRAPH_SET_GLYPH_REVEAL_DELAY,
-    opcodes::GRAPH_SET_TEXT_REVEAL_ANIMATION,
-    opcodes::GRAPH_SET_TEXT_SETTLE_ANIMATION,
-    opcodes::GRAPH_SET_TEXT_AUTO_ADVANCE,
-    opcodes::GRAPH_SET_MESSAGE_INPUT_FORCES_COMPLETION,
     opcodes::GRAPH92_SET_TEXT_OBJECT_VALUE,
     opcodes::GRAPH92_COMPOSITE_RESOURCE_INTO_TEXT_OBJECT,
     opcodes::GRAPH92_SET_TEXT_OBJECT_AUXILIARY_VALUE,

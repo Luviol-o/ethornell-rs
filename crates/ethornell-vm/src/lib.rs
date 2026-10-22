@@ -4713,6 +4713,12 @@ impl Vm {
                     let window = self.pop_int()?;
                     let destination = self.pop_ptr()?;
                     let region = api.query_graph_window_valid_region(window);
+                    // sub_47EA50: an unknown window is fatal.
+                    if region.is_none() {
+                        return Err(VmError::Runtime(
+                            "無効なウィンドウハンドルが指定されました".into(),
+                        ));
+                    }
                     if let Some(region) = region {
                         for (index, value) in region.into_iter().enumerate() {
                             self.write_int(
@@ -4756,7 +4762,7 @@ impl Vm {
                         api.configure_message_caret_frames(table_pointer, frame_count, &frames)
                     {
                         return Err(VmError::Runtime(format!(
-                            "Graph90:98 invalid caret bitmap #{bitmap}"
+                            "指定されたビットマップ [ {bitmap} ] は存在しないか、スクリーンと互換性がありません"
                         )));
                     }
                     Value::None

@@ -4097,19 +4097,27 @@ impl RuntimeTraceApi {
                 // glyph slots beginning at codepoint 0xFF01.
                 let character_count = pop_int_value(stack).unwrap_or_default();
                 let bitmap = pop_int_value(stack).unwrap_or_default();
-                if character_count <= 0 {
+                // sub_433320: count > 0xFF (unsigned) (1), missing bitmap
+                // (2), width not divisible (3) are fatal; 0 clears.
+                let fail = |message: String| Some(Err(ethornell_vm::VmError::Runtime(message)));
+                if character_count as u32 > 0xFF {
+                    return fail(format!("無効な文字数 [ {character_count} ] が指定されました"));
+                }
+                if character_count == 0 {
                     self.fullwidth_glyph_bitmap = None;
                     self.fullwidth_glyph_count = 0;
                     self.fullwidth_glyph_cell_width = 0;
-                } else if character_count <= 255
-                    && let Some((width, _height)) = self.bitmap_dimensions.get(&bitmap).copied()
-                {
+                } else {
+                    let Some((width, _height)) = self.bitmap_dimensions.get(&bitmap).copied() else {
+                        return fail(format!("無効なビットマップ [ {bitmap} ] が指定されました"));
+                    };
                     let count = character_count as u32;
-                    if count != 0 && width % count == 0 {
-                        self.fullwidth_glyph_bitmap = Some(bitmap);
-                        self.fullwidth_glyph_count = character_count;
-                        self.fullwidth_glyph_cell_width = (width / count) as i32;
+                    if width % count != 0 {
+                        return fail(format!("指定されたビットマップ [ {bitmap} ] は適合しません"));
                     }
+                    self.fullwidth_glyph_bitmap = Some(bitmap);
+                    self.fullwidth_glyph_count = character_count;
+                    self.fullwidth_glyph_cell_width = (width / count) as i32;
                 }
                 tracing::info!(
                     bitmap,
