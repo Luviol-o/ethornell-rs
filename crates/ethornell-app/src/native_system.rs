@@ -257,13 +257,13 @@ pub(super) fn set_win32_file_attributes(path: &Path, attrs: u32) -> bool {
     true
 }
 
-#[cfg(unix)]
+#[cfg(any(target_vendor = "apple", target_os = "linux", target_os = "android"))]
 fn xattr_path(path: &Path) -> Option<std::ffi::CString> {
     use std::os::unix::ffi::OsStrExt;
     std::ffi::CString::new(path.as_os_str().as_bytes()).ok()
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(target_vendor = "apple")]
 fn read_win32_attribute_xattr(path: &Path) -> Option<u32> {
     let path = xattr_path(path)?;
     let mut value = [0u8; 4];
@@ -274,7 +274,7 @@ fn read_win32_attribute_xattr(path: &Path) -> Option<u32> {
     (read == 4).then(|| u32::from_le_bytes(value))
 }
 
-#[cfg(any(target_os="linux",target_os="android"))]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn read_win32_attribute_xattr(path: &Path) -> Option<u32> {
     let path = xattr_path(path)?;
     let mut value = [0u8; 4];
@@ -285,7 +285,7 @@ fn read_win32_attribute_xattr(path: &Path) -> Option<u32> {
     (read == 4).then(|| u32::from_le_bytes(value))
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(target_vendor = "apple")]
 fn write_win32_attribute_xattr(path: &Path, attrs: u32) {
     if let Some(path) = xattr_path(path) {
         let value = attrs.to_le_bytes();
@@ -296,7 +296,7 @@ fn write_win32_attribute_xattr(path: &Path, attrs: u32) {
     }
 }
 
-#[cfg(any(target_os="linux",target_os="android"))]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn write_win32_attribute_xattr(path: &Path, attrs: u32) {
     if let Some(path) = xattr_path(path) {
         let value = attrs.to_le_bytes();
@@ -307,12 +307,14 @@ fn write_win32_attribute_xattr(path: &Path, attrs: u32) {
     }
 }
 
-#[cfg(not(any(target_os="macos",target_os="linux",target_os="android")))]
+// FreeBSD has extattr_* instead of xattrs; Windows and the web keep no
+// attribute store.
+#[cfg(not(any(target_vendor = "apple", target_os = "linux", target_os = "android")))]
 fn read_win32_attribute_xattr(_path: &Path) -> Option<u32> {
     None
 }
 
-#[cfg(not(any(target_os="macos",target_os="linux",target_os="android")))]
+#[cfg(not(any(target_vendor = "apple", target_os = "linux", target_os = "android")))]
 fn write_win32_attribute_xattr(_path: &Path, _attrs: u32) {}
 
 /// CopyFileA(..., FALSE): overwrites the destination (unless it is read-only),

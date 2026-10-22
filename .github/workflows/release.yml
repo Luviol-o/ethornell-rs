@@ -63,10 +63,12 @@ jobs:
           prepare: |
             set -e
             pkg update
-            pkg install -y git curl rust pkgconf cmake gmake alsa-lib \
+            pkg install -y git curl rust pkgconf cmake gmake alsa-lib openjdk17 \
               libX11 libXcursor libXi libXrandr libxcb wayland libxkbcommon vulkan-loader
           run: |
             set -e
+            # ruffle_core's build script compiles its ActionScript library with Java.
+            export JAVA_HOME=/usr/local/openjdk17 PATH=/usr/local/openjdk17/bin:$PATH
             freebsd-version
             rustc -V
             cargo build --release --locked -p ethornell-cli --bin ethornell
