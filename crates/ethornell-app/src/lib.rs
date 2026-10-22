@@ -10698,8 +10698,10 @@ mod input_tests {
         assert_eq!(api.surface_text_states[&surface].font_style, 1);
         assert_eq!(api.graph_config.text_global_properties[&0x8000_0000], 1);
 
+        // sub_42C870 refuses more than 800 and sub_484CD0 raises it.
         let mut invalid = vec![Value::Int(surface), Value::Int(801)];
-        call_graph(&mut api, 0x91, 0x89, &mut invalid).unwrap();
+        let error = call_graph(&mut api, 0x91, 0x89, &mut invalid).unwrap_err();
+        assert!(error.to_string().contains("隙間係数 [ 801 ]"));
         assert_eq!(api.graph_surfaces[&surface].line_spacing_percent, 50);
     }
 
@@ -22623,6 +22625,14 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
         Some([x, y])
     }
 
+    fn native_font_registered(&self, font: i32) -> bool {
+        self.native_user.font_face(font).is_some()
+    }
+
+    fn text_character_spacing(&self) -> i32 {
+        self.graph_defaults.text_layout.character_spacing
+    }
+
     fn graph91_landscape_hit_test(
         &self,
         landscape: i32,
@@ -25704,7 +25714,7 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
             }
             (0x91, 0x9c) => {
                 let args = pop_args(stack, 14);
-                let lines = self.graph91_draw_text(&args, 0);
+                let lines = self.graph91_draw_text(&args, 0)?;
                 return Ok(ethornell_vm::Value::Int(lines));
             }
             (0x90, 0x31) => {

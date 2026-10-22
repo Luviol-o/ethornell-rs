@@ -285,6 +285,14 @@ drawing is not yet the target's; do these as one renderer pass):
   raw BG payload). Port and verify under Unicorn like the SDC compressor.
 * Text glyphs come from host fonts; the anti-aliasing layouts of 90:0D
   are stored but GDI rasterization is not reproduced.
+* 91:9B with the glyph-box flag (p6) and 91:9C/9D layouts use GDI glyph
+  metrics (sub_4352B0 / sub_434F40); the app uses cell arithmetic. 91:93's
+  p3 drops the default text effects (sub_4351E0(0)) in the target only.
+* 91:90/92: the message object's p2 (vtable+0x20) and the sub_435150
+  options are not applied; the ruby margin is added at layout start for
+  every draw, while sub_435640 adds it only with its ruby argument set.
+* 91:55 links: a sprite masked by another sprite (Sprite+0x160) is stored
+  but not drawn as a mask.
 
 Deferred to ADR 0004 in 0x90: C4/C5 (external image import/export files).
 

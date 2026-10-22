@@ -17494,7 +17494,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_WINDOW_FONT_PARAMETERS,
         returns: "void; target reports native font/window validation errors",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_4840A0 pops render option, layout option, style, scale %, size, font id, window. An unregistered font id (sub_497AF0), a non-window handle, size outside 4..=200 and scale outside 25..=200 (sub_42EAB0) are fatal. sub_4409C0 stores layout option at window+0x354 and render option at +0x364; sub_42C3B0 stores size at +0x358 and size*scale/100 at +0x35C, and with +0x364 set narrows the valid rectangle's right edge to bitmap width-1 minus that width (sub_42B900, cursor reset).",
+        notes: "sub_484BA0: sub_498660 font number, window, sub_42EE90 size 4..=200 and width 25..=200 with target texts; render option narrows the valid rect.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_SET_WINDOW_LINE_SPACING,
@@ -17502,7 +17502,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_WINDOW_LINE_SPACING_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "0x004841D0 validates 0..=800 and stores CDspObjWindow+0x360.",
+        notes: "sub_484CD0 -> sub_42C870: window, spacing <= 800 fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_SET_WINDOW_MESSAGE_VARIANT,
@@ -17510,7 +17510,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: MESSAGE_VARIANT_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "0x00484250 stores CDspObjWindow+0x370; value one selects the ExVE path where consumed.",
+        notes: "sub_484D50 -> sub_42C930: window, variant <= 1 fatal, then sub_42C990 cursor reset (left/top or right/top).",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_SET_WINDOW_TEXT_LAYOUT_MODE,
@@ -17518,7 +17518,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_WINDOW_LAYOUT_MODE_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "0x004842D0 validates 0..=2 and stores CDspObjWindow+0x374.",
+        notes: "sub_484DD0 -> sub_42C960: window, mode <= 2 fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_SET_WINDOW_TEXT_CURSOR,
@@ -17526,7 +17526,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_WINDOW_CURSOR_SET_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "0x00484350 stores cursor X/Y at CDspObjWindow+0x368/+0x36C.",
+        notes: "sub_484E50 -> sub_42CAE0: window fatal; cursor +0x384/+0x388.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_GET_WINDOW_TEXT_CURSOR,
@@ -17534,7 +17534,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_WINDOW_HANDLE_PARAMETERS,
         returns: "three outputs: valid, cursor_x, cursor_y",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "0x004843A0 returns the window-exists flag followed by both cursor coordinates.",
+        notes: "sub_484EA0: window fatal; pushes 1, x, y.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_IS_WINDOW_TEXT_CURSOR_AT_BOUNDARY,
@@ -17542,7 +17542,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_WINDOW_HANDLE_PARAMETERS,
         returns: "i32 boolean",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_42C740 compares one cursor axis for exact equality with valid-rectangle origin plus dword_565BDC, selected by the message variant.",
+        notes: "sub_484EF0 -> sub_42CB20: window fatal; boundary is edge plus ruby margin.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_START_EXTENDED_MESSAGE,
@@ -17550,7 +17550,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_MESSAGE_EX_PARAMETERS,
         returns: "native procedure status 2",
         scheduling: NativeSchedulingEffect::WaitProcedure,
-        notes: "0x00484430 installs CProcDspMsgEx through sub_4911E0/sub_491220. The inherited CProcDspMsg constructor/destructor owns the exact +0x78 input-scope registration lifecycle; byte 0x0A remains an immediate line-layout control rather than one glyph interval.",
+        notes: "sub_484F30 -> sub_491D20: window, font set (+0x36C) fatal; DspMsgEx procedure, p3..p6 to +0x30/+0x38/+0x3C/+0x40.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_RENDER_WINDOW_TEXT,
@@ -17558,7 +17558,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_RENDER_TEXT_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "0x004844F0 performs the immediate window text render/update path.",
+        notes: "sub_484FF0 -> sub_4412D0 -> sub_42BB00: window and font fatal; glyphs are a renderer item.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_START_EXTENDED_MESSAGE_WITH_OPTION,
@@ -17566,7 +17566,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_MESSAGE_EX_OPTION_PARAMETERS,
         returns: "native procedure status 2",
         scheduling: NativeSchedulingEffect::WaitProcedure,
-        notes: "0x00484580 installs CProcDspMsgEx and supplies one additional constructor option.",
+        notes: "sub_485080: 91:90 with p3 option; same checks.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_RENDER_WINDOW_TEXT_WITH_STYLE_MODE,
@@ -17574,7 +17574,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_RENDER_TEXT_STYLE_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "0x00484650 selects default versus zeroed style state before immediate rendering.",
+        notes: "sub_485150: 91:91 with style switch p3; same checks.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_UPDATE_TEXT_SUBSTITUTION,
@@ -17582,7 +17582,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_TEXT_SUBSTITUTION_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "0x00484710 adds, removes, or clears the process-global substitution dictionary according to nullable arguments.",
+        notes: "sub_485210 -> sub_4637D0: null source clears, empty replacement removes, else registers.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_COUNT_TEXT_SUBSTITUTION_MATCHES,
@@ -17590,7 +17590,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_TEXT_SUBSTITUTION_COUNT_PARAMETERS,
         returns: "i32 match count",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_484740 -> sub_434920: appends 'base\\\\reading\\\\n' for every ruby-dictionary match of the source into the output buffer (the second argument, passed in ecx) and pushes the match count; no match writes nothing.",
+        notes: "sub_485240 -> sub_434CC0: base\\reading records of matches, count.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_REGISTER_TEXT_SUBSTITUTION_RECORDS,
@@ -17598,7 +17598,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_TEXT_SUBSTITUTION_RECORDS_PARAMETERS,
         returns: "i32 boolean",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "0x00484770 parses newline-delimited base\\reading records and registers them.",
+        notes: "sub_485270 -> sub_434DE0: base\\reading records up to newline; empty reading keeps the newline.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_SET_PERSISTENT_TEXT_STYLE,
@@ -17606,7 +17606,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_TEXT_STYLE_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "0x004847A0 resolves the font and calls sub_434440 with four script fields plus two target -1 defaults.",
+        notes: "sub_4852A0 -> sub_463820: font number resolved through sub_469110, p1..p4, -1, -1.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_CONFIGURE_TEXT_LAYOUT_GLOBALS,
@@ -17614,7 +17614,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_TEXT_LAYOUT_GLOBAL_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "0x00484800 maps all six BP arguments to the recovered globals, validates font_percent 25..=100 and boundary_offset >=0, and normalizes a zero denominator to one.",
+        notes: "sub_485300 -> sub_4346E0: ruby size rate 25..=100 and margin >= 0 fatal with target texts.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_SET_TEXT_SCALE_DIVISOR,
@@ -17622,7 +17622,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_TEXT_SCALE_DIVISOR_PARAMETERS,
         returns: "i32 boolean",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "0x004848E0 stores (value + 0xFFFF) / value in dword_5076B0 and rejects zero.",
+        notes: "sub_4853E0 -> sub_407B60: unsigned (d+0xFFFF)/d, 0 refused.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_SET_TEXT_GLOBAL_PROPERTY,
@@ -17630,7 +17630,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_TEXT_GLOBAL_PROPERTY_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "0x00484910 accepts exactly selectors 0 and 0x80000000..0x80000002; selector 0x80000001 requires a nonnegative value.",
+        notes: "sub_485410 -> sub_434750: unknown function number and negative 0x80000001 parameter fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_MEASURE_TEXT,
@@ -17638,7 +17638,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_TEXT_MEASURE_PARAMETERS,
         returns: "i32 status and one BP output DWORD",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "0x004849B0 reaches sub_403BA0/sub_434F00 and writes one measured value through the first source-order pointer.",
+        notes: "sub_4854B0 -> sub_403BA0: p2 font number, p3 size, p4 width; returned statuses 0x80000001..3; cell-width arithmetic of sub_4352B0.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_DRAW_TEXT,
@@ -17646,7 +17646,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_DRAW_TEXT_PARAMETERS,
         returns: "updated X/coordinate value",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "0x00484A30 selects source argument 0 as the destination bitmap, then sub_403B10 -> sub_434BA0 -> sub_434C50 rasterizes the supplied text directly into that bitmap. Source arguments 1/2 are X/Y, 3 is text, 7/8 are glyph size/horizontal scale, 11 is character spacing, and 13 is packed RGB; remaining font/style fields are forwarded to the native renderer. No persistent display/text node is created. Portable rendering now commits glyph pixels before later bitmap composition.",
+        notes: "sub_485530 -> sub_403B10: bitmap validator, font number, bitmap exists, size, width fatal; glyph layout is a renderer item.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_DRAW_TEXT_WITH_STYLE_MODE,
@@ -17654,7 +17654,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_DRAW_TEXT_STYLE_PARAMETERS,
         returns: "updated X/coordinate value",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "0x00484C40 has the same direct bitmap renderer ABI as Graph91:9C plus source argument 14 as a style-mode selector. Zero uses sub_433570 default style state; nonzero builds a zeroed/alternate style through sub_434E30 before the same sub_403B10 -> sub_434BA0 -> sub_434C50 pixel path. No display-tree text node is created.",
+        notes: "sub_485740: 91:9C with style switch p14.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_EXTRACT_TEXT_LABELS,
@@ -17662,7 +17662,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_TEXT_LABEL_PARAMETERS,
         returns: "i32 record count",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_437EE0 extracts nonempty case-insensitive <l> payloads into zero-filled 128-byte records and truncates each payload to 95 encoded bytes.",
+        notes: "sub_485990 -> sub_4382A0: byte scan, \"<l>\" before \"<L>\", 95-byte payloads in 128-byte records, null output only counts.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_STRIP_TEXT_MARKUP,
@@ -17670,7 +17670,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_STRIP_MARKUP_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_438070 removes tags beginning with an ASCII letter or slash while preserving malformed/non-tag less-than characters.",
+        notes: "sub_4859C0 -> sub_438430: byte-exact tag strip including the v2+2 '>' search.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_CREATE_EXTENDED_ICON_INPUT_PROCESSOR,
@@ -20162,6 +20162,15 @@ const PORTABLE_EQUIVALENT_OPCODES: &[NativeOpcode] = &[
     opcodes::GRAPH91_SET_LANDSCAPE_CELL_COLUMN,
     opcodes::GRAPH91_GET_LANDSCAPE_CELL_VALUE,
     opcodes::GRAPH91_COPY_LANDSCAPE_CELL_IMAGE,
+    opcodes::GRAPH91_START_EXTENDED_MESSAGE,
+    opcodes::GRAPH91_RENDER_WINDOW_TEXT,
+    opcodes::GRAPH91_START_EXTENDED_MESSAGE_WITH_OPTION,
+    opcodes::GRAPH91_RENDER_WINDOW_TEXT_WITH_STYLE_MODE,
+    opcodes::GRAPH91_SET_PERSISTENT_TEXT_STYLE,
+    opcodes::GRAPH91_CONFIGURE_TEXT_LAYOUT_GLOBALS,
+    opcodes::GRAPH91_MEASURE_TEXT,
+    opcodes::GRAPH91_DRAW_TEXT,
+    opcodes::GRAPH91_DRAW_TEXT_WITH_STYLE_MODE,
 ];
 
 const PARTIAL_IMPLEMENTATION_OPCODES: &[NativeOpcode] = &[
@@ -20229,15 +20238,6 @@ const PARTIAL_IMPLEMENTATION_OPCODES: &[NativeOpcode] = &[
     opcodes::GRAPH91_OPEN_DIRECTSHOW_MOVIE,
     opcodes::GRAPH91_START_DIRECTSHOW_MOVIE,
     opcodes::GRAPH91_GET_MOVIE_POSITION,
-    opcodes::GRAPH91_START_EXTENDED_MESSAGE,
-    opcodes::GRAPH91_RENDER_WINDOW_TEXT,
-    opcodes::GRAPH91_START_EXTENDED_MESSAGE_WITH_OPTION,
-    opcodes::GRAPH91_RENDER_WINDOW_TEXT_WITH_STYLE_MODE,
-    opcodes::GRAPH91_SET_PERSISTENT_TEXT_STYLE,
-    opcodes::GRAPH91_CONFIGURE_TEXT_LAYOUT_GLOBALS,
-    opcodes::GRAPH91_MEASURE_TEXT,
-    opcodes::GRAPH91_DRAW_TEXT,
-    opcodes::GRAPH91_DRAW_TEXT_WITH_STYLE_MODE,
     opcodes::GRAPH90_SET_DISPLAY_OPTIONS,
     opcodes::GRAPH90_UPLOAD_MAP_TILE_DATA,
     opcodes::GRAPH90_IMPORT_EXTERNAL_IMAGE,

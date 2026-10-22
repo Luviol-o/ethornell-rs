@@ -121,27 +121,9 @@ impl Value {
     }
 }
 
-fn measure_text_width_value(value: &Value, font_size: i32, max_width: i32) -> i32 {
-    let text = match value {
-        Value::Str(text) => text.as_str(),
-        Value::Int(0) | Value::Ptr(0) | Value::None => "",
-        Value::Int(_) | Value::Ptr(_) | Value::Func { .. } | Value::Program(_) => {
-            return max_width.max(font_size);
-        }
-    };
-    let mut width = 0i32;
-    for ch in text.chars() {
-        width += if ch.is_ascii() {
-            (font_size + 1) / 2
-        } else {
-            font_size
-        };
-    }
-    if max_width > 0 {
-        width.min(max_width)
-    } else {
-        width
-    }
+/// _ismbblead for code page 932.
+fn is_sjis_lead_byte(byte: u8) -> bool {
+    matches!(byte, 0x81..=0x9F | 0xE0..=0xFC)
 }
 
 #[derive(Debug, Clone)]
@@ -1304,6 +1286,16 @@ pub trait GraphApi {
 
     /// Release host-side message-active state after the procedure completes.
     fn finish_native_message(&mut self) {}
+
+    /// sub_469110: whether a 0xB0 font number is registered.
+    fn native_font_registered(&self, _font: i32) -> bool {
+        true
+    }
+
+    /// dword_565BC0, the character spacing set by 91:98.
+    fn text_character_spacing(&self) -> i32 {
+        0
+    }
 
     fn register_graph_color_lut(&mut self, _id: i32, _points: [[i32; 2]; 3]) -> bool {
         false
@@ -4945,11 +4937,10 @@ impl Vm {
                     }
                     Value::None
                 } else if (code, id) == (0x91, 0x9f) {
-                    let source = self.pop_string_lossy()?;
+                    let source = self.pop_native_string_bytes()?;
                     let destination = self.pop_ptr()?;
                     let stripped = strip_native_markup_tags(&source);
-                    tracing::debug!(%source, %stripped, "GraphStripTextMarkup");
-                    self.write_c_string(destination, &stripped)?;
+                    self.write_c_string_native_bytes(destination, &stripped)?;
                     Value::None
                 } else if (code, id) == (0x91, 0x3e) {
                     let call_stack = self.take_dispatch_call_frame(code, id)?;
@@ -4959,22 +4950,19 @@ impl Vm {
                     self.write_int(1072, 2, result.as_i32() as u32)?;
                     Value::None
                 } else if (code, id) == (0x91, 0x9b) {
-                    self.handle_text_measure_call()?;
-                    Value::Int(0)
+                    self.handle_text_measure_call(api)?
                 } else if (code, id) == (0x91, 0x9e) {
                     // sub_437EE0 extracts every non-empty <l>...</l> payload
                     // into consecutive zero-padded 128-byte records.
-                    let source = self.pop_string_lossy()?;
+                    let source = self.pop_native_string_bytes()?;
                     let destination = self.pop_ptr()?;
                     let labels = extract_native_labels(&source);
-                    for (index, label) in labels.iter().enumerate() {
+                    // A null output only counts.
+                    for (index, label) in labels.iter().enumerate().filter(|_| destination != 0) {
                         let address = destination.wrapping_add((index * 128) as u32);
-                        let (encoded, _, _) = encoding_rs::SHIFT_JIS.encode(label);
-                        let size = encoded.len().min(95);
                         let range = self.resolve_write_range(address, 128)?;
                         self.memory[range.clone()].fill(0);
-                        self.memory[range.start..range.start + size]
-                            .copy_from_slice(&encoded[..size]);
+                        self.memory[range.start..range.start + label.len()].copy_from_slice(label);
                         self.clear_shadow_values(address, 128);
                     }
                     Value::Int(labels.len() as i32)
@@ -7618,17 +7606,42 @@ impl Vm {
         })
     }
 
-    fn handle_text_measure_call(&mut self) -> VmResult<()> {
-        let _flags = self.pop_value()?;
-        let _style = self.pop_value()?;
-        let _scale = self.pop_value()?;
-        let font_size = self.pop_value()?.as_i32().max(1);
-        let max_width = self.pop_value()?.as_i32().max(0);
-        let text = self.pop_value()?;
+    /// sub_4854B0 -> sub_403BA0: font number (p2), size (p3), width
+    /// percent (p4) and style (p5) go through sub_4035A0, whose failures
+    /// are returned, not raised: no face 0x80000003, size outside 4..=200
+    /// 0x80000001, width outside 25..=200 0x80000002. sub_4352B0 without the
+    /// glyph flag (p6) advances size*width/100 per double-byte character,
+    /// half that per single byte, plus the 91:98 character spacing after
+    /// every character but the last. The glyph-box path (p6 != 0) uses GDI
+    /// metrics; it shares this cell arithmetic here.
+    fn handle_text_measure_call<A: GraphApi + ?Sized>(&mut self, api: &mut A) -> VmResult<Value> {
+        let _glyph_metrics = self.pop_int()?;
+        let _style = self.pop_int()?;
+        let width_percent = self.pop_int()?;
+        let font_size = self.pop_int()?;
+        let font = self.pop_int()?;
+        let text = self.pop_native_string_bytes()?;
         let dest = self.pop_ptr()?;
-        let measured = measure_text_width_value(&text, font_size, max_width);
-        self.write_int(dest, 2, measured as u32)?;
-        Ok(())
+        if !api.native_font_registered(font) {
+            return Ok(Value::Int(0x8000_0003_u32 as i32));
+        }
+        if !(4..=200).contains(&font_size) {
+            return Ok(Value::Int(0x8000_0001_u32 as i32));
+        }
+        if !(25..=200).contains(&width_percent) {
+            return Ok(Value::Int(0x8000_0002_u32 as i32));
+        }
+        let cell = font_size * width_percent / 100;
+        let spacing = api.text_character_spacing();
+        let mut width = 0i32;
+        let mut index = 0;
+        while index < text.len() {
+            let double = is_sjis_lead_byte(text[index]) && text.get(index + 1).is_some_and(|&b| b != 0);
+            width = width.wrapping_add(if double { cell } else { cell / 2 }).wrapping_add(spacing);
+            index += if double { 2 } else { 1 };
+        }
+        self.write_int(dest, 2, width.wrapping_sub(spacing) as u32)?;
+        Ok(Value::Int(0))
     }
 
     fn write_value(&mut self, ptr: u32, width: u8, value: &Value) -> VmResult<()> {
@@ -12074,43 +12087,52 @@ impl Vm {
     }
 }
 
-fn strip_native_markup_tags(source: &str) -> String {
-    let mut output = String::with_capacity(source.len());
-    let mut rest = source;
-    while let Some(start) = rest.find('<') {
-        output.push_str(&rest[..start]);
-        let tag = &rest[start..];
-        let valid_tag = tag
-            .as_bytes()
-            .get(1)
-            .is_some_and(|byte| byte.is_ascii_alphabetic() || *byte == b'/');
-        if valid_tag {
-            if let Some(end) = tag.find('>') {
-                rest = &tag[end + 1..];
-                continue;
-            }
+/// sub_438430 on the native bytes: after a '<' followed by a letter or '/',
+/// the closing '>' is searched from two bytes past the current position
+/// (not past the '<'), and everything before the '<' is copied. Any other
+/// '<' moves the scan one byte. An unclosed tag ends the scan.
+fn strip_native_markup_tags(source: &[u8]) -> Vec<u8> {
+    let mut output = Vec::with_capacity(source.len());
+    let mut position = 0;
+    while let Some(relative) = scenario::find_bytes(&source[position..], b"<") {
+        let tag = position + relative;
+        let next = source.get(tag + 1).copied().unwrap_or(0);
+        if next.is_ascii_alphabetic() || next == b'/' {
+            let from = position + 2;
+            let Some(end) = scenario::find_bytes(&source[from..], b">") else {
+                break;
+            };
+            output.extend_from_slice(&source[position..tag]);
+            position = from + end + 1;
+        } else {
+            output.push(source[position]);
+            position += 1;
         }
-        output.push('<');
-        rest = &tag[1..];
     }
-    output.push_str(rest);
+    output.extend_from_slice(&source[position..]);
     output
 }
 
-fn extract_native_labels(source: &str) -> Vec<String> {
-    let lower = source.to_ascii_lowercase();
+/// sub_4382A0: "<l>" is searched before "<L>" and "</l>" before "</L>";
+/// the scan resumes three bytes past the closing tag. Empty labels are
+/// skipped; each payload keeps at most 95 bytes.
+fn extract_native_labels(source: &[u8]) -> Vec<Vec<u8>> {
+    let find = |from: usize, lower: &[u8], upper: &[u8]| {
+        scenario::find_bytes(&source[from..], lower)
+            .or_else(|| scenario::find_bytes(&source[from..], upper))
+            .map(|relative| from + relative)
+    };
     let mut labels = Vec::new();
-    let mut offset = 0;
-    while let Some(relative_start) = lower[offset..].find("<l>") {
-        let start = offset + relative_start + 3;
-        let Some(relative_end) = lower[start..].find("</l>") else {
+    let mut position = 0;
+    while let Some(open) = find(position, b"<l>", b"<L>") {
+        let start = open + 3;
+        let Some(end) = find(start, b"</l>", b"</L>") else {
             break;
         };
-        let end = start + relative_end;
         if end != start {
-            labels.push(source[start..end].to_string());
+            labels.push(source[start..end.min(start + 95)].to_vec());
         }
-        offset = end + 4;
+        position = end + 3;
     }
     labels
 }
@@ -12870,15 +12892,10 @@ impl GraphApi for TraceApi {
                 let _arg1 = stack.pop();
             }
             (0x91, 0x9b) => {
-                let _flags = stack.pop();
-                let _style = stack.pop();
-                let _scale = stack.pop();
-                let font_size = stack.pop().map(|value| value.as_i32()).unwrap_or(24);
-                let max_width = stack.pop().map(|value| value.as_i32()).unwrap_or(0);
-                let text = stack.pop().unwrap_or(Value::None);
-                let _dest = stack.pop();
-                let measured = measure_text_width_value(&text, font_size.max(1), max_width);
-                return Ok(Value::Int(measured));
+                for _ in 0..7 {
+                    stack.pop();
+                }
+                return Ok(Value::Int(0));
             }
             (0x90, 0x95) => {
                 let _b = stack.pop();
@@ -15749,12 +15766,21 @@ mod tests {
     }
 
     #[test]
-    fn native_markup_strip_matches_sub_438070() {
+    fn native_markup_strip_matches_sub_438430() {
+        let strip = |text: &str| {
+            let bytes = encoding_rs::SHIFT_JIS.encode(text).0;
+            encoding_rs::SHIFT_JIS.decode(&strip_native_markup_tags(&bytes)).0.into_owned()
+        };
+        assert_eq!(strip("序章<Ruby>本文</Ruby><1>保持"), "序章本文<1>保持");
+        assert_eq!(strip("未閉合<Tag"), "未閉合<Tag");
+        // The '>' search starts two bytes past the scan position, so an
+        // earlier '>' closes the tag and the bytes after it repeat.
+        assert_eq!(strip("ab>c<d>"), "ab>cc");
+        // Lowercase "<l>" is found first even after an earlier "<L>".
         assert_eq!(
-            strip_native_markup_tags("序章<Ruby>本文</Ruby><1>保持"),
-            "序章本文<1>保持"
+            super::extract_native_labels(b"<L>a</l><l></l><l>b</L>"),
+            vec![b"b".to_vec()]
         );
-        assert_eq!(strip_native_markup_tags("未閉合<Tag"), "未閉合<Tag");
     }
 
     #[test]

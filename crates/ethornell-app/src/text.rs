@@ -412,9 +412,32 @@ impl RuntimeTraceApi {
     /// `[0]` colour, `[1]` line-spacing percent, `[2]` kinsoku, `[3]` vertical,
     /// `[5]` horizontal percent, `[6]` font height, `[8]` ruby-record text,
     /// `[10]` text, `[11]` y, `[12]` x, `[13]` target bitmap.
-    pub(crate) fn graph91_draw_text(&mut self, args: &[ethornell_vm::Value], shift: usize) -> i32 {
+    /// 91:9C/9D (sub_485530 / sub_485740): sub_4986D0 on the bitmap,
+    /// sub_498660 on the font number (p6), then sub_403B10: a missing
+    /// bitmap, size outside 4..=200 (p7) or width outside 25..=200 (p8) are
+    /// script errors.
+    pub(crate) fn graph91_draw_text(
+        &mut self,
+        args: &[ethornell_vm::Value],
+        shift: usize,
+    ) -> ethornell_vm::VmResult<i32> {
         let at = |index: usize| args.get(index + shift).map(value_to_i32).unwrap_or_default();
         let target = at(13);
+        let fail = |text: String| Err(ethornell_vm::VmError::Runtime(text));
+        crate::target_checks::bitmap(target)?;
+        let font = at(7);
+        if self.native_user.font_face(font).is_none() {
+            return fail(format!("無効なフォント番号 [ {font} ] が指定されました"));
+        }
+        if ethornell_vm::GraphApi::query_bitmap_info(self, target).is_none() {
+            return fail(format!("指定されたビットマップ [ {target} ] は存在しません"));
+        }
+        if !(4..=200).contains(&at(6)) {
+            return fail(format!("指定されたフォントサイズ [ {} ] は無効です", at(6)));
+        }
+        if !(25..=200).contains(&at(5)) {
+            return fail(format!("指定されたフォント幅 [ {} ] は無効です", at(5)));
+        }
         let (x, y) = (at(12), at(11));
         let text = args.get(10 + shift).and_then(value_to_text_string);
         let size = Some(at(6))
@@ -446,7 +469,7 @@ impl RuntimeTraceApi {
             None => 1,
         };
         tracing::info!(target, text = ?text, size, kinsoku = at(2) != 0, pitch_percent = at(1), lines, "GraphDrawTextEx");
-        lines
+        Ok(lines)
     }
 
     pub(crate) fn store_bitmap_text_run(&mut self, bitmap: i32, node: RuntimeTextNode) {
@@ -1016,8 +1039,20 @@ impl RuntimeTraceApi {
                 .get(&surface.id)
                 .copied()
                 .unwrap_or_default();
-            state.x = cursor.cursor_x as f32;
-            state.y = cursor.cursor_y as f32;
+            // sub_435640 / sub_438790: a line starting on the valid edge is
+            // pushed in by the ruby margin (91:98 p4, dword_565BEC) at
+            // layout time; sub_42C990 itself resets to the bare edge.
+            let margin = self.graph_defaults.text_layout.boundary_offset;
+            let (mut x, mut y) = (cursor.cursor_x, cursor.cursor_y);
+            if surface.message_variant == 1 {
+                if y == surface.valid_top {
+                    y = y.saturating_add(margin);
+                }
+            } else if x == surface.valid_left {
+                x = x.saturating_add(margin);
+            }
+            state.x = x as f32;
+            state.y = y as f32;
             state.width = (surface.valid_right as f32 + 1.0 - state.x).max(1.0);
             state.height = (surface.valid_bottom as f32 + 1.0 - state.y).max(1.0);
             if cursor.font_size > 0 {
@@ -1065,11 +1100,13 @@ impl RuntimeTraceApi {
         }
     }
 
+    /// sub_42C990: horizontal windows restart at the valid rectangle's
+    /// top-left, vertical ones (variant 1) at its top-right.
     pub(crate) fn reset_window_text_cursor(&mut self, target: i32) {
         if let Some(surface) = self.graph_surfaces.get(&target) {
-            let offset = self.graph_defaults.text_layout.boundary_offset;
+            let x = if surface.message_variant == 1 { surface.valid_right } else { surface.valid_left };
             let state = self.surface_text_states.entry(target).or_default();
-            state.cursor_x = surface.valid_left.saturating_add(offset);
+            state.cursor_x = x;
             state.cursor_y = surface.valid_top;
         }
     }

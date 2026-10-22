@@ -87,6 +87,7 @@ pub(super) struct Graph91MultiLayerBackgroundState {
     pub layers: [Graph91MultiLayerRecord; 8],
 }
 
+const WINDOW_HANDLE: &str = "無効なウィンドウハンドルが指定されました";
 const GRAPH91_EFFECTOR_TAG: u32 = 0x9100_0000;
 const GRAPH91_EFFECTOR_SLOTS: u32 = 8;
 const GRAPH91_LANDSCAPE_TAG: u32 = 0xA100_0000;
@@ -748,6 +749,25 @@ impl RuntimeTraceApi {
         }
     }
 
+    /// sub_440A80: a live CDspObjWindow handle.
+    fn graph91_is_window(&self, window: i32) -> bool {
+        Self::is_window_surface_handle(window) && self.graph_surfaces.contains_key(&window)
+    }
+
+    /// sub_491D20 / sub_42BB00: the window must exist and have a font from
+    /// 91:88.
+    fn graph91_window_with_font(&self, window: i32) -> ethornell_vm::VmResult<()> {
+        if !self.graph91_is_window(window) {
+            return Err(ethornell_vm::VmError::Runtime(WINDOW_HANDLE.into()));
+        }
+        if self.surface_text_states.get(&window).is_none_or(|state| state.font_size == 0) {
+            return Err(ethornell_vm::VmError::Runtime(
+                "指定されたウィンドウにはフォントが設定されていません".into(),
+            ));
+        }
+        Ok(())
+    }
+
     pub(super) fn dispatch_system91_88_9f(
         &mut self,
         call: &mut ethornell_vm::NativeCallFrame,
@@ -765,6 +785,10 @@ impl RuntimeTraceApi {
             let text_index = count - 2;
             let text = args.get(text_index).and_then(value_to_string);
             let target = args.last().map(value_to_i32).unwrap_or_default();
+            // sub_491D20: the window, then its font (CDspObjWindow+0x36C).
+            if let Err(error) = self.graph91_window_with_font(target) {
+                return Some(Err(error));
+            }
             if let Some(text) = text.as_deref() {
                 self.native_message_surface_target = Some(target);
                 self.start_native_message(text.to_string(), Some(target));
@@ -794,24 +818,20 @@ impl RuntimeTraceApi {
                 let font_size = pop_int_value(stack).unwrap_or_default();
                 let font_name_id = pop_int_value(stack).unwrap_or_default();
                 let window = pop_int_value(stack).unwrap_or_default();
-                let fail = |what: String| {
-                    Some(Err(ethornell_vm::VmError::Runtime(format!("Graph91:88 {what}"))))
-                };
-                // sub_497AF0, sub_4406C0, then sub_42EAB0's range checks;
-                // every failure is a script error.
+                let fail = |what: String| Some(Err(ethornell_vm::VmError::Runtime(what)));
+                // sub_484BA0: sub_498660 (registered font), then sub_440D80
+                // -> sub_42EE90's size and width ranges.
                 if self.native_user.font_face(font_name_id).is_none() {
-                    return fail(format!("font {font_name_id} is not registered"));
+                    return fail(format!("無効なフォント番号 [ {font_name_id} ] が指定されました"));
                 }
-                if !Self::is_window_surface_handle(window)
-                    || !self.graph_surfaces.contains_key(&window)
-                {
-                    return fail(format!("#{window} is not a window object"));
+                if !self.graph91_is_window(window) {
+                    return fail(WINDOW_HANDLE.into());
                 }
                 if !(4..=200).contains(&font_size) {
-                    return fail(format!("font size {font_size} is out of range"));
+                    return fail(format!("指定されたフォントサイズ [ {font_size} ] は無効です"));
                 }
                 if !(25..=200).contains(&scale_percent) {
-                    return fail(format!("font scale {scale_percent}% is out of range"));
+                    return fail(format!("指定されたフォント幅 [ {scale_percent} ] は無効です"));
                 }
                 let state = self.surface_text_states.entry(window).or_default();
                 state.font = font_name_id;
@@ -842,63 +862,88 @@ impl RuntimeTraceApi {
                 }
                 ethornell_vm::Value::None
             }
+            // sub_484CD0 -> sub_440E10 -> sub_42C870: at most 800.
             0x89 => {
                 let spacing = pop_int_value(stack).unwrap_or_default();
                 let window = pop_int_value(stack).unwrap_or_default();
-                if (0..=800).contains(&spacing)
-                    && let Some(surface) = self.graph_surfaces.get_mut(&window)
-                {
-                    surface.line_spacing_percent = spacing;
+                if !self.graph91_is_window(window) {
+                    return Some(Err(ethornell_vm::VmError::Runtime(WINDOW_HANDLE.into())));
                 }
+                if spacing as u32 > 800 {
+                    return Some(Err(ethornell_vm::VmError::Runtime(format!(
+                        "指定された隙間係数 [ {spacing} ] は無効です"
+                    ))));
+                }
+                self.graph_surfaces.get_mut(&window).unwrap().line_spacing_percent = spacing;
                 ethornell_vm::Value::None
             }
+            // sub_484D50 -> sub_440D00 -> sub_42C930: 0 or 1, then
+            // sub_42C990 restarts the cursor for the new direction.
             0x8a => {
                 let variant = pop_int_value(stack).unwrap_or_default();
                 let window = pop_int_value(stack).unwrap_or_default();
-                if (0..=1).contains(&variant)
-                    && let Some(surface) = self.graph_surfaces.get_mut(&window)
-                {
-                    surface.message_variant = variant;
+                if !self.graph91_is_window(window) {
+                    return Some(Err(ethornell_vm::VmError::Runtime(WINDOW_HANDLE.into())));
                 }
+                if variant as u32 > 1 {
+                    return Some(Err(ethornell_vm::VmError::Runtime(format!(
+                        "無効なメッセージ描画スタイル [ {variant} ] が指定されました"
+                    ))));
+                }
+                self.graph_surfaces.get_mut(&window).unwrap().message_variant = variant;
+                self.reset_window_text_cursor(window);
                 ethornell_vm::Value::None
             }
+            // sub_484DD0 -> sub_440D40 -> sub_42C960: 0..=2.
             0x8b => {
                 let mode = pop_int_value(stack).unwrap_or_default();
                 let window = pop_int_value(stack).unwrap_or_default();
-                if (0..=2).contains(&mode) && self.graph_surfaces.contains_key(&window) {
-                    self.surface_text_states
-                        .entry(window)
-                        .or_default()
-                        .text_layout_mode = mode;
+                if !self.graph91_is_window(window) {
+                    return Some(Err(ethornell_vm::VmError::Runtime(WINDOW_HANDLE.into())));
                 }
+                if mode as u32 > 2 {
+                    return Some(Err(ethornell_vm::VmError::Runtime(format!(
+                        "無効なメッセージスインギングスタイル [ {mode} ] が指定されました"
+                    ))));
+                }
+                self.surface_text_states.entry(window).or_default().text_layout_mode = mode;
                 ethornell_vm::Value::None
             }
+            // sub_484E50 -> sub_4413A0 -> sub_42CAE0 (+0x384/+0x388).
             0x8c => {
                 let y = pop_int_value(stack).unwrap_or_default();
                 let x = pop_int_value(stack).unwrap_or_default();
                 let window = pop_int_value(stack).unwrap_or_default();
-                if self.graph_surfaces.contains_key(&window) {
-                    let state = self.surface_text_states.entry(window).or_default();
-                    state.cursor_x = x;
-                    state.cursor_y = y;
-                    self.trace_graph(format!("window #{window} text-cursor=({x},{y})"));
+                if !self.graph91_is_window(window) {
+                    return Some(Err(ethornell_vm::VmError::Runtime(WINDOW_HANDLE.into())));
                 }
+                let state = self.surface_text_states.entry(window).or_default();
+                state.cursor_x = x;
+                state.cursor_y = y;
+                self.trace_graph(format!("window #{window} text-cursor=({x},{y})"));
                 ethornell_vm::Value::None
             }
+            // sub_484EA0 pushes 1, x, y.
             0x8d => {
                 let window = pop_int_value(stack).unwrap_or_default();
-                let exists = self.graph_surfaces.contains_key(&window);
+                if !self.graph91_is_window(window) {
+                    return Some(Err(ethornell_vm::VmError::Runtime(WINDOW_HANDLE.into())));
+                }
                 let state = self
                     .surface_text_states
                     .get(&window)
                     .copied()
                     .unwrap_or_default();
-                stack.push(ethornell_vm::Value::Int(i32::from(exists)));
+                stack.push(ethornell_vm::Value::Int(1));
                 stack.push(ethornell_vm::Value::Int(state.cursor_x));
                 ethornell_vm::Value::Int(state.cursor_y)
             }
+            // sub_484EF0 -> sub_441400 -> sub_42CB20.
             0x8e => {
                 let window = pop_int_value(stack).unwrap_or_default();
+                if !self.graph91_is_window(window) {
+                    return Some(Err(ethornell_vm::VmError::Runtime(WINDOW_HANDLE.into())));
+                }
                 let state = self
                     .surface_text_states
                     .get(&window)
@@ -914,9 +959,15 @@ impl RuntimeTraceApi {
                 });
                 ethornell_vm::Value::Int(i32::from(reached))
             }
+            // sub_484FF0 / sub_485150 -> sub_4412D0: window (255), then
+            // sub_42BB00 refuses a window without a font (17).
             0x91 | 0x93 => {
                 let count = if id == 0x91 { 5 } else { 6 };
                 let args = pop_args(stack, count);
+                let window = args.last().map(value_to_i32).unwrap_or_default();
+                if let Err(error) = self.graph91_window_with_font(window) {
+                    return Some(Err(error));
+                }
                 self.render_native_text_args(&args);
                 ethornell_vm::Value::None
             }
@@ -941,10 +992,16 @@ impl RuntimeTraceApi {
                     self.graph_defaults.register_ruby_records(&records),
                 ))
             }
+            // sub_4852A0 -> sub_463820: the first argument is a font number;
+            // sub_469110 turns an unregistered one into "no face".
             0x97 => {
                 let mut args = pop_args(stack, 5);
                 args.reverse();
-                let font_name = args.first().and_then(value_to_string);
+                let font_name = args
+                    .first()
+                    .map(value_to_i32)
+                    .and_then(|font| self.native_user.font_face(font))
+                    .map(str::to_string);
                 let mut values = [-1_i32; 6];
                 for (slot, value) in values[..4].iter_mut().zip(args.iter().skip(1)) {
                     *slot = value_to_i32(value);
@@ -963,14 +1020,24 @@ impl RuntimeTraceApi {
                     mode_flag,
                 ] = args.as_slice()
                 {
-                    let _ = self.graph_defaults.text_layout.configure([
+                    // sub_485300 -> sub_4346E0.
+                    if let Err(error) = self.graph_defaults.text_layout.configure([
                         *layout_advance,
                         *scale_denominator,
                         *character_spacing,
                         *font_percent,
                         *boundary_offset,
                         *mode_flag,
-                    ]);
+                    ]) {
+                        return Some(Err(ethornell_vm::VmError::Runtime(match error {
+                            graph_defaults::TextLayoutError::FontPercent(value) => format!(
+                                "無効な読み仮名のサイズレート [ {value} ] が指定されました"
+                            ),
+                            graph_defaults::TextLayoutError::BoundaryOffset(value) => format!(
+                                "無効な読み仮名の為の余白サイズ [ {value} ] が指定されました"
+                            ),
+                        })));
+                    }
                 }
                 ethornell_vm::Value::None
             }
@@ -981,15 +1048,21 @@ impl RuntimeTraceApi {
                 ))
             }
             0x9a => {
+                // sub_485410 -> sub_434750.
                 let value = pop_int_value(stack).unwrap_or_default();
                 let property = pop_int_value(stack).unwrap_or_default() as u32;
-                let accepted = matches!(property, 0 | 0x8000_0000 | 0x8000_0001 | 0x8000_0002)
-                    && (property != 0x8000_0001 || value >= 0);
-                if accepted {
-                    self.graph_config
-                        .text_global_properties
-                        .insert(property, value);
+                if !matches!(property, 0 | 0x8000_0000 | 0x8000_0001 | 0x8000_0002) {
+                    return Some(Err(ethornell_vm::VmError::Runtime(format!(
+                        "無効なファンクション番号 [ {} ] が指定されました",
+                        property as i32
+                    ))));
                 }
+                if property == 0x8000_0001 && value < 0 {
+                    return Some(Err(ethornell_vm::VmError::Runtime(format!(
+                        "無効なファンクションパラメータ [ {value} ] が指定されました"
+                    ))));
+                }
+                self.graph_config.text_global_properties.insert(property, value);
                 ethornell_vm::Value::None
             }
             0x9b => {
@@ -1001,8 +1074,10 @@ impl RuntimeTraceApi {
             0x9c | 0x9d => {
                 let count = if id == 0x9c { 14 } else { 15 };
                 let args = pop_args(stack, count);
-                let lines = self.graph91_draw_text(&args, usize::from(id == 0x9d));
-                ethornell_vm::Value::Int(lines)
+                match self.graph91_draw_text(&args, usize::from(id == 0x9d)) {
+                    Ok(lines) => ethornell_vm::Value::Int(lines),
+                    Err(error) => return Some(Err(error)),
+                }
             }
             0x9e => {
                 let source = pop_string_value(stack).unwrap_or_default();

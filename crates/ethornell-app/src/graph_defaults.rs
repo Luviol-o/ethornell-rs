@@ -169,7 +169,9 @@ impl TextLayoutDefaults {
         if divisor == 0 {
             return false;
         }
-        self.scale_reciprocal_16_16 = divisor.wrapping_add(0xffff) / divisor;
+        // sub_407B60 divides unsigned.
+        self.scale_reciprocal_16_16 =
+            ((divisor as u32).wrapping_add(0xffff) / divisor as u32) as i32;
         true
     }
 }

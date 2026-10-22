@@ -341,7 +341,7 @@ fn value_text(value: &BcsValue) -> Option<&str> {
     }
 }
 
-fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+pub(crate) fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack
         .windows(needle.len())
         .position(|window| window == needle)
