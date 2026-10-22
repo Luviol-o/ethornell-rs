@@ -1095,8 +1095,11 @@ impl RuntimeTraceApi {
             if cursor.font_size > 0 {
                 state.font_size = cursor.font_size as f32;
             }
-            state.line_height =
-                (state.font_size * (100 + surface.line_spacing_percent) as f32 / 100.0).max(1.0);
+            // sub_42C4C0: height + height * spacing / 100 in integers.
+            state.line_height = crate::text_layout::line_pitch(
+                state.font_size,
+                surface.line_spacing_percent,
+            );
         }
         if let Some(style) = target_surface
             .and_then(|id| self.surface_text_states.get(&id))
@@ -2406,14 +2409,25 @@ fn link_fragment_records(
         .collect()
 }
 
+/// Break `text` into the lines the window draws, from its cursor to the
+/// right edge of its valid rectangle (`state.width`): a glyph goes on the
+/// line while it ends at or before that edge (`sub_42C680`), measured with
+/// the glyph advances text is drawn with. Wide (CJK) glyphs break anywhere,
+/// with the kinsoku rules; other glyphs form words that break only at
+/// spaces, as Wonderful Everyday's English build does (the reference build
+/// has no word rule): a word goes on the line if it ends at least one font
+/// height before the edge, or at the edge when it ends in hanging
+/// punctuation, as the target lays out bitmap text (`sub_435290`). A space
+/// never starts a new line: it stays at the end of the line it follows. A
+/// word longer than a whole line breaks by glyph.
 fn wrap_text_to_state_with_map(
     text: &str,
     protected_spans: &[RuntimeRubySpan],
     state: &TextState,
 ) -> (String, Vec<usize>) {
-    let max_units = (state.width.max(120.0) / state.font_size.max(8.0))
-        .floor()
-        .max(8.0);
+    let size = state.font_size.max(1.0);
+    let bound = state.width.max(120.0);
+    let advance = |ch: char| crate::snapshot::glyph_advance(ch, size, 100.0);
     let max_lines = ((state.height.max(state.line_height) / state.line_height.max(1.0)).floor()
         as usize)
         .max(1);
@@ -2427,7 +2441,7 @@ fn wrap_text_to_state_with_map(
     let mut out = String::new();
     let mut map = vec![0usize; chars.len() + 1];
     let mut output_chars = 0usize;
-    let mut line_units = 0.0f32;
+    let mut line_x = 0.0f32;
     let mut lines = 1usize;
     let mut index = 0usize;
     while index < chars.len() {
@@ -2438,50 +2452,84 @@ fn wrap_text_to_state_with_map(
             }
             out.push('\n');
             output_chars += 1;
-            line_units = 0.0;
+            line_x = 0.0;
             lines += 1;
             index += 1;
             continue;
         }
 
         let chunk_end = protected_ends.get(&index).copied().unwrap_or(index + 1);
-        let chunk_units = chars[index..chunk_end]
+        let chunk_width = chars[index..chunk_end]
             .iter()
-            .map(|ch| wrap_char_units(*ch))
+            .map(|ch| advance(*ch))
             .sum::<f32>();
-        let mut projected_units = chunk_units;
-        if chunk_end == index + 1 && is_kinsoku_line_end(chars[index]) {
-            projected_units += chars
-                .get(chunk_end)
-                .filter(|ch| **ch != '\n')
-                .map(|ch| wrap_char_units(*ch))
-                .unwrap_or_default();
-        } else {
-            projected_units += chars[chunk_end..]
+        let single = chunk_end == index + 1;
+        let word_start =
+            single && is_word_char(chars[index]) && (index == 0 || !is_word_char(chars[index - 1]));
+        let needed = if single && chars[index] == ' ' {
+            0.0
+        } else if word_start {
+            let length = chars[index..]
                 .iter()
-                .take_while(|ch| **ch != '\n' && is_kinsoku_line_start(**ch))
-                .map(|ch| wrap_char_units(*ch))
+                .take_while(|ch| is_word_char(**ch))
+                .count();
+            let word = chars[index..index + length]
+                .iter()
+                .map(|ch| advance(*ch))
                 .sum::<f32>();
-        }
-        if line_units > 0.0 && line_units + projected_units > max_units {
+            // sub_435290's rule for bitmap text: keep one font height free
+            // at the right edge unless the word ends in hanging punctuation.
+            let reserve = if crate::text_layout::HANGING.contains(chars[index + length - 1]) {
+                0.0
+            } else {
+                size
+            };
+            if word + reserve > bound { chunk_width } else { word + reserve }
+        } else if single && is_kinsoku_line_end(chars[index]) {
+            chunk_width
+                + chars
+                    .get(chunk_end)
+                    .filter(|ch| **ch != '\n')
+                    .map(|ch| advance(*ch))
+                    .unwrap_or_default()
+        } else {
+            chunk_width
+                + chars[chunk_end..]
+                    .iter()
+                    .take_while(|ch| **ch != '\n' && is_kinsoku_line_start(**ch))
+                    .map(|ch| advance(*ch))
+                    .sum::<f32>()
+        };
+        if line_x > 0.0 && line_x + needed > bound {
             if lines >= max_lines {
                 break;
             }
             out.push('\n');
             output_chars += 1;
-            line_units = 0.0;
+            line_x = 0.0;
             lines += 1;
         }
         for ch in &chars[index..chunk_end] {
             map[index] = output_chars;
             out.push(*ch);
             output_chars += 1;
-            line_units += wrap_char_units(*ch);
+            line_x += advance(*ch);
             index += 1;
         }
     }
     map[index..].fill(output_chars);
     (out, map)
+}
+
+/// Glyphs a line keeps together as a word: all but whitespace and the wide
+/// CJK glyphs (CJK symbols, kana, ideographs, Hangul, full- and half-width
+/// forms).
+fn is_word_char(ch: char) -> bool {
+    !ch.is_whitespace()
+        && !matches!(
+            ch as u32,
+            0x2E80..=0x9FFF | 0xAC00..=0xD7AF | 0xF900..=0xFAFF | 0xFE30..=0xFE4F | 0xFF00..=0xFFEF
+        )
 }
 
 fn is_kinsoku_line_start(ch: char) -> bool {
@@ -2573,6 +2621,76 @@ mod tests {
             color: [1.0; 4],
             line_height: 20.0,
         }
+    }
+
+    fn latin_text_state() -> TextState {
+        // 20 half-width glyphs of 10 px (a 20 px font) per line.
+        TextState {
+            width: 200.0,
+            font_size: 20.0,
+            ..narrow_text_state()
+        }
+    }
+
+    #[test]
+    fn latin_words_wrap_at_spaces() {
+        // Wonderful Everyday's message window moves a word that doesn't fit
+        // to the next line; it was cut after its first letters.
+        assert_eq!(
+            wrap_text_to_state("aaaa bbbb cccc dd eeeeee ff", &latin_text_state()),
+            "aaaa bbbb cccc dd \neeeeee ff"
+        );
+        // A word must end one font height (20 px) before the edge...
+        assert_eq!(
+            wrap_text_to_state("aaaa bbbb cccc dddd eeee", &latin_text_state()),
+            "aaaa bbbb cccc \ndddd eeee"
+        );
+        assert_eq!(
+            wrap_text_to_state("aaaa bbbb cccc ddd eeee", &latin_text_state()),
+            "aaaa bbbb cccc ddd \neeee"
+        );
+        // ...unless it ends in hanging punctuation.
+        assert_eq!(
+            wrap_text_to_state("aaaa bbbb cccc dddd! eeee", &latin_text_state()),
+            "aaaa bbbb cccc dddd! \neeee"
+        );
+        // Apostrophes and punctuation belong to their word.
+        assert_eq!(
+            wrap_text_to_state("aaaa bbbb cccc dd ee\u{2019}e.", &latin_text_state()),
+            "aaaa bbbb cccc dd \nee\u{2019}e."
+        );
+    }
+
+    #[test]
+    fn wonderful_everydays_message_line_wraps_as_in_the_original() {
+        // The message window: 1,128 px from the cursor to the valid edge,
+        // 14 px per glyph. The original's first line of a narration ends
+        // with a word at 1,036 px (74 glyphs) and moves the next word, which
+        // would end at 1,106 px, to the next line; a line of 78 glyphs (1,092
+        // px) that ends the text stays on one line.
+        let state = TextState {
+            width: 1128.0,
+            font_size: 28.0,
+            line_height: 35.0,
+            height: 208.0,
+            ..narrow_text_state()
+        };
+        let first = format!("aaaa{}", " aaaa".repeat(14));
+        assert_eq!(first.len(), 74);
+        assert_eq!(
+            wrap_text_to_state(&format!("{first} bbbb cc dddddd."), &state),
+            format!("{first} \nbbbb cc dddddd.")
+        );
+        let single = format!("{first} bbb");
+        assert_eq!(wrap_text_to_state(&single, &state), single);
+    }
+
+    #[test]
+    fn a_word_longer_than_a_line_wraps_by_glyph() {
+        assert_eq!(
+            wrap_text_to_state(&"a".repeat(25), &latin_text_state()),
+            format!("{}\n{}", "a".repeat(20), "a".repeat(5))
+        );
     }
 
     #[test]
