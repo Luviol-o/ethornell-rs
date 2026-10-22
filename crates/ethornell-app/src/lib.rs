@@ -23505,7 +23505,14 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                 let resource = args.get(4).and_then(value_to_string).unwrap_or_default();
                 if width <= 0 || height <= 0 {
                     return Err(ethornell_vm::VmError::Runtime(format!(
-                        "Graph90:F0 invalid movie size {width}x{height}"
+                        "無効な動画ウィンドウサイズ [ {width}, {height} ] が指定されました"
+                    )));
+                }
+                // sub_466B20 / sub_465F80: a missing file prompts for the
+                // media; without a media root that is a script error.
+                if !self.cached_file_exists("", &resource) {
+                    return Err(ethornell_vm::VmError::Runtime(format!(
+                        "指定された動画ファイル [ {resource} ] は存在しません"
                     )));
                 }
                 let opened = self.open_runtime_movie("", &resource, (width, height));

@@ -4497,9 +4497,9 @@ impl RuntimeTraceApi {
             (0x90, 0xFA) => {
                 let sprite = pop_int_value(stack).unwrap_or_default();
                 if !self.graph90_is_sprite_handle(sprite) {
-                    return Some(Err(ethornell_vm::VmError::Runtime(format!(
-                        "Graph90:FA invalid CDspObjSprite handle #{sprite}"
-                    ))));
+                    return Some(Err(ethornell_vm::VmError::Runtime(
+                        "指定されたハンドルは無効、若しくはスプライトハンドルではありません".into(),
+                    )));
                 }
                 let target_number = self.graph_sprite_targets.register(sprite);
                 // sub_4962A0 also adds the sprite to the pointer chain.
@@ -4510,9 +4510,9 @@ impl RuntimeTraceApi {
             (0x90, 0xFB) => {
                 let sprite = pop_int_value(stack).unwrap_or_default();
                 if !self.graph_sprite_targets.unregister_sprite(sprite) {
-                    return Some(Err(ethornell_vm::VmError::Runtime(format!(
-                        "Graph90:FB Sprite handle #{sprite} is not registered"
-                    ))));
+                    return Some(Err(ethornell_vm::VmError::Runtime(
+                        "指定されたハンドルが示すオブジェクトは登録されていません".into(),
+                    )));
                 }
                 self.unregister_pointer_object_node(sprite);
                 tracing::debug!(sprite, "GraphUnregisterSpriteTarget");
@@ -4532,9 +4532,9 @@ impl RuntimeTraceApi {
             (0x90, 0xFD) => {
                 let target_number = pop_int_value(stack).unwrap_or_default();
                 let Some(state) = self.graph_sprite_targets.sampled_state(target_number) else {
-                    return Some(Err(ethornell_vm::VmError::Runtime(format!(
-                        "Graph90:FD invalid Sprite target number {target_number}"
-                    ))));
+                    return Some(Err(ethornell_vm::VmError::Runtime(
+                        "無効なターゲット番号が指定されました".into(),
+                    )));
                 };
                 ethornell_vm::Value::Int(state)
             }

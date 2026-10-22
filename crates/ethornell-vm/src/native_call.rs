@@ -15534,7 +15534,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_LOAD_BITMAP_PARAMETERS,
         returns: "procedure completion",
         scheduling: NativeSchedulingEffect::WaitProcedure,
-        notes: "sub_4797E0 pops name, archive, handle (< 0x4000). A cached (preloaded) image, or a name without '/' while sub_402080 allows it, loads synchronously; otherwise CProcLoadBitmap loads it and the thread yields until it completes. Names with '/' are DCProcImageSynth compositions (elements name[,x,y[,mode[,param]]] blitted through sub_40A530). A failed load is fatal on both paths (CProcLoad +400 is 0, so its tick returns -1 and the scheduler ends the engine).",
+        notes: "sub_47A2E0: pops name, archive, bitmap (checked); cached data or a synchronous load (no '/', sub_402080) returns 0, otherwise CProcLoadBitmap (returns 2); a missing file is the media-prompt error.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_CREATE_BITMAP,
@@ -16702,7 +16702,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_OPEN_DIRECTSHOW_MOVIE_PARAMETERS,
         returns: "duration in milliseconds, or zero when open fails",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_480160 validates positive width/height, verifies the path and calls sub_48F270. The public wrapper pops but does not use x/y.",
+        notes: "BGI 1.622 sub_480C60: non-positive window size fatal; a missing movie file is the media-prompt error; opens the global DirectShow movie.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_CLOSE_DIRECTSHOW_MOVIE,
@@ -16710,7 +16710,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: NO_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_480260 calls sub_48F0E0, stopping playback and releasing the complete process-global DirectShow graph.",
+        notes: "sub_480D60: releases the global movie process.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_IS_DIRECTSHOW_MOVIE_PLAYING,
@@ -16718,7 +16718,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: NO_PARAMETERS,
         returns: "zero or one",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_48F690 returns one only while the current DirectShow position is below duration.",
+        notes: "sub_480D80: whether the global movie plays.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_SET_DIRECTSHOW_MOVIE_VOLUME,
@@ -16734,7 +16734,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_LOAD_BURIKO_MOVIE_PARAMETERS,
         returns: "no immediate value; procedure status 0/1/2",
         scheduling: NativeSchedulingEffect::WaitProcedure,
-        notes: "DCProcLoadBurikoMV validates the 16-byte BF_Movie_______ magic. sub_405B50 writes a handle plus five header DWORDs through caller BP pointers.",
+        notes: "sub_480DC0 -> sub_452550: BURIKO movie load procedure (handle and metadata outputs); returns 2.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_RELEASE_BURIKO_MOVIE_RESOURCE,
@@ -16742,7 +16742,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_BURIKO_MOVIE_HANDLE_PARAMETERS,
         returns: "0 on success or 3 for an invalid handle",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_405CD0 removes one intrusive-list node, repairs parent/child links and frees shared bytes only when no linked handles remain.",
+        notes: "sub_480E70 -> sub_405CD0: release; 0 or 3.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_DECODE_BURIKO_MOVIE_FRAME,
@@ -16750,7 +16750,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_DECODE_BURIKO_MOVIE_PARAMETERS,
         returns: "status 0/3/4/5/6; optionally through DCProcDecodeBMV",
         scheduling: NativeSchedulingEffect::WaitProcedure,
-        notes: "sub_405E00/sub_405F10 distinguish invalid resource (3), frame range (4), bitmap dimensions/format (5) and codec failure (6). Procedure installation is controlled by the target async decoder gate.",
+        notes: "sub_480EC0 -> sub_405E00/sub_405F10: frame decode statuses 0/3/4/5/6, 2 while a thread decode runs.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_ATTACH_BURIKO_MOVIE_RESOURCE,
@@ -16758,7 +16758,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_ATTACH_BURIKO_MOVIE_PARAMETERS,
         returns: "0, 3 for invalid source, or 7 when already attached",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_406120 permits only one attached child, allocates a shared child node, links it to the source and writes the new handle through the first BP argument.",
+        notes: "sub_480FD0 -> sub_406120: attach; 0, 3 or 7.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_CLEAR_SPRITE_TARGETS,
@@ -16766,7 +16766,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: NO_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_496270 unregisters every target and resets the target-number counter to zero.",
+        notes: "sub_481040 -> sub_496D90: clears every sprite target and the numbering.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_REGISTER_SPRITE_TARGET,
@@ -16774,7 +16774,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_SPRITE_TARGET_PARAMETERS,
         returns: "void; target raises a script error for a non-Sprite handle",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_4962A0 prepends a 20-byte node, registers the Sprite input region and assigns the next monotonic target number. Duplicate Sprite registrations are allowed.",
+        notes: "sub_481050 -> sub_496DC0: registers a sprite target; a non-sprite handle is fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_UNREGISTER_SPRITE_TARGET,
@@ -16782,7 +16782,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_SPRITE_TARGET_PARAMETERS,
         returns: "void; target raises a script error when not registered",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_496300 removes only the first matching Sprite registration and unregisters its input region.",
+        notes: "sub_481080 -> sub_496E20: unregisters; an unregistered handle is fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_HIT_TEST_SPRITE_TARGETS,
@@ -16790,7 +16790,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: NO_PARAMETERS,
         returns: "target number or -1",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_496350 scans newest registrations first and performs an inclusive cursor-versus-Sprite-rectangle test.",
+        notes: "sub_4810B0 -> sub_496E70: target number under the pointer or -1.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_GET_SPRITE_TARGET_STATE,
@@ -16798,7 +16798,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_SPRITE_TARGET_NUMBER_PARAMETERS,
         returns: "zero or one",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_496430 samples bit zero of the primary input query once per main-loop pass; sub_496400 retrieves it by target number.",
+        notes: "sub_4810D0 -> sub_496F20: sampled state; an invalid target number is fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH_RENDER_OBJECT_TO_BITMAP,
@@ -20118,6 +20118,11 @@ const PORTABLE_EQUIVALENT_OPCODES: &[NativeOpcode] = &[
     opcodes::GRAPH90_TAKE_CHANGED_KNOB_HANDLE,
     opcodes::GRAPH90_WATCH_KNOB_OBJECT,
     opcodes::GRAPH90_UNWATCH_KNOB_OBJECT,
+    opcodes::GRAPH90_OPEN_DIRECTSHOW_MOVIE,
+    opcodes::GRAPH90_LOAD_BURIKO_MOVIE_RESOURCE,
+    opcodes::GRAPH90_DECODE_BURIKO_MOVIE_FRAME,
+    opcodes::GRAPH90_HIT_TEST_SPRITE_TARGETS,
+    opcodes::GRAPH90_GET_SPRITE_TARGET_STATE,
 ];
 
 const PARTIAL_IMPLEMENTATION_OPCODES: &[NativeOpcode] = &[
@@ -20229,11 +20234,6 @@ const PARTIAL_IMPLEMENTATION_OPCODES: &[NativeOpcode] = &[
     opcodes::GRAPH90_SAVE_BITMAP_TO_IMAGE_FILE,
     opcodes::GRAPH90_APPLY_TONE_CURVE_EFFECT,
     opcodes::GRAPH90_ENCODE_BITMAP_TO_BUFFER,
-    opcodes::GRAPH90_OPEN_DIRECTSHOW_MOVIE,
-    opcodes::GRAPH90_LOAD_BURIKO_MOVIE_RESOURCE,
-    opcodes::GRAPH90_DECODE_BURIKO_MOVIE_FRAME,
-    opcodes::GRAPH90_HIT_TEST_SPRITE_TARGETS,
-    opcodes::GRAPH90_GET_SPRITE_TARGET_STATE,
     opcodes::SYS81_CREATE_CHILD_THREAD,
     opcodes::SYS81_ENUMERATE_RESOURCES,
     opcodes::SYS81_QUEUE_RESOURCE_SEEK,
