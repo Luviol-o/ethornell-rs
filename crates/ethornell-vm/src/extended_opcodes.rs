@@ -298,7 +298,7 @@ mod tests {
     #[test]
     fn fixed_vectors_follow_the_target_lane_rules() {
         let mut vm = Vm::new();
-        let (dst, left, right) = (0x1200_0100, 0x1200_0110, 0x1200_0120);
+        let (dst, left, right) = (0x0800_0100, 0x0800_0110, 0x0800_0120);
         write_fixed4(&mut vm, left, [6 << 16, 1 << 16, -(4 << 16), 5]);
         write_fixed4(&mut vm, right, [2 << 16, 0, 2 << 16, 7]);
 
@@ -335,7 +335,7 @@ mod tests {
     #[test]
     fn vec3_normalize_stores_the_length_in_w() {
         let mut vm = Vm::new();
-        let (dst, source) = (0x1200_0100, 0x1200_0110);
+        let (dst, source) = (0x0800_0100, 0x0800_0110);
         write_fixed4(&mut vm, source, [3 << 16, 0, 4 << 16, 9 << 16]);
         vm.stack.extend([Value::Ptr(dst), Value::Ptr(source)]);
         vm.execute_fixed_vector(0x5d).unwrap();
@@ -361,15 +361,15 @@ mod tests {
     #[test]
     fn qword_arithmetic_uses_native_pointer_operands() {
         let mut vm = Vm::new();
-        vm.write_i64(0x1200_0100, 40).unwrap();
-        vm.write_i64(0x1200_0108, 2).unwrap();
+        vm.write_i64(0x0800_0100, 40).unwrap();
+        vm.write_i64(0x0800_0108, 2).unwrap();
         vm.stack.extend([
-            Value::Ptr(0x1200_0110),
-            Value::Ptr(0x1200_0100),
-            Value::Ptr(0x1200_0108),
+            Value::Ptr(0x0800_0110),
+            Value::Ptr(0x0800_0100),
+            Value::Ptr(0x0800_0108),
         ]);
         vm.execute_qword_arithmetic(0x50).unwrap();
-        assert_eq!(vm.read_i64(0x1200_0110).unwrap(), 42);
+        assert_eq!(vm.read_i64(0x0800_0110).unwrap(), 42);
     }
 
     /// Pushes call-order arguments and runs one 0xD0 selector.
@@ -382,11 +382,11 @@ mod tests {
     fn grid_field_runs_through_the_script_stack() {
         let mut vm = Vm::new();
         let (out, tiles, pair, dirs, count) = (
-            0x1200_0100,
-            0x1200_0200,
-            0x1200_0400,
-            0x1200_0500,
-            0x1200_0540,
+            0x0800_0100,
+            0x0800_0200,
+            0x0800_0400,
+            0x0800_0500,
+            0x0800_0540,
         );
         // The first handle is 0 (dword_5669E4 starts at 0); kind != 0 fails.
         assert_eq!(
@@ -481,11 +481,11 @@ mod tests {
         let mut vm = Vm::new();
         let int = Value::Int;
         let (out, tiles, units, results, count) = (
-            0x1200_0100,
-            0x1200_0200,
-            0x1200_1000,
-            0x1200_4000,
-            0x1200_4400,
+            0x0800_0100,
+            0x0800_0200,
+            0x0800_1000,
+            0x0800_4000,
+            0x0800_4400,
         );
         d0(&mut vm, 0x00, &[Value::Ptr(out), int(0), int(1)]);
         let grid = vm.read_int(out, 2).unwrap() as i32;
@@ -590,7 +590,7 @@ mod tests {
         let mut vm = Vm::new();
         let int = Value::Int;
         let fixed = |v: i32| int(v << 16);
-        let (out, list, count) = (0x1200_0100, 0x1200_0200, 0x1200_0300);
+        let (out, list, count) = (0x0800_0100, 0x0800_0200, 0x0800_0300);
         assert_eq!(d0(&mut vm, 0x40, &[Value::Ptr(out)]), Some(int(0)));
         let space = vm.read_int(out, 2).unwrap() as i32;
         assert_eq!(space, 1);

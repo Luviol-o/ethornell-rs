@@ -549,7 +549,7 @@ mod tests {
 
     #[test]
     fn raw_pointer_native_dialogs_decode_in_owning_root_or_child_under_both_graph_encodings() {
-        let ptr = 0x1200_3000; // Per-thread local memory at the same guest address.
+        let ptr = 0x0800_3000; // Per-thread local memory at the same guest address.
         for encoding in [encoding_rs::SHIFT_JIS, encoding_rs::GBK] {
             for (id, suffix) in [
                 (0x80, vec![]),
@@ -678,8 +678,8 @@ mod tests {
 
     #[test]
     fn raw_pointer_host_snapshot_uses_graph_encoding_without_decoding_output_pointers() {
-        let text_ptr = 0x1200_3000;
-        let output_ptr = 0x1200_4000;
+        let text_ptr = 0x0800_3000;
+        let output_ptr = 0x0800_4000;
         for (encoding, text) in [
             (encoding_rs::SHIFT_JIS, "日本語"),
             (encoding_rs::GBK, "胧白"),
@@ -744,8 +744,8 @@ mod tests {
         root.start_async_program_with_args(Value::Program(std::sync::Arc::new(p)), vec![], false)
             .unwrap();
         let child = &mut root.async_tasks[0].vm;
-        let ptr = 0x1200_3000;
-        let out = 0x1200_4000;
+        let ptr = 0x0800_3000;
+        let out = 0x0800_4000;
         write_encoded(child, ptr, "確認", encoding_rs::SHIFT_JIS);
         child.operand_slots[crate::OPERAND_STACK_CAPACITY - 3] = Value::Ptr(out);
         child.operand_slots[crate::OPERAND_STACK_CAPACITY - 2] = Value::Ptr(ptr);

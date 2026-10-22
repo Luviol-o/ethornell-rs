@@ -61,6 +61,9 @@ const ADDRESS_MASK: u32 = 0x01ff_ffff;
 const AUX_MEMORY_TAG_BASE: u32 = 0x20;
 const AUX_MEMORY_SEGMENT_SIZE: u32 = ADDRESS_MASK + 1;
 const LOCAL_MEMORY_BASE: u32 = 0x0080_0000;
+/// Segment 2 of sub_48E8C0: the thread's data region (frames). Opcode 0x04
+/// pushes `(base - offset) | FRAME_SEGMENT`.
+pub(crate) const FRAME_SEGMENT: u32 = 0x0800_0000;
 const HEAP_OFFSET_BASE: u32 = 0x0020_0000;
 const HEAP_MEMORY_BASE: usize = (LOCAL_MEMORY_BASE + HEAP_OFFSET_BASE) as usize;
 const INITIAL_MEMORY_SIZE: usize = 16 * 1024 * 1024;
@@ -3062,7 +3065,7 @@ impl Vm {
                 ..
             } => {
                 self.push_value(Value::Ptr(
-                    0x1200_0000u32 | self.mem_ptr.saturating_sub(read_op_u32(instruction)),
+                    FRAME_SEGMENT | self.mem_ptr.saturating_sub(read_op_u32(instruction)),
                 ));
             }
             BpOpcode::Known {
@@ -3112,7 +3115,7 @@ impl Vm {
                     // excerpt line), and stale bytes there decode as garbage
                     // text. See src/README.md "Open fidelity items".
                     let size = (next - previous) as usize;
-                    let ptr = 0x1200_0000u32 | previous;
+                    let ptr = FRAME_SEGMENT | previous;
                     let range = self.resolve_write_range(ptr, size)?;
                     self.memory[range].fill(0);
                     self.clear_shadow_values(ptr, size);
@@ -3276,7 +3279,7 @@ impl Vm {
                         _ => ("<non-function>", 0),
                     };
                     let command = self
-                        .read_int(0x1200_0000 | self.mem_ptr.saturating_sub(4), 2)
+                        .read_int(FRAME_SEGMENT | self.mem_ptr.saturating_sub(4), 2)
                         .unwrap_or_default();
                     let scenario_offset = self.read_int(314_072 + 416, 2).unwrap_or_default();
                     tracing::warn!(
@@ -4303,8 +4306,8 @@ impl Vm {
                                 value as u32,
                             )?;
                         }
-                        if self.native_abi_profile==NativeAbiProfile::Amachoco && api.input_gate_diagnostics_enabled() && state_buffer==(0x1200_0000u32|self.mem_ptr.wrapping_sub(0x64)) {
-                            let base=0x1200_0000u32|self.mem_ptr;
+                        if self.native_abi_profile==NativeAbiProfile::Amachoco && api.input_gate_diagnostics_enabled() && state_buffer==(FRAME_SEGMENT|self.mem_ptr.wrapping_sub(0x64)) {
+                            let base=FRAME_SEGMENT|self.mem_ptr;
                             let read=|offset:u32|self.read_int(base.wrapping_sub(offset),2).unwrap_or(u32::MAX);
                             let event=read(0x70);
                             if event!=0 {api.record_input_gate([self.pc as u32,self.mem_ptr,event,read(0x6c),read(0x68),read(0x44),read(0x40),state[0]as u32,self.read_int(1092,2).unwrap_or(u32::MAX)]);}
@@ -7150,7 +7153,7 @@ impl Vm {
                     .find(|(_, existing)| existing.as_str() == text.as_str())
                 {
                     let offset = addr.saturating_sub(LOCAL_MEMORY_BASE);
-                    return Ok((0x1200_0000 | offset) as i32);
+                    return Ok((FRAME_SEGMENT | offset) as i32);
                 }
                 let byte_len = encoding_rs::SHIFT_JIS
                     .encode(&text)
@@ -7267,14 +7270,14 @@ impl Vm {
                 self.thread.data_region_size()
             )));
         }
-        self.write_int(0x1200_0000 | self.mem_ptr, 2, return_offset)?;
+        self.write_int(FRAME_SEGMENT | self.mem_ptr, 2, return_offset)?;
         self.mem_ptr = self.mem_ptr.saturating_add(4);
         Ok(())
     }
 
     fn read_return_addr(&mut self) -> VmResult<u32> {
         self.mem_ptr = self.mem_ptr.saturating_sub(4);
-        self.read_int(0x1200_0000 | self.mem_ptr, 2)
+        self.read_int(FRAME_SEGMENT | self.mem_ptr, 2)
     }
 
     fn read_value(&self, ptr: u32, width: u8) -> VmResult<Value> {
@@ -12117,9 +12120,12 @@ impl Vm {
     }
 
     pub(crate) fn memory_addr(ptr: u32) -> u32 {
+        // sub_48E8C0 segment 2: the data region (frames).
+        if ptr >> 26 == 2 {
+            return LOCAL_MEMORY_BASE.saturating_add(ptr & 0x03FF_FFFF);
+        }
         let tag = ptr >> 24;
         match tag {
-            0x12 | 0x13 => LOCAL_MEMORY_BASE.saturating_add(ptr & ADDRESS_MASK),
             AUX_MEMORY_TAG_BASE..=u32::MAX => {
                 let segment = (tag >> 1).saturating_sub(AUX_MEMORY_TAG_BASE >> 1);
                 LOCAL_MEMORY_BASE
@@ -14924,7 +14930,7 @@ mod tests {
         .unwrap();
         assert_eq!(api.performance_profiling_enabled, Some(7));
 
-        vm.write_value(destination, 2, &Value::Ptr(0x1200_4321))
+        vm.write_value(destination, 2, &Value::Ptr(0x0800_4321))
             .unwrap();
         vm.stack.extend([Value::Ptr(destination), Value::Int(2)]);
         vm.dispatch(
@@ -15121,11 +15127,11 @@ mod tests {
     fn raw_native_write_replaces_a_stale_pointer_shadow() {
         let mut vm = Vm::new();
         let destination = 0x2480;
-        vm.write_value(destination, 2, &Value::Ptr(0x1200_4321))
+        vm.write_value(destination, 2, &Value::Ptr(0x0800_4321))
             .unwrap();
         assert_eq!(
             vm.read_value(destination, 2).unwrap(),
-            Value::Ptr(0x1200_4321)
+            Value::Ptr(0x0800_4321)
         );
 
         vm.write_int(destination, 2, 10_466).unwrap();
@@ -15748,14 +15754,14 @@ mod tests {
         let mut vm = Vm::new();
         vm.start(&program);
         vm.mem_ptr = 0x100;
-        vm.write_value(0x1200_0118, 2, &Value::Ptr(0x1000_1234))
+        vm.write_value(0x0800_0118, 2, &Value::Ptr(0x1000_1234))
             .unwrap();
 
         let report = vm.run_loaded(&mut api, &VmRunOptions::default());
 
         assert_eq!(report.stop_reason, VmStopReason::Completed);
-        assert_eq!(vm.read_int(0x1200_0118, 2).unwrap(), 0);
-        assert!(!vm.mem_values.contains_key(&Vm::value_key(0x1200_0118)));
+        assert_eq!(vm.read_int(0x0800_0118, 2).unwrap(), 0);
+        assert!(!vm.mem_values.contains_key(&Vm::value_key(0x0800_0118)));
     }
 
     #[test]
@@ -16096,7 +16102,7 @@ mod tests {
     #[test]
     fn graph_load_resolves_dynamic_strings_stored_in_frame_slots() {
         let mut vm = Vm::new();
-        let local_name = 0x1200_3000;
+        let local_name = 0x0800_3000;
         vm.write_value(local_name, 2, &Value::Str("bg50d_a".into()))
             .unwrap();
         vm.stack.extend([
@@ -16120,8 +16126,8 @@ mod tests {
     #[test]
     fn graph_load_skips_a_damaged_direct_string_for_nested_descriptor_text() {
         let mut vm = Vm::new();
-        let descriptor = 0x1200_3000;
-        let resource_name = 0x1200_3100;
+        let descriptor = 0x0800_3000;
+        let resource_name = 0x0800_3100;
         vm.write_c_string(descriptor, "&#65533;&#65533;").unwrap();
         vm.write_c_string(resource_name, "bg_WHITE").unwrap();
         vm.write_int(descriptor + 8, 2, resource_name).unwrap();
@@ -16139,8 +16145,8 @@ mod tests {
     #[test]
     fn graph_draw_text_ex_converts_both_native_text_arguments() {
         let mut vm = Vm::new();
-        let primary = 0x1200_3000;
-        let annotation = 0x1200_3100;
+        let primary = 0x0800_3000;
+        let annotation = 0x0800_3100;
         vm.write_c_string(primary, "history text").unwrap();
         vm.write_c_string(annotation, "ruby data").unwrap();
         vm.stack.extend([
@@ -16337,7 +16343,7 @@ mod tests {
     #[test]
     fn graph92_draw_formatted_text_normalizes_native_text_argument() {
         let mut vm = Vm::new();
-        let text_pointer = 0x1200_3000;
+        let text_pointer = 0x0800_3000;
         vm.write_c_string(text_pointer, "formatted text").unwrap();
         vm.stack.extend((0..11).map(Value::Int));
         let text_index = vm.stack.len() - 1 - 9;
@@ -16351,7 +16357,7 @@ mod tests {
     #[test]
     fn message_text_with_the_engine_glyph_codes_is_text() {
         let mut vm = Vm::new();
-        let text_pointer = 0x1200_3000;
+        let text_pointer = 0x0800_3000;
         // "A", the dash code 0xEF40 twice, "B", the codes 0xEF41 and 0xF040,
         // "!" and 0x7F.
         let bytes = [
@@ -16369,7 +16375,7 @@ mod tests {
         assert_eq!(vm.stack[text_index], Value::Str(expected.into()));
 
         // A line formatted with sprintf keeps them.
-        let formatted = 0x1200_3100;
+        let formatted = 0x0800_3100;
         vm.stack.clear();
         vm.stack.push(Value::Ptr(text_pointer));
         let rendered = vm.render_sprintf("%s");
@@ -16380,7 +16386,7 @@ mod tests {
     #[test]
     fn extended_icon_item_with_a_zero_first_word_is_never_hit() {
         let mut vm = Vm::new();
-        let (root, group, items) = (0x1200_4000_u32, 0x1200_4100_u32, 0x1200_4200_u32);
+        let (root, group, items) = (0x0800_4000_u32, 0x0800_4100_u32, 0x0800_4200_u32);
         vm.write_int(root, 2, 1).unwrap();
         vm.write_int(root + 4, 2, group).unwrap();
         vm.write_int(group, 2, 2).unwrap();
@@ -16407,8 +16413,8 @@ mod tests {
     #[test]
     fn graph92_render_text_normalizes_both_native_text_arguments() {
         let mut vm = Vm::new();
-        let primary = 0x1200_3000;
-        let auxiliary = 0x1200_3100;
+        let primary = 0x0800_3000;
+        let auxiliary = 0x0800_3100;
         vm.write_c_string(primary, "main text").unwrap();
         vm.write_c_string(auxiliary, "auxiliary text").unwrap();
         vm.stack.extend((0..21).map(Value::Int));
@@ -16429,8 +16435,8 @@ mod tests {
     #[test]
     fn native_text_arguments_across_an_operand_stack_wrap_are_converted() {
         let mut vm = Vm::new();
-        let primary = 0x1200_3000;
-        let auxiliary = 0x1200_3100;
+        let primary = 0x0800_3000;
+        let auxiliary = 0x0800_3100;
         vm.write_c_string(primary, "main text").unwrap();
         vm.write_c_string(auxiliary, "auxiliary text").unwrap();
         // Results nobody popped fill the ring up to ten slots before its end,
@@ -16484,7 +16490,7 @@ mod tests {
         // scrmsg passes a line's text as `pointer + 1`, an integer; some
         // lines have an empty text part. A sprite name 16 bytes on is in
         // reach of the descriptor search, which used to return it.
-        let text = 0x1200_3000_u32;
+        let text = 0x0800_3000_u32;
         let neighbour = text + 16;
         vm.write_c_string(text, "").unwrap();
         vm.write_c_string(neighbour, "ev0005a_l").unwrap();
@@ -18631,7 +18637,7 @@ mod tests {
             test_instruction(0, 0x80, "sys1", vec![0x80, 0x32], vec![BpOperand::U8(0x32)]);
         let mut vm = Vm::new();
         let mut api = WriteFileApi::default();
-        let path = 0x1200_1200;
+        let path = 0x0800_1200;
         vm.write_c_string(path, "UserData/slot.sud").unwrap();
         let source = vm.alloc_heap(8);
         let range = vm.resolve_write_range(source, 8).unwrap();
