@@ -16446,7 +16446,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_LOAD_BG_BITMAP_RESOURCE_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_47F040 validates the bitmap slot and forwards both resource strings to sub_401EF0, which requires target BG format.",
+        notes: "BGI 1.622 sub_47FB40 -> sub_401EF0: only the BG/BMP header is read; the bitmap is created in its size and format (with the embedded point) and cleared to zero; missing file / non-BG fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_FLIP_BITMAP,
@@ -16454,7 +16454,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_FLIP_BITMAP_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_405590 mirrors horizontally for direction 0 and vertically for direction 1.",
+        notes: "sub_47FC00 -> sub_405590: bitmap checks; source missing, destination equal to the source, the destination recreated before an invalid direction (0/1) is fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_DOWNSAMPLE_BITMAP_HALF,
@@ -16462,7 +16462,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_BITMAP_PAIR_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_405090 rejects dimensions below 2 and creates ceil(width/2) by ceil(height/2) output through sub_418FA0.",
+        notes: "sub_47FCF0 -> sub_405090/sub_419220: half size, (a+b+c+d)>>2 truncating, edges >>1; source smaller than 2x2 fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_IMPORT_EXTERNAL_IMAGE,
@@ -16486,7 +16486,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_REGISTER_BG_RESOURCE_DATA_PARAMETERS,
         returns: "one on success",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_401CB0 validates BG bytes and sub_450380 copies them into a lower-cased two-key cache.",
+        notes: "sub_47FF20 -> sub_401CB0: BG data registered under a lower-cased (namespace, name) key; 1 on success.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_LOAD_CACHED_BG_BITMAP,
@@ -16494,7 +16494,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_LOAD_CACHED_BG_PARAMETERS,
         returns: "one on success",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_401CE0 looks in the two-key cache, falls back to archive loading, decodes BG bytes and optionally consumes the cached entry.",
+        notes: "sub_47FF80 -> sub_401CE0: bitmap check, decode from the registered data in the BG's own pixel format; 1 on success.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_TRANSFORM_BITMAP_GENERAL,
@@ -16502,7 +16502,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_TRANSFORM_BITMAP_GENERAL_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_404FE0 validates destination/source and forwards seventeen transform operands to sub_40F970; the first public pop is not forwarded.",
+        notes: "sub_47FFF0 -> sub_404FE0: perspective transform blit; destination and source errors with the 1.622 texts.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_SCALE_BITMAP_ASPECT_FIT,
@@ -16510,7 +16510,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_BITMAP_PAIR_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_405120 preserves aspect ratio, centers the scaled source and leaves letterbox/pillarbox space.",
+        notes: "sub_4801C0 -> sub_405120: aspect-fit scale; destination then source must exist.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_REGISTER_TONE_CURVE,
@@ -16518,7 +16518,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_REGISTER_TONE_CURVE_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_405420 registers three validated control-point pairs as three 256-entry LUTs, or removes the id when the pointer is null.",
+        notes: "sub_480260 -> sub_405420: tone curve registered from three control points (invalid points ignored); removing an unknown id is fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_APPLY_TONE_CURVE_EFFECT,
@@ -20109,6 +20109,11 @@ const PORTABLE_EQUIVALENT_OPCODES: &[NativeOpcode] = &[
     opcodes::GRAPH90_CONFIGURE_ICON_INPUT_PROCESSOR,
     opcodes::GRAPH90_GET_ICON_INPUT_CURRENT_GROUP,
     opcodes::GRAPH90_GET_ICON_INPUT_SELECTIONS,
+    opcodes::GRAPH90_LOAD_BG_BITMAP_RESOURCE,
+    opcodes::GRAPH90_DOWNSAMPLE_BITMAP_HALF,
+    opcodes::GRAPH90_LOAD_CACHED_BG_BITMAP,
+    opcodes::GRAPH90_TRANSFORM_BITMAP_GENERAL,
+    opcodes::GRAPH90_SCALE_BITMAP_ASPECT_FIT,
 ];
 
 const PARTIAL_IMPLEMENTATION_OPCODES: &[NativeOpcode] = &[
@@ -20216,13 +20221,8 @@ const PARTIAL_IMPLEMENTATION_OPCODES: &[NativeOpcode] = &[
     opcodes::GRAPH91_SET_MULTILAYER_LAYER_TRANSFORM_VELOCITY,
     opcodes::GRAPH90_SET_DISPLAY_OPTIONS,
     opcodes::GRAPH90_UPLOAD_MAP_TILE_DATA,
-    opcodes::GRAPH90_LOAD_BG_BITMAP_RESOURCE,
-    opcodes::GRAPH90_DOWNSAMPLE_BITMAP_HALF,
     opcodes::GRAPH90_IMPORT_EXTERNAL_IMAGE,
     opcodes::GRAPH90_SAVE_BITMAP_TO_IMAGE_FILE,
-    opcodes::GRAPH90_LOAD_CACHED_BG_BITMAP,
-    opcodes::GRAPH90_TRANSFORM_BITMAP_GENERAL,
-    opcodes::GRAPH90_SCALE_BITMAP_ASPECT_FIT,
     opcodes::GRAPH90_APPLY_TONE_CURVE_EFFECT,
     opcodes::GRAPH90_ENCODE_BITMAP_TO_BUFFER,
     opcodes::GRAPH90_TAKE_KNOB_VERTICAL_EVENT,

@@ -277,7 +277,15 @@ drawing is not yet the target's; do these as one renderer pass):
 * Sprite mode 2 (90:59) renders as a float quad; the target's affine
   raster (sub_429A60/sub_4295C0/sub_4281E0) and its <2 extent check are
   only approximated.
+* 90:CD tone-curve blit: argument order, checks and texts are the
+  target's, but the pixel kernel (SSE sub_419550/sub_4198E0: luminance,
+  mono blend, LUT, overlay-style colour film, modes 8/38) is a guess.
+* 90:CE: checks and texts done; the two encoders (sub_46A320 format 0,
+  sub_4A1930 format 1, quality <= 100) are not ported (the app writes a
+  raw BG payload). Port and verify under Unicorn like the SDC compressor.
 * Text glyphs come from host fonts; the anti-aliasing layouts of 90:0D
   are stored but GDI rasterization is not reproduced.
 
-Next: 90:60 onwards in table order.
+Deferred to ADR 0004 in 0x90: C4/C5 (external image import/export files).
+
+Next: 90:D0 onwards in table order.

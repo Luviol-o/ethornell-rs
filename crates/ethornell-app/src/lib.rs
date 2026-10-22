@@ -3745,12 +3745,20 @@ impl RuntimeTraceApi {
         self.refresh_bitmap_nodes(bitmap);
     }
 
-    fn flip_graph_bitmap(&mut self, destination: i32, source: i32, direction: i32) -> bool {
+    /// sub_405590: source missing 0x8000000A, destination equal to the
+    /// source 0x80000009, the destination is recreated before a direction
+    /// other than 0/1 returns 0x80000016.
+    fn flip_graph_bitmap(&mut self, destination: i32, source: i32, direction: i32) -> std::result::Result<(), u32> {
         let Some(source_image) = self.graph_bitmap_image(source) else {
-            return false;
+            return Err(0x8000_000A);
         };
+        if destination == source {
+            return Err(0x8000_0009);
+        }
         if !matches!(direction, 0 | 1) {
-            return false;
+            let format = self.bitmap_formats.get(&source).copied().unwrap_or(2);
+            self.recreate_native_bitmap(destination, source_image.width, source_image.height, format);
+            return Err(0x8000_0016);
         }
         let mut output = source_image.clone();
         let width = source_image.width as usize;
@@ -3766,15 +3774,16 @@ impl RuntimeTraceApi {
         }
         let format = self.bitmap_formats.get(&source).copied().unwrap_or(2);
         self.store_runtime_bitmap(destination, output, format);
-        true
+        Ok(())
     }
 
-    fn downsample_graph_bitmap_half(&mut self, destination: i32, source: i32) -> bool {
+    /// sub_405090: source missing 0x8000000A, smaller than 2x2 0x80000006.
+    fn downsample_graph_bitmap_half(&mut self, destination: i32, source: i32) -> std::result::Result<(), u32> {
         let Some(source_image) = self.graph_bitmap_image(source) else {
-            return false;
+            return Err(0x8000_000A);
         };
         if source_image.width < 2 || source_image.height < 2 {
-            return false;
+            return Err(0x8000_0006);
         }
         let width = (source_image.width + 1) >> 1;
         let height = (source_image.height + 1) >> 1;
@@ -3803,14 +3812,15 @@ impl RuntimeTraceApi {
                 }
                 let destination_offset = (y as usize * width as usize + x as usize) * 4;
                 for channel in 0..4 {
-                    output.rgba[destination_offset + channel] =
-                        ((sums[channel] + count / 2) / count) as u8;
+                    // sub_419220: (a+b+c+d) >> 2, edge pairs >> 1, the odd
+                    // corner copied; truncating.
+                    output.rgba[destination_offset + channel] = (sums[channel] / count) as u8;
                 }
             }
         }
         let format = self.bitmap_formats.get(&source).copied().unwrap_or(2);
         self.store_runtime_bitmap(destination, output, format);
-        true
+        Ok(())
     }
 
     fn aspect_fit_graph_bitmap(&mut self, destination: i32, source: i32) -> bool {
@@ -11360,9 +11370,10 @@ mod input_tests {
             [[128, 128]; 3]
         ));
 
+        // BP order: destination, source (sub_480300 pops source 7th).
         let mut args = vec![
-            Value::Int(source),
             Value::Int(destination),
+            Value::Int(source),
             Value::Int(0x00ff_ffff),
             Value::Int(0),
             Value::Int(31),
@@ -22712,6 +22723,10 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
         if image.width.saturating_mul(image.height) > 0x0040_0000 {
             return Err(0x8000_0006u32 as i32);
         }
+        // sub_4056F0: pixel formats 1 and 2 only (-1 otherwise).
+        if !matches!(self.bitmap_formats.get(&bitmap).copied().unwrap_or(2), 1 | 2) {
+            return Err(-1);
+        }
         if !matches!(format, 0 | 1) {
             return Err(0x8000_0017u32 as i32);
         }
@@ -24896,14 +24911,41 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
             (0x90, 0xcd) => {
                 let args = pop_args(stack, 8);
                 let values = args.iter().map(value_to_i32).collect::<Vec<_>>();
-                let source = values.get(7).copied().unwrap_or_default();
-                let destination = values.get(6).copied().unwrap_or_default();
+                // sub_480300 -> sub_405450: argument 7 is the source and 8
+                // the destination (recreated in the source's size and
+                // format); then sub_4193D0's checks.
+                let source = values.get(6).copied().unwrap_or_default();
+                let destination = values.get(7).copied().unwrap_or_default();
                 let color_before = values.get(5).copied().unwrap_or(0x00ff_ffff);
                 let amount_before = values.get(4).copied().unwrap_or_default();
                 let lut_id = values.get(3).copied().unwrap_or_default();
                 let color_after = values.get(2).copied().unwrap_or(0x00ff_ffff);
                 let mode = values.get(1).copied().unwrap_or_default();
                 let amount_after = values.first().copied().unwrap_or_default();
+                let fatal = |message: String| Err(ethornell_vm::VmError::Runtime(message));
+                let Some(info) = ethornell_vm::GraphApi::query_bitmap_info(self, source) else {
+                    return fatal(format!("参照元に指定されたビットマップ [ {source} ] は無効です"));
+                };
+                if !(0..0x4000).contains(&destination) {
+                    return fatal(format!("出力先に指定されたビットマップ [ {destination} ] は無効です"));
+                }
+                if !self.graph_color_luts.contains_key(&lut_id) {
+                    return fatal(format!("無効なトーンカーブの識別番号 [ {lut_id} ] が指定されました"));
+                }
+                if !matches!(info.format, 1 | 2) {
+                    return fatal(format!(
+                        "指定されたビットマップ [ {source} ] のピクセルモードはサポートされていません"
+                    ));
+                }
+                if amount_before as u32 > 0x100 {
+                    return fatal(format!("無効なモノクロイメージの混合レベル [ {amount_before} ] が指定されました"));
+                }
+                if mode != 8 && mode != 38 {
+                    return fatal(format!("指定されたエフェクトモード [ {mode} ] はサポートされていません"));
+                }
+                if amount_after as u32 > 0x100 {
+                    return fatal(format!("無効なカラーフィルムの混合レベル [ {amount_after} ] が指定されました"));
+                }
                 let transformed = self
                     .graph_bitmap_image(source)
                     .zip(self.graph_color_luts.get(&lut_id))
@@ -24924,7 +24966,7 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                     self.graph_resources
                         .insert(destination, RuntimeGraphResource::whole(key));
                     self.bitmap_dimensions.insert(destination, (width, height));
-                    self.bitmap_formats.insert(destination, 2);
+                    self.bitmap_formats.insert(destination, info.format as i32);
                     self.graph_surfaces.insert(
                         destination,
                         RuntimeSurface::bitmap(destination, width as f32, height as f32),

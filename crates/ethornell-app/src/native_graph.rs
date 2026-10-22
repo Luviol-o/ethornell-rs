@@ -4183,31 +4183,77 @@ impl RuntimeTraceApi {
                 ethornell_vm::Value::Int(0)
             }
             (0x90, 0xC0) => {
+                // sub_47FB40 -> sub_401EF0: reads only the 48-byte BG/BMP
+                // header, creates the bitmap in its size and pixel format
+                // (plus the embedded point) and clears it to zero. A missing
+                // file (-1) and a non-BG header are fatal.
                 let file = pop_string_value(stack).unwrap_or_default();
                 let archive = pop_string_value(stack).unwrap_or_default();
                 let target = pop_int_value(stack).unwrap_or_default();
-                let loaded = self.load_graph_image_resource(target, &archive, &file);
-                tracing::debug!(target, archive, file, loaded, "GraphLoadBgBitmapResource");
+                if let Err(error) = target_checks::bitmap(target) {
+                    return Some(Err(error));
+                }
+                let Some(entry) = find_runtime_resource(&self.manager, &archive, &file) else {
+                    return Some(Err(ethornell_vm::VmError::Runtime(format!(
+                        "指定されたファイル [ {archive} : {file} ] は存在しません"
+                    ))));
+                };
+                let is_bg = self.manager.read_by_entry_raw(&entry).is_ok_and(|bytes| {
+                    bytes.starts_with(b"CompressedBG___") || bytes.starts_with(b"BM")
+                });
+                if !is_bg || !self.load_graph_image_resource(target, &archive, &file) {
+                    return Some(Err(ethornell_vm::VmError::Runtime(format!(
+                        "指定されたファイル [ {archive} : {file} ] はBG形式ではありません"
+                    ))));
+                }
+                if let Some(&(width, height)) = self.bitmap_dimensions.get(&target) {
+                    let format = self.bitmap_formats.get(&target).copied().unwrap_or(2);
+                    let pixel = if format == 2 { [0, 0, 0, 0] } else { [0, 0, 0, 255] };
+                    let key = format!("runtime:bitmap:{target}");
+                    self.store_graph_image(
+                        key.clone(),
+                        DecodedImage { width, height, rgba: pixel.repeat(width as usize * height as usize) },
+                    );
+                    if let Some(resource) = self.graph_resources.get_mut(&target) {
+                        resource.key = key;
+                    }
+                }
                 ethornell_vm::Value::None
             }
             (0x90, 0xC2) => {
+                // sub_47FC00: both bitmap checks, then sub_405590's codes.
                 let direction = pop_int_value(stack).unwrap_or_default();
                 let source = pop_int_value(stack).unwrap_or_default();
                 let destination = pop_int_value(stack).unwrap_or_default();
-                let flipped = self.flip_graph_bitmap(destination, source, direction);
-                tracing::debug!(destination, source, direction, flipped, "GraphFlipBitmap");
+                if let Err(error) =
+                    target_checks::bitmap(destination).and_then(|()| target_checks::bitmap(source))
+                {
+                    return Some(Err(error));
+                }
+                if let Err(code) = self.flip_graph_bitmap(destination, source, direction) {
+                    return Some(Err(ethornell_vm::VmError::Runtime(match code {
+                        0x8000_0009 => format!("出力先に指定されたビットマップ [ {destination} ] は無効です"),
+                        0x8000_000A => format!("参照元に指定されたビットマップ [ {source} ] は無効です"),
+                        _ => format!("無効な方向 [ {direction} ] が指定されました"),
+                    })));
+                }
                 ethornell_vm::Value::None
             }
             (0x90, 0xC3) => {
+                // sub_47FCF0: both bitmap checks, then sub_405090's codes.
                 let source = pop_int_value(stack).unwrap_or_default();
                 let destination = pop_int_value(stack).unwrap_or_default();
-                let downsampled = self.downsample_graph_bitmap_half(destination, source);
-                tracing::debug!(
-                    destination,
-                    source,
-                    downsampled,
-                    "GraphDownsampleBitmapHalf"
-                );
+                if let Err(error) =
+                    target_checks::bitmap(destination).and_then(|()| target_checks::bitmap(source))
+                {
+                    return Some(Err(error));
+                }
+                if let Err(code) = self.downsample_graph_bitmap_half(destination, source) {
+                    return Some(Err(ethornell_vm::VmError::Runtime(match code {
+                        0x8000_0006 => format!("参照元に指定されたビットマップ [ {source} ] は小さすぎます"),
+                        _ => format!("参照元に指定されたビットマップ [ {source} ] は無効です"),
+                    })));
+                }
                 ethornell_vm::Value::None
             }
             (0x90, 0xC4) => {
@@ -4310,10 +4356,20 @@ impl RuntimeTraceApi {
                 } else {
                     self.graph_blob_cache.get(&key).cloned()
                 };
+                if let Err(error) = target_checks::bitmap(bitmap) {
+                    return Some(Err(error));
+                }
+                // sub_402330: the BG's own pixel format (sub_401C10).
                 let loaded = bytes
-                    .and_then(|bytes| decode_image(&bytes).ok())
-                    .map(|image| {
-                        self.store_runtime_bitmap(bitmap, image, 2);
+                    .and_then(|bytes| {
+                        let format = ethornell_image::parse_cbg_metadata(&bytes)
+                            .ok()
+                            .and_then(|metadata| metadata.native_bitmap_format())
+                            .unwrap_or(2);
+                        decode_image(&bytes).ok().map(|image| (image, format))
+                    })
+                    .map(|(image, format)| {
+                        self.store_runtime_bitmap(bitmap, image, format);
                         true
                     })
                     .unwrap_or(false);
@@ -4357,12 +4413,12 @@ impl RuntimeTraceApi {
                 // script error.
                 let Some(mut target) = self.graph_bitmap_image(destination) else {
                     return Some(Err(ethornell_vm::VmError::Runtime(format!(
-                        "Graph90:C8 destination bitmap {destination} does not exist"
+                        "生成先に指定されたビットマップ [ {destination} ] は無効です"
                     ))));
                 };
                 let Some(source_image) = self.graph_bitmap_image(source) else {
                     return Some(Err(ethornell_vm::VmError::Runtime(format!(
-                        "Graph90:C8 source bitmap {source} does not exist"
+                        "参照元に指定されたビットマップ [ {source} ] は無効です"
                     ))));
                 };
                 let target_format = self.bitmap_formats.get(&destination).copied().unwrap_or(2);
@@ -4393,6 +4449,18 @@ impl RuntimeTraceApi {
             (0x90, 0xCA) => {
                 let source = pop_int_value(stack).unwrap_or_default();
                 let destination = pop_int_value(stack).unwrap_or_default();
+                // sub_4801C0 -> sub_405120: destination (9) then source (10)
+                // must exist.
+                if self.graph_bitmap_image(destination).is_none() {
+                    return Some(Err(ethornell_vm::VmError::Runtime(format!(
+                        "出力先に指定されたビットマップ [ {destination} ] は無効です"
+                    ))));
+                }
+                if self.graph_bitmap_image(source).is_none() {
+                    return Some(Err(ethornell_vm::VmError::Runtime(format!(
+                        "参照元に指定されたビットマップ [ {source} ] は無効です"
+                    ))));
+                }
                 let scaled = self.aspect_fit_graph_bitmap(destination, source);
                 tracing::debug!(destination, source, scaled, "GraphScaleBitmapAspectFit");
                 ethornell_vm::Value::None

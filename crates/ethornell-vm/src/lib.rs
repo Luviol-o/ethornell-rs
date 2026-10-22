@@ -4433,7 +4433,14 @@ impl Vm {
                     let points = self.pop_ptr()?;
                     let identifier = self.pop_int()?;
                     if points == 0 {
-                        let _ = api.remove_graph_color_lut(identifier);
+                        // sub_405420 -> sub_40A250: removing an unknown curve
+                        // is fatal (0x8000000F); invalid control points
+                        // (0x80000016) are ignored by the handler.
+                        if !api.remove_graph_color_lut(identifier) {
+                            return Err(VmError::Runtime(format!(
+                                "登録先に指定されたトーンカーブの識別番号 [ {identifier} ] は無効です"
+                            )));
+                        }
                     } else {
                         let mut control = [[0i32; 2]; 3];
                         for (index, pair) in control.iter_mut().enumerate() {
@@ -4463,8 +4470,23 @@ impl Vm {
                                 self.clear_shadow_values(destination, bytes.len());
                             }
                         }
-                        Err(_) => {
-                            self.write_int(size_out, 2, 0)?;
+                        Err(code) => {
+                            // sub_4804A0: every failure is a script error.
+                            let message = match code as u32 {
+                                0x8000_0006 => format!(
+                                    "指定されたビットマップ [ {bitmap} ] はピクセル数が多過ぎます"
+                                ),
+                                0x8000_0008 => "必要なメモリが確保できませんでした".to_string(),
+                                0x8000_000A => format!("指定されたビットマップ [ {bitmap} ] は無効です"),
+                                0x8000_0011 => format!(
+                                    "指定されたビットマップ [ {bitmap} ] のピクセルモードはサポートされていません"
+                                ),
+                                0x8000_0017 => format!("無効な形式 [ {format} ] が指定されました"),
+                                0x8000_0018 => format!("無効なパラメータ [ {format} ] が指定されました"),
+                                0xFFFF_FFFE => "エンコードに失敗しました".to_string(),
+                                _ => "想定外のエラーが発生しました".to_string(),
+                            };
+                            return Err(VmError::Runtime(message));
                         }
                     }
                     Value::None
