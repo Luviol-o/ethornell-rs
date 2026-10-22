@@ -308,3 +308,13 @@ drawing is not yet the target's; do these as one renderer pass):
 Deferred to ADR 0004 in 0x90: C4/C5 (external image import/export files).
 
 Next: 90:D0 onwards in table order.
+
+Group 0x92 (2026-10-22): done except 14/15 (DCProcPreloadBmp, a
+DCProcImageSynth that parses "name x y mode alpha" lines and goes through
+the DC cache; only p0 is used — VM procedure phase), 1F (loose BMP via
+sub_465F20: -1 when unreadable, 0x80000001..7 from the BMP header checks of
+sub_402110 — ADR 0004) and F1 (BF_Movie load procedure — VM phase).
+Compatibility kept on purpose: 92:89/8D/90/91 with a handle that is not a
+CDspObjWindow keep the older engines' bitmap behaviour (Wonderful
+Everyday's scrmsg._bp); 1.622 itself raises "無効なウィンドウハンドル".
+
