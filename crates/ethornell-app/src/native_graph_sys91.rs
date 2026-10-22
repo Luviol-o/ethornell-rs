@@ -432,7 +432,7 @@ impl RuntimeTraceApi {
                 let window = pop_int_value(stack).unwrap_or_default();
                 let object = if <Self as ethornell_vm::GraphApi>::graph_window_exists(self, window)
                 {
-                    let object = self.alloc_object();
+                    let object = self.alloc_input_processor_handle();
                     self.graph_input_objects
                         .insert(object, RuntimeGraphInputObject::new_extended(window));
                     object

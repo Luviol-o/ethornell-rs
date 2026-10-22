@@ -16270,7 +16270,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_START_ITEM_SELECTION_PARAMETERS,
         returns: "cooperative selection result",
         scheduling: NativeSchedulingEffect::WaitProcedure,
-        notes: "BGI 1.622 43B740/43BCB0: VM decodes the item string table; per-thread selection handles numeric keys, ragged-grid navigation, pointer hover, blink, cancel and two-value completion.",
+        notes: "BGI 1.622 sub_47EF80 (CProcSelectItem): window first, then item count 1..=16, initial item, columns 1..=16 with the 1.622 texts; returns 2.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_DRAW_ITEM_SELECTION_GRID,
@@ -16278,7 +16278,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_DRAW_ITEM_SELECTION_GRID_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target sub_47E5F0/sub_491590 copies and renders the item grid immediately; it does not install a procedure.",
+        notes: "sub_47F0F0 -> sub_492090: item grid draw; count, columns, window errors.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_START_ITEM_SELECTION_EX,
@@ -16286,7 +16286,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_START_ITEM_SELECTION_EX_PARAMETERS,
         returns: "cooperative selection result",
         scheduling: NativeSchedulingEffect::WaitProcedure,
-        notes: "BGI 1.622 CProcSelectItemEx: per-thread item selection with copied bracket bitmaps, hover deselection and immediate two-value completion.",
+        notes: "sub_47F410 (CProcSelectItemEx): as A0 plus the two highlight overlays.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_START_ITEM_SELECTION_EX_BLINK,
@@ -16294,7 +16294,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_START_ITEM_SELECTION_EX_PARAMETERS,
         returns: "cooperative selection result",
         scheduling: NativeSchedulingEffect::WaitProcedure,
-        notes: "BGI 1.622 43CB00: automatically blink the initial item for twenty 50ms ticks, then return two values; no confirmation input is required.",
+        notes: "sub_47F430 (CProcSelectItemExBlink): as A2 with the confirmation blink.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_SET_ITEM_SELECTION_HIGHLIGHT_STYLES,
@@ -16302,7 +16302,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_SELECTION_HIGHLIGHT_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target sub_43B5A0 stores the two globals alternated by the selected-item blink renderer.",
+        notes: "sub_47F450 -> sub_463900: highlight styles.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_SET_ITEM_SELECTION_INPUT_MASK,
@@ -16310,7 +16310,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_SELECTION_INPUT_MASK_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target sub_43B590 stores dword_50762C, returned by the CProcSelectItem input-mask helper.",
+        notes: "sub_47F480 -> sub_463910: item input mask.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_SET_ITEM_SELECTION_NAVIGATION_PARAMETERS,
@@ -16318,7 +16318,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_SELECTION_NAVIGATION_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target sub_43B5B0 stores four globals used by navigation-key selection and pointer centering.",
+        notes: "sub_47F4A0 -> sub_463920: navigation parameters.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_SET_ITEM_SELECTION_COLUMN_LAYOUT,
@@ -16326,7 +16326,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_SELECTION_COLUMN_LAYOUT_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "BGI 1.622 42CBB0 supplies sixteen per-item RGB colors to 43BA30; the VM copies the table, and null disables these overrides.",
+        notes: "sub_47F4E0 -> sub_463940: column layout; unknown window fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_SET_INTERACTIVE_PROCEDURE_POLL_GATE,
@@ -16334,7 +16334,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_INTERACTIVE_POLL_GATE_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target writes the same value into two input-poll gates consumed by item/icon selection routines; it is not a Win32 foreground-window check.",
+        notes: "sub_47F520 -> sub_463950: interactive procedure poll gate.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_START_ICON_SELECTION,
@@ -16342,7 +16342,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_START_ICON_SELECTION_PARAMETERS,
         returns: "cooperative selection result",
         scheduling: NativeSchedulingEffect::WaitProcedure,
-        notes: "BGI 1.622 43AC40: independent Virtual item masks/scopes; keyboard assignment and callback 512; completion pushes local X, local Y, then selected index or -1.",
+        notes: "sub_47F540 (CProcSelectIcon): window, icon count 1..=64, focus mode 0..=3 with the 1.622 texts.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_START_ICON_SELECTION_EX,
@@ -16350,7 +16350,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_START_ICON_SELECTION_PARAMETERS,
         returns: "cooperative selection result",
         scheduling: NativeSchedulingEffect::WaitProcedure,
-        notes: "BGI 1.622 CProcSelectIconEx: copies 64-byte item records, independent Virtual mask geometry and overlays; completion returns three values, as the base Icon procedure.",
+        notes: "sub_47F650 (CProcSelectIconEx): 64-byte records, same checks.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_DRAW_ICON_BATCH,
@@ -16358,7 +16358,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_DRAW_ICON_BATCH_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target sub_491AD0/sub_43A710 redraws 16-byte icon records immediately.",
+        notes: "sub_47F760 -> sub_4925D0: icon batch; count and window errors.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_DRAW_EXTENDED_ICON_BATCH,
@@ -16366,7 +16366,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_DRAW_ICON_BATCH_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target projects each 64-byte extended record to a temporary 16-byte base record before using the same batch renderer.",
+        notes: "sub_47F7F0: extended icon batch; count and window errors.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_APPLY_ICON_INPUT_LAYOUT,
@@ -16374,7 +16374,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_ICON_LAYOUT_PARAMETERS,
         returns: "status 0,1,2,3",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target validates the window, copies a compact nested DCIPIcon descriptor, and applies it immediately. sub_447C10 queries sub_42C2A0 and creates each compact child Sprite at (window_valid.left + item.x, window_valid.top + item.y); hover/selected bitmap changes must preserve that resolved position.",
+        notes: "sub_47F920 -> sub_46D270: input layout status.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_APPLY_ICON_INPUT_LAYOUT_EX,
@@ -16382,7 +16382,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_ICON_LAYOUT_PARAMETERS,
         returns: "status 0,1,2,3",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_47EE60 -> sub_46CDB0: a non-Window handle returns 1; sub_46C9D0 copies the 40-byte root, 64-byte groups and 196-byte items (status 2 for a bad root/group count, 3 for a bad item table, low word only); sub_44B260 clears the window's icon sprites, rechecks every full group-count dword (status 3) and builds one mode-5 Sprite per item with item+4 != 0 whose bitmap resolves: normal bitmap, or the selected one for the group's current item; position item+8/+0xC with origin item+0x10/+0x14; depth item+4 (flag 0x10), item+0xC (flag 2) or the running item ordinal.",
+        notes: "sub_47F960 -> sub_46D310: extended input layout status.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_CREATE_ICON_INPUT_PROCESSOR,
@@ -16390,7 +16390,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_WINDOW_HANDLE_PARAMETER,
         returns: "DCIPIcon registry handle",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target creates the base DCIPIcon native type and registers it in the dynamic handle registry.",
+        notes: "sub_47F9A0 -> sub_46CB90: DCIPIcon, id ++dword_565D88 (from 1).",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_RELEASE_ICON_INPUT_PROCESSOR,
@@ -16398,7 +16398,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_ICON_PROCESSOR_HANDLE_PARAMETER,
         returns: "one when released",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_47EED0 -> sub_46C4F0: unlinks the handle record and deletes the DCIPIcon(Ex) (sub_447B10 / sub_44A8A0: unregisters its keyboard/pointer chain and scope nodes, unlinks and deletes the item sprites and the overlay child, clears the window lock); pushes 1 when the handle existed, else 0.",
+        notes: "sub_47F9D0 -> sub_46CC50: release, result pushed.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_CONFIGURE_ICON_INPUT_PROCESSOR,
@@ -16406,7 +16406,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_CONFIGURE_ICON_PROCESSOR_PARAMETERS,
         returns: "status 0..=4",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target rejects invalid handles and the extended variant, parses the compact descriptor, then configures the base DCIPIcon object. sub_447C10 keeps a processor-owned 20-byte live-item table. For each resolvable configure-time normal/selected bitmap it creates a CDspObjVirtual hit wrapper, sizes it through sub_41AB10 from the sub_407F20 bitmap descriptor width/height, and attaches it at Window-valid-origin + item x/y. sub_4495C0 hit-tests that Virtual final rectangle directly; renderer clipping is not an extra hit gate. Multiple DCIPIcon processors referencing one Window keep independent child tables. Compact root +0x14 becomes DCIPIcon+0x48 (physical-input suppression mask) and +0x18 becomes DCIPIcon+0x4C (action-map selector & 7). During sub_4485A0/sub_448690, sub_46DF00 obtains input through destructive sub_46DB40 descriptor reads; an icon-owned action-1 MouseDown is therefore consumed before a later CProcDspMsg input query and must not be replayed as a message-advance edge.",
+        notes: "sub_47FA00 -> sub_46CE40: configuration status.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_GET_ICON_INPUT_STATE,
@@ -16414,7 +16414,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_ICON_STATE_OUTPUT_PARAMETERS,
         returns: "1 on valid handle, 0 on invalid handle",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_47EF40 -> sub_4484C0: writes {running, group, item, value, dx, dy}; with a non-zero value dx/dy are computed at read time from the live cursor (group +0x14 flag and mouse-left held) or the last left-button press point, relative to the item sprite rectangle.",
+        notes: "sub_47FA40: state record into the buffer, 1 when the processor exists.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_GET_ICON_INPUT_CURRENT_GROUP,
@@ -16422,7 +16422,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_ICON_CURRENT_GROUP_OUTPUT_PARAMETERS,
         returns: "1 on valid handle, 0 on invalid handle",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_46CC20 -> sub_448520 writes DCIPIcon+0x3C. Configure clamps the descriptor initial group to -1 or a valid group index.",
+        notes: "sub_47FA80: current group, 1 when it exists.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_GET_ICON_INPUT_SELECTIONS,
@@ -16430,7 +16430,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_ICON_SELECTION_OUTPUT_PARAMETERS,
         returns: "1 on valid handle, 0 on invalid handle",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_46CC50 -> sub_448530 writes each 52-byte group record's +0x08 selected/current item index; pointer-hover state is separate and does not change these values.",
+        notes: "sub_47FAC0: selections, 1 when it exists.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_POP_ICON_INPUT_EVENT,
@@ -16438,7 +16438,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_POP_ICON_INPUT_EVENT_PARAMETERS,
         returns: "1 for a valid processor handle, 0 for an invalid handle",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_47F000 -> sub_448560: pops one queued {code, packed item, value} event or writes zeros; pushes whether the handle exists. Nothing else is written.",
+        notes: "sub_47FB00 -> sub_448560: pops one event (zeros when empty), 1 when it exists.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_LOAD_BG_BITMAP_RESOURCE,
@@ -20096,6 +20096,19 @@ const PORTABLE_EQUIVALENT_OPCODES: &[NativeOpcode] = &[
     opcodes::GRAPH90_SET_TEXT_SHADOW_PARAMETERS,
     opcodes::GRAPH90_REGISTER_FULLWIDTH_GLYPH_STRIP,
     opcodes::GRAPH_SET_MESSAGE_INPUT_FORCES_COMPLETION,
+    opcodes::GRAPH90_START_ITEM_SELECTION,
+    opcodes::GRAPH90_DRAW_ITEM_SELECTION_GRID,
+    opcodes::GRAPH90_START_ITEM_SELECTION_EX,
+    opcodes::GRAPH90_START_ITEM_SELECTION_EX_BLINK,
+    opcodes::GRAPH90_START_ICON_SELECTION,
+    opcodes::GRAPH90_START_ICON_SELECTION_EX,
+    opcodes::GRAPH90_DRAW_ICON_BATCH,
+    opcodes::GRAPH90_DRAW_EXTENDED_ICON_BATCH,
+    opcodes::GRAPH90_APPLY_ICON_INPUT_LAYOUT,
+    opcodes::GRAPH90_CREATE_ICON_INPUT_PROCESSOR,
+    opcodes::GRAPH90_CONFIGURE_ICON_INPUT_PROCESSOR,
+    opcodes::GRAPH90_GET_ICON_INPUT_CURRENT_GROUP,
+    opcodes::GRAPH90_GET_ICON_INPUT_SELECTIONS,
 ];
 
 const PARTIAL_IMPLEMENTATION_OPCODES: &[NativeOpcode] = &[
@@ -20203,19 +20216,6 @@ const PARTIAL_IMPLEMENTATION_OPCODES: &[NativeOpcode] = &[
     opcodes::GRAPH91_SET_MULTILAYER_LAYER_TRANSFORM_VELOCITY,
     opcodes::GRAPH90_SET_DISPLAY_OPTIONS,
     opcodes::GRAPH90_UPLOAD_MAP_TILE_DATA,
-    opcodes::GRAPH90_START_ITEM_SELECTION,
-    opcodes::GRAPH90_DRAW_ITEM_SELECTION_GRID,
-    opcodes::GRAPH90_START_ITEM_SELECTION_EX,
-    opcodes::GRAPH90_START_ITEM_SELECTION_EX_BLINK,
-    opcodes::GRAPH90_START_ICON_SELECTION,
-    opcodes::GRAPH90_START_ICON_SELECTION_EX,
-    opcodes::GRAPH90_DRAW_ICON_BATCH,
-    opcodes::GRAPH90_DRAW_EXTENDED_ICON_BATCH,
-    opcodes::GRAPH90_APPLY_ICON_INPUT_LAYOUT,
-    opcodes::GRAPH90_CREATE_ICON_INPUT_PROCESSOR,
-    opcodes::GRAPH90_CONFIGURE_ICON_INPUT_PROCESSOR,
-    opcodes::GRAPH90_GET_ICON_INPUT_CURRENT_GROUP,
-    opcodes::GRAPH90_GET_ICON_INPUT_SELECTIONS,
     opcodes::GRAPH90_LOAD_BG_BITMAP_RESOURCE,
     opcodes::GRAPH90_DOWNSAMPLE_BITMAP_HALF,
     opcodes::GRAPH90_IMPORT_EXTERNAL_IMAGE,

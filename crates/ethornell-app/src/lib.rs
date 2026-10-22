@@ -866,6 +866,8 @@ struct RuntimeTraceApi {
     last_scenario_sound: Option<String>,
     next_node_handle: i32,
     next_object_handle: i32,
+    /// dword_565D88: DCIndProc ids (Graph90:B8 / 91:B8), counted from 1.
+    last_input_processor_handle: i32,
     next_timeline_handle: i32,
     mouse_pos: Option<(f32, f32)>,
     cursor_motion: Option<RuntimeCursorMotion>,
@@ -1261,6 +1263,7 @@ impl RuntimeTraceApi {
             last_scenario_sound: None,
             next_node_handle: 1,
             next_object_handle: 10_000,
+            last_input_processor_handle: 0,
             next_timeline_handle: 30_000,
             mouse_pos: None,
             cursor_motion: None,
@@ -2648,6 +2651,12 @@ impl RuntimeTraceApi {
         self.display_tree
             .register(handle, NativeDisplayKind::Sprite);
         handle
+    }
+
+    /// sub_447B20: ++dword_565D88 names every input processor.
+    pub(crate) fn alloc_input_processor_handle(&mut self) -> i32 {
+        self.last_input_processor_handle = self.last_input_processor_handle.wrapping_add(1);
+        self.last_input_processor_handle
     }
 
     fn alloc_object(&mut self) -> i32 {
@@ -24508,8 +24517,10 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                 );
             }
             (0x90, 0xb8) => {
+                // sub_47F9A0 -> sub_46CB90(window, 0): DCIPIcon, id from
+                // sub_447B20's counter.
                 let layer = pop_int_value(stack).unwrap_or_default();
-                let object = self.alloc_object();
+                let object = self.alloc_input_processor_handle();
                 self.graph_input_objects
                     .insert(object, RuntimeGraphInputObject::new(layer));
                 tracing::debug!(layer, object, "GraphCreateIconInputProcessor");

@@ -49,37 +49,29 @@ impl Vm {
         let count = a[1];
         let items = matches!(opcode.id, 0xA0 | 0xA2 | 0xA3);
         let limit = if items { 16 } else { 64 };
+        let fatal = |message: String| Err(VmError::Runtime(message));
+        // sub_47EF80 / sub_47F540: the window first, then the procedure's
+        // count / initial item / column / focus-mode codes.
+        if !api.graph_window_exists(window) {
+            return fatal("無効なウィンドウハンドルが指定されました".into());
+        }
         if count.wrapping_sub(1) as u32 >= limit {
-            return Err(VmError::Runtime(format!(
-                "Graph90:{:02X} invalid item count {count}",
-                opcode.id
-            )));
+            return fatal(if items {
+                format!("無効な項目数 [ {count} ] が指定されました")
+            } else {
+                format!("無効なアイコン数 [ {count} ] が指定されました")
+            });
         }
         if items {
             if a[6] < 0 || a[6] >= count {
-                return Err(VmError::Runtime(format!(
-                    "Graph90:{:02X} invalid initial selection {}",
-                    opcode.id, a[6]
-                )));
+                return fatal(format!("無効な初期選択項目番号 [ {} ] が指定されました", a[6]));
             }
             // The target accepts zero and subsequently divides by zero.
             if !(1..=16).contains(&a[3]) {
-                return Err(VmError::Runtime(format!(
-                    "Graph90:{:02X} invalid column count {}",
-                    opcode.id, a[3]
-                )));
+                return fatal(format!("無効な縦列数 [ {} ] が指定されました", a[3]));
             }
         } else if a[4] as u32 > 3 {
-            return Err(VmError::Runtime(format!(
-                "Graph90:{:02X} invalid input mode {}",
-                opcode.id, a[4]
-            )));
-        }
-        if !api.graph_window_exists(window) {
-            return Err(VmError::Runtime(format!(
-                "Graph90:{:02X} invalid Window #{window}",
-                opcode.id
-            )));
+            return fatal(format!("無効なフォーカスモード [ {} ] が指定されました", a[4]));
         }
         let data = if items {
             let text = self.read_counted_string_pointer_list(a[2] as u32, count as usize)?;

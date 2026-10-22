@@ -4227,19 +4227,19 @@ impl Vm {
                     let window = self.pop_int()?;
                     if !(1..=16).contains(&count) {
                         return Err(VmError::Runtime(format!(
-                            "Graph90:A1 item count {count} is out of range"
+                            "無効な項目数 [ {count} ] が指定されました"
                         )));
                     }
                     if !(1..=16).contains(&columns) {
                         return Err(VmError::Runtime(format!(
-                            "Graph90:A1 column count {columns} is out of range"
+                            "無効な縦列数 [ {columns} ] が指定されました"
                         )));
                     }
                     let items = self.read_counted_string_pointer_list(table, count as usize)?;
                     if !api.draw_item_selection_grid(window, &items, columns, layout != 0, color) {
-                        return Err(VmError::Runtime(format!(
-                            "Graph90:A1 handle 0x{window:08X} is not a Window"
-                        )));
+                        return Err(VmError::Runtime(
+                            "無効なウィンドウハンドルが指定されました".into(),
+                        ));
                     }
                     Value::None
                 } else if (code,id)==(0x90,0x78) {
@@ -4978,9 +4978,9 @@ impl Vm {
                         Some(values)
                     };
                     if !api.set_item_selection_column_layout(window, layout) {
-                        return Err(VmError::Runtime(format!(
-                            "Graph90:A7 invalid window handle #{window}"
-                        )));
+                        return Err(VmError::Runtime(
+                            "無効なウィンドウハンドルが指定されました".into(),
+                        ));
                     }
                     Value::None
                 } else if matches!((code, id), (0x90, 0xb4) | (0x90, 0xb5)) {
@@ -4993,13 +4993,13 @@ impl Vm {
                     let window = self.pop_int()?;
                     if !(1..=64).contains(&count) {
                         return Err(VmError::Runtime(format!(
-                            "Graph90:{id:02X} invalid icon count {count}"
+                            "無効なアイコン数 [ {count} ] が指定されました"
                         )));
                     }
                     if !api.graph_window_exists(window) {
-                        return Err(VmError::Runtime(format!(
-                            "Graph90:{id:02X} invalid window handle #{window}"
-                        )));
+                        return Err(VmError::Runtime(
+                            "無効なウィンドウハンドルが指定されました".into(),
+                        ));
                     }
                     let stride = if id == 0xb4 { 16 } else { 64 };
                     let byte_len = count as usize * stride;
@@ -5019,9 +5019,9 @@ impl Vm {
                         });
                     }
                     if !api.draw_graph_icon_batch(window, &records) {
-                        return Err(VmError::Runtime(format!(
-                            "Graph90:{id:02X} failed to draw icon batch for window #{window}"
-                        )));
+                        return Err(VmError::Runtime(
+                            "無効なウィンドウハンドルが指定されました".into(),
+                        ));
                     }
                     Value::None
                 } else if (code, id) == (0x90, 0xb6) {
