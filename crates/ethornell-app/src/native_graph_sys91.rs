@@ -951,6 +951,9 @@ impl RuntimeTraceApi {
                 if !self.graph91_is_window(window) {
                     return Some(Err(ethornell_vm::VmError::Runtime(WINDOW_HANDLE.into())));
                 }
+                // The next message starts at the new cursor; the engine's
+                // one message node can't keep the old text elsewhere.
+                self.message_pages.remove(&window);
                 let state = self.surface_text_states.entry(window).or_default();
                 state.cursor_x = x;
                 state.cursor_y = y;

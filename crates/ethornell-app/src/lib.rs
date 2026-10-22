@@ -15523,6 +15523,19 @@ mod input_tests {
         api.tick_text(10_000);
         assert_eq!(shown_message(&api), "Second line.");
 
+        // A message after Graph91:8C starts at the new cursor.
+        call_graph(
+            &mut api,
+            0x91,
+            0x8c,
+            &mut vec![Value::Int(window), Value::Int(200), Value::Int(80)],
+        )
+        .unwrap();
+        api.start_native_message("Moved.".into(), Some(window));
+        api.tick_text(10_000);
+        assert_eq!(shown_message(&api), "Moved.");
+        assert_eq!(api.window_text_state(Some(window)).y, 80.0);
+
         // Graph92:8E (sub_440F80) clears the window too.
         call_graph(&mut api, 0x92, 0x8e, &mut vec![Value::Int(window)]).unwrap();
         api.start_native_message("Third line.".into(), Some(window));
