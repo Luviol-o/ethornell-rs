@@ -2,6 +2,29 @@
 
 `ethornell-rs` is a reimplementation of the Ethornell / BURIKO General Interpreter (a.k.a. "BGI") visual novel engine.
 
+<table>
+  <tr>
+    <td width="50%" align="center">
+      <img src="./images/desktop-title.jpg" width="100%"><br>
+      <b>Desktop</b><br>
+      <sub>千の刃濤、桃花染の皇姫 体験版 (BGI 1.622), title screen.</sub>
+    </td>
+    <td width="50%" align="center">
+      <img src="./images/desktop-scene.jpg" width="100%"><br>
+      <b>Desktop</b><br>
+      <sub>Character sprites, face window and message window.</sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" align="center">
+      <img src="./images/web.jpg" width="100%"><br>
+      <b>Web</b><br>
+      <sub>The same game in Chrome (WebAssembly, WebGL2).</sub>
+    </td>
+    <td width="50%"></td>
+  </tr>
+</table>
+
 The runtime detects the native game identifier from the comparison in
 `system.arc:ipl._bp`. If detection is unavailable, the identifier falls back to
 `Tayutama2TV`. For example:
@@ -15,11 +38,11 @@ cargo run -p ethornell-cli -- run --game /path/to/sun_flower
 Without arguments (a double-click), `ethornell` asks for the game folder;
 `ethornell /path/to/sun_flower` plays it directly.
 
-Builds for Windows (x86_64), Linux (x86_64 and AArch64), macOS (a universal
-`Ethornell.app`), Android (APK) and iOS (unsigned IPA) are published on
-[GitHub Releases](https://github.com/asukaminato0721/ethornell-rs/releases).
-The `pre-release` entry is updated after successful branch pushes; `v*` tags
-publish versioned releases.
+Builds for Windows (x86_64), Linux (x86_64 and AArch64), FreeBSD (x86_64),
+macOS (a universal `Ethornell.app`), Android (APK), iOS (unsigned IPA) and the
+web (a static page) are published on
+[GitHub Releases](https://github.com/xmoezzz/ethornell-rs/releases).
+The `pre-release` entry follows `main`; `v*` tags publish versioned releases.
 See [`platform/`](platform/README.md) for building and using each platform,
 including the Android and iOS apps.
 
