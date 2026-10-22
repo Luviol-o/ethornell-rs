@@ -7811,10 +7811,12 @@ impl Vm {
         self.write_int(ptr, width, value.as_i32() as u32)?;
         if width >= 2 {
             match value {
-                Value::Int(_) | Value::None => {
+                // Pointers and code offsets are raw cells like the target's;
+                // only host-side strings and program handles have no bytes.
+                Value::Int(_) | Value::None | Value::Ptr(_) | Value::Func { .. } => {
                     self.mem_values.remove(&addr);
                 }
-                Value::Ptr(_) | Value::Str(_) | Value::Func { .. } | Value::Program(_) => {
+                Value::Str(_) | Value::Program(_) => {
                     self.mem_values.insert(addr, value.clone());
                 }
             }
@@ -15276,9 +15278,10 @@ mod tests {
         let destination = 0x2480;
         vm.write_value(destination, 2, &Value::Ptr(0x0800_4321))
             .unwrap();
+        // A stored pointer is the raw cell, as in the target.
         assert_eq!(
             vm.read_value(destination, 2).unwrap(),
-            Value::Ptr(0x0800_4321)
+            Value::Int(0x0800_4321)
         );
 
         vm.write_int(destination, 2, 10_466).unwrap();
