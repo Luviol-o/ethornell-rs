@@ -647,6 +647,254 @@ pub(crate) fn grayscale_mask(
     }
 }
 
+/// x87 `fistp m64` / `__ftol2_sse` in truncating mode, low dword kept
+/// (out of range gives the indefinite integer, whose low dword is 0).
+fn truncate_low(value: f64) -> i32 {
+    if value.is_finite() && value.abs() < 9.223_372_036_854_775_808e18 {
+        value as i64 as i32
+    } else {
+        0
+    }
+}
+
+/// `sub_4169D0`: the 16.16 source-space walk of the rotate-zoom blits,
+/// as (start, step per destination column, step per destination row),
+/// each (u, v). x87 at the Windows default 53-bit precision, so every
+/// operation rounds like f64; the operation order is the target's.
+fn affine_walk(
+    dx: i32,
+    dy: i32,
+    sx: i32,
+    sy: i32,
+    angle: i32,
+    x_scale: u32,
+    y_scale: u32,
+) -> ([i32; 2], [i32; 2], [i32; 2]) {
+    const K: f64 = 65536.0;
+    const Q: f64 = 1.52587890625e-05;
+    let theta = -(f64::from(angle) * std::f64::consts::PI / 11796480.0);
+    let (c, s) = (theta.cos(), theta.sin());
+    let ix = K / f64::from(x_scale);
+    let iy = K / f64::from(y_scale);
+    let px = -(f64::from(dx) * Q);
+    let py = f64::from(dy) * Q;
+    let v0 = truncate_low((f64::from(sy) * Q - (py * c + px * s) * iy) * K);
+    let u0 = truncate_low(((px * c - py * s) * ix + f64::from(sx) * Q) * K);
+    let column = [truncate_low(c * ix * K), truncate_low(s * iy * -K)];
+    let theta = theta + std::f64::consts::FRAC_PI_2;
+    let row = [truncate_low(theta.cos() * ix * -K), truncate_low(theta.sin() * iy * K)];
+    ([u0, v0], column, row)
+}
+
+/// The MMX walk shared by the rotate-zoom kernels: for every destination
+/// pixel, the source position (`psrad 16` + `packssdw`, so saturated to
+/// i16) and its 4-bit fractions (`pand 0xF000`, `psrlw 9`).
+fn for_each_walk(
+    destination: &mut TargetBitmap,
+    walk: ([i32; 2], [i32; 2], [i32; 2]),
+    mut kernel: impl FnMut(&mut [u8], i32, i32, usize, usize),
+) {
+    let (mut row_start, column, row) = walk;
+    for y in 0..destination.height {
+        let mut position = row_start;
+        row_start = [row_start[0].wrapping_add(row[0]), row_start[1].wrapping_add(row[1])];
+        for x in 0..destination.width {
+            let current = position;
+            position = [position[0].wrapping_add(column[0]), position[1].wrapping_add(column[1])];
+            let sat = |value: i32| (value >> 16).clamp(-32768, 32767);
+            let fraction = |value: i32| ((value as u32 & 0xF000) >> 12) as usize;
+            let at = y * destination.stride + 4 * x;
+            if let Some(pixel) = destination.pixels.get_mut(at..at + 4) {
+                kernel(pixel, sat(current[0]), sat(current[1]), fraction(current[0]), fraction(current[1]));
+            }
+        }
+    }
+}
+
+/// Source pixel (x, y) when both are unsigned-below the size, else 0.
+fn sample_guarded(source: &TargetBitmap, x: i32, y: i32) -> [i32; 4] {
+    if (x as u32) < source.width as u32 && (y as u32) < source.height as u32 {
+        read_pixel(source, y as usize * source.stride + 4 * x as usize).map(i32::from)
+    } else {
+        [0; 4]
+    }
+}
+
+/// `pmulhw((a - b) << 4, (16 - k) << 8) + b` per lane.
+fn lerp16(a: i32, b: i32, k: usize) -> i32 {
+    ((((a - b) << 4) as i16 as i32 * ((16 - k as i32) << 8)) >> 16) + b
+}
+
+/// The 4-bit bilinear sample of `sub_417ED0` / `sub_416E20` / `sub_4174E0`
+/// (unsaturated 16-bit lanes). The kernels' early exits all coincide with
+/// four zero neighbours.
+fn sample_bilinear4(source: &TargetBitmap, x: i32, y: i32, fx: usize, fy: usize) -> [i32; 4] {
+    if y <= -2 || y >= source.height as i32 || (y >= 0 && (x <= -2 || x >= source.width as i32)) {
+        return [0; 4];
+    }
+    let p00 = sample_guarded(source, x, y);
+    let p01 = sample_guarded(source, x + 1, y);
+    let p10 = sample_guarded(source, x, y + 1);
+    let p11 = sample_guarded(source, x + 1, y + 1);
+    std::array::from_fn(|lane| {
+        let top = lerp16(p00[lane], p01[lane], fx);
+        let bottom = lerp16(p10[lane], p11[lane], fx);
+        lerp16(top, bottom, fy)
+    })
+}
+
+/// The weight table of `sub_4177E0` / `sub_4174E0`: entry k (alpha >> 1)
+/// is k * (256 - alpha) >> 8, entry 127 is 128 * (256 - alpha) >> 8.
+fn alpha_weight(k: u32, alpha: u32) -> i32 {
+    let keep = 256u32.wrapping_sub(alpha);
+    let k = if k == 127 { 128 } else { k };
+    (k.wrapping_mul(keep) >> 8) as u16 as i16 as i32
+}
+
+/// `d + ((v - d) * w >> 7)` on 16-bit lanes, `packuswb`.
+fn blend7(d: u8, v: i32, weight: i32) -> u8 {
+    (i32::from(d) + (((v - i32::from(d)) * weight) as i16 as i32 >> 7)).clamp(0, 255) as u8
+}
+
+/// `d + pmulhw((v - d) << 4, (256 - alpha) << 4)` on the colour lanes.
+fn blend_keep(d: u8, v: i32, alpha: u32) -> u8 {
+    let keep = (256u32.wrapping_sub(alpha) << 4) as u16 as i16 as i32;
+    let diff = ((v - i32::from(d)) << 4) as i16 as i32;
+    (i32::from(d) + ((diff * keep) >> 16)).clamp(0, 255) as u8
+}
+
+/// `sub_416B60` (91:18, single-threaded): rotate-zoom blit of `source` into
+/// `destination`. `dx`/`dy` and `sx`/`sy` are the 16.16 anchors in the
+/// destination and source, `angle` 16.16 degrees, `x_scale`/`y_scale`
+/// 16.16, `alpha` 0..=256 the transparency, `filter` bilinear sampling.
+/// Whole anchors, unit scales and a multiple of 360 degrees with the
+/// source covering the destination take the plain blit (`sub_416890` ->
+/// `sub_40B560`); otherwise only a format-1 destination is drawn, over its
+/// whole area. The target splits large destinations into bands for its
+/// worker threads (`sub_41A120`); this runs the single-band path.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn rotate_blit(
+    destination: &mut TargetBitmap,
+    destination_format: u32,
+    source: &TargetBitmap,
+    source_format: u32,
+    [dx, dy, sx, sy]: [i32; 4],
+    angle: i32,
+    x_scale: u32,
+    y_scale: u32,
+    alpha: u32,
+    filter: bool,
+) {
+    if x_scale == 0 || y_scale == 0 {
+        return;
+    }
+    if dx as u16 == 0 && dy as u16 == 0 && sx as u16 == 0 && sy as u16 == 0 && angle % 23592960 == 0
+        && x_scale == 0x10000 && y_scale == 0x10000
+    {
+        let (left, top) = ((sx >> 16).wrapping_sub(dx >> 16), (sy >> 16).wrapping_sub(dy >> 16));
+        let right = left.wrapping_add(destination.width as i32 - 1);
+        let bottom = top.wrapping_add(destination.height as i32 - 1);
+        if left >= 0 && top >= 0 && right <= source.width as i32 - 1 && bottom <= source.height as i32 - 1 {
+            plain_blit(destination, destination_format, source, source_format, left, top, alpha);
+            return;
+        }
+    }
+    if destination_format != 1 || alpha >= 0x100 {
+        return;
+    }
+    let walk = affine_walk(dx, dy, sx, sy, angle, x_scale, y_scale);
+    match (source_format, filter) {
+        // sub_418500 / sub_4173B0: nearest, 0 outside.
+        (1, false) => for_each_walk(destination, walk, |pixel, x, y, _, _| {
+            let value = sample_guarded(source, x, y);
+            for lane in 0..4 {
+                pixel[lane] = if alpha == 0 {
+                    value[lane] as u8
+                } else if lane == 3 {
+                    pixel[lane]
+                } else {
+                    blend_keep(pixel[lane], value[lane], alpha)
+                };
+            }
+        }),
+        // sub_417ED0 / sub_416E20: bilinear, 0 outside.
+        (1, true) => for_each_walk(destination, walk, |pixel, x, y, fx, fy| {
+            let value = sample_bilinear4(source, x, y, fx, fy);
+            for lane in 0..4 {
+                pixel[lane] = if alpha == 0 {
+                    value[lane].clamp(0, 255) as u8
+                } else if lane == 3 {
+                    pixel[lane]
+                } else {
+                    blend_keep(pixel[lane], value[lane], alpha)
+                };
+            }
+        }),
+        // sub_4177E0: nearest, blended by the source alpha, nothing outside.
+        (2, false) => for_each_walk(destination, walk, |pixel, x, y, _, _| {
+            if (x as u32) >= source.width as u32 || (y as u32) >= source.height as u32 {
+                return;
+            }
+            let value = sample_guarded(source, x, y);
+            let k = value[3] as u32 >> 1;
+            if k != 0 {
+                let weight = alpha_weight(k, alpha);
+                for lane in 0..3 {
+                    pixel[lane] = blend7(pixel[lane], value[lane], weight);
+                }
+            }
+        }),
+        // sub_4174E0: bilinear, blended by the sampled alpha.
+        (2, true) => for_each_walk(destination, walk, |pixel, x, y, fx, fy| {
+            let value = sample_bilinear4(source, x, y, fx, fy);
+            let k = value[3].clamp(0, 255) as u32 >> 1;
+            if k != 0 {
+                let weight = alpha_weight(k, alpha);
+                for lane in 0..3 {
+                    pixel[lane] = blend7(pixel[lane], value[lane], weight);
+                }
+            }
+        }),
+        _ => {}
+    }
+}
+
+/// `sub_40B560`: the source rectangle at (left, top) of the destination's
+/// size blitted over the whole destination with transparency `alpha`
+/// (bitmap_blend's mode-1 ports; their kernels are channel-wise, so the
+/// BGRA layout can be handed over as is).
+fn plain_blit(
+    destination: &mut TargetBitmap,
+    destination_format: u32,
+    source: &TargetBitmap,
+    source_format: u32,
+    left: i32,
+    top: i32,
+    alpha: u32,
+) {
+    let as_image = |bitmap: &TargetBitmap| {
+        let mut rgba = Vec::with_capacity(bitmap.width * bitmap.height * 4);
+        for y in 0..bitmap.height {
+            rgba.extend_from_slice(&bitmap.pixels[y * bitmap.stride..y * bitmap.stride + bitmap.width * 4]);
+        }
+        DecodedImage { width: bitmap.width as u32, height: bitmap.height as u32, rgba }
+    };
+    let mut image = as_image(destination);
+    crate::bitmap_blend::blit_alpha_over_parameter(
+        &mut image,
+        destination_format as i32,
+        &as_image(source),
+        source_format as i32,
+        -left,
+        -top,
+        alpha as i32,
+    );
+    for y in 0..destination.height {
+        let row = &image.rgba[y * destination.width * 4..(y + 1) * destination.width * 4];
+        destination.pixels[y * destination.stride..y * destination.stride + row.len()].copy_from_slice(row);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -665,6 +913,7 @@ mod tests {
         let directory = std::env::var("ETHORNELL_KERNEL_VECTORS")
             .expect("ETHORNELL_KERNEL_VECTORS names the vector directory");
         let mut checked = 0;
+        let mut failed = Vec::new();
         let mut entries = std::fs::read_dir(&directory)
             .unwrap()
             .map(|entry| entry.unwrap().path())
@@ -677,7 +926,9 @@ mod tests {
                 unreachable!()
             };
             let (sw, sh, dw, dh) = (sw as usize, sh as usize, dw as usize, dh as usize);
-            let mut at = 32;
+            // Kind 6 carries p2 more words after the header.
+            let extra = if kind == 6 { words(&data[32..], p2 as usize) } else { Vec::new() };
+            let mut at = 32 + 4 * extra.len();
             let mut take = |n: usize| {
                 let slice = data[at..at + n].to_vec();
                 at += n;
@@ -694,13 +945,28 @@ mod tests {
                 1 => concentrate(&mut destination, &source, p0, p1, p2),
                 2 => scale_nearest(&mut destination, &source, p0, p1),
                 3 => scale_filtered(&mut destination, &source, p2, p0, p1),
+                6 => rotate_blit(
+                    &mut destination,
+                    p0 >> 8 & 0xFF,
+                    &source,
+                    p0 & 0xFF,
+                    [extra[0] as i32, extra[1] as i32, extra[2] as i32, extra[3] as i32],
+                    extra[4] as i32,
+                    extra[5],
+                    extra[6],
+                    p1,
+                    p0 >> 16 != 0,
+                ),
                 5 => grayscale_mask(&mut destination, p2 >> 8 & 0xFF, &source, p2 & 0xFF, p0 as i32, p1 as i32),
                 4 => process(&mut destination, p2 >> 8 & 0xFF, &source, p2 & 0xFF, p2 >> 16, p0, p1),
                 _ => panic!("unknown kernel {kind}"),
             }
-            assert_eq!(destination.pixels, expected, "{}", path.display());
+            if destination.pixels != expected {
+                failed.push(path.file_name().unwrap().to_string_lossy().into_owned());
+            }
             checked += 1;
         }
         assert!(checked > 0);
+        assert!(failed.is_empty(), "{} of {checked} vectors differ: {failed:?}", failed.len());
     }
 }

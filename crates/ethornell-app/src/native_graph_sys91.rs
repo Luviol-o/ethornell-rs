@@ -406,7 +406,11 @@ impl RuntimeTraceApi {
                 if let Err(error) = self.graph91_check_bitmap_operation(id, &args) {
                     return Some(Err(error));
                 }
-                self.graph91_composite_rect(&args, id == 0x19);
+                if id == 0x18 {
+                    self.graph91_rotate_blit(&args);
+                } else {
+                    self.graph91_composite_rect(&args, true);
+                }
                 ethornell_vm::Value::None
             }
             0x1a => {
@@ -2258,6 +2262,37 @@ impl RuntimeTraceApi {
             _ => {}
         }
         Ok(())
+    }
+
+    /// 91:18 -> sub_402F30 -> sub_416B60 (bitmap_kernels::rotate_blit):
+    /// destination, dx, dy, source, sx, sy, angle, x scale, y scale,
+    /// alpha, filter.
+    fn graph91_rotate_blit(&mut self, args: &[i32]) {
+        let &[destination, dx, dy, source, sx, sy, angle, x_scale, y_scale, alpha, filter] = args else {
+            return;
+        };
+        let (Some(source_image), Some(destination_image)) =
+            (self.graph_bitmap_image(source), self.graph_bitmap_image(destination))
+        else {
+            return;
+        };
+        let source_format = self.bitmap_formats.get(&source).copied().unwrap_or(2);
+        let destination_format = self.bitmap_formats.get(&destination).copied().unwrap_or(2);
+        let source_bitmap = crate::bitmap_kernels::TargetBitmap::from_image(&source_image);
+        let mut target = crate::bitmap_kernels::TargetBitmap::from_image(&destination_image);
+        crate::bitmap_kernels::rotate_blit(
+            &mut target,
+            destination_format as u32,
+            &source_bitmap,
+            source_format as u32,
+            [dx, dy, sx, sy],
+            angle,
+            x_scale as u32,
+            y_scale as u32,
+            alpha as u32,
+            filter != 0,
+        );
+        self.graph91_store_bitmap(destination, target.to_image(destination_format == 1), destination_format);
     }
 
     fn graph91_composite_rect(&mut self, args: &[i32], conversion_variant: bool) {

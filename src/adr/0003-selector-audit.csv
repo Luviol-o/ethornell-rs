@@ -446,7 +446,7 @@ selector,handler,symbol,status
 91:15,481910,Graph91_15_GenerateRadialLensDisplacementMap,verified
 91:16,481A20,Graph91_16_GenerateSineDisplacementMap,verified
 91:17,481B20,Graph91_17_GenerateRadialWarpDisplacementMap,verified
-91:18,481C00,Graph91_18_CompositeBitmapRectAlpha,todo
+91:18,481C00,Graph91_18_CompositeBitmapRectAlpha,verified
 91:19,481D80,Graph91_19_CompositeBitmapRectConverted,todo
 91:1A,481F00,Graph91_1A_ReplaceBitmapRgbPreserveAlpha,verified
 91:1B,481FA0,Graph91_1B_ConcentrateBitmap,verified

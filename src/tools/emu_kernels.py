@@ -173,6 +173,11 @@ print("scales done")
 # p2 = type << 16 | destination format << 8 | source format.
 for k in range(129):
     mu.mem_write(0x50B0F0 + 16 * k, struct.pack("<8H", k, k, k, 0, k, k, k, 0))
+# ... and its other two weight tables: qword_50B900[k] (k = 0..256) and
+# dword_50A8D0[k] = 0x100010001 * k.
+for k in range(257):
+    mu.mem_write(0x50B900 + 16 * k, struct.pack("<8H", k, k, k, 0, k, k, k, 0))
+    mu.mem_write(0x50A8D0 + 8 * k, struct.pack("<Q", 0x100010001 * k))
 process_cases = []
 for kind in range(6):
     for dfmt, sfmt in ((1, 1), (2, 2), (1, 2), (2, 1)):
@@ -238,3 +243,64 @@ for n, (tfmt, mfmt) in enumerate(mask_cases):
     after = mu.mem_read(t_data, tw * th * tb)
     emit(f"mask_{n:03}", 5, mw, mh, tw, th, (dx, dy, tfmt << 8 | mfmt), mask, before, after)
 print("masks done", len(mask_cases))
+
+# kind 6: sub_416B60 (91:18), cdecl (destination, dx, dy, source, sx, sy,
+# angle, x scale, y scale, alpha, filter, threaded=0). The x87 control
+# word is set to the Windows default (53-bit precision) first.
+# p0 = filter << 16 | destination format << 8 | source format, p1 = alpha,
+# p2 = 7 extra words: dx, dy, sx, sy, angle, x scale, y scale.
+FPU = alloc(16)
+mu.mem_write(FPU, b"\xD9\x2D" + struct.pack("<I", FPU + 8) + b"\xC3" + b"\x00" + struct.pack("<H", 0x27F))
+
+
+def emit_extra(name, kind, sw, sh, dw, dh, params, extra, src, dst_before, dst_after):
+    with open(os.path.join(OUT, name + ".bin"), "wb") as f:
+        f.write(struct.pack("<8I", kind, sw, sh, dw, dh, *[p & 0xFFFFFFFF for p in params]))
+        f.write(struct.pack("<%dI" % len(extra), *[e & 0xFFFFFFFF for e in extra]))
+        f.write(bytes(src) + bytes(dst_before) + bytes(dst_after))
+
+
+rotate_cases = []
+for sfmt in (1, 2):
+    for dfmt in (1, 2):
+        for filt in (0, 1):
+            for alpha in (0, 96, 255, 256):
+                for shape in range(3):
+                    rotate_cases.append((sfmt, dfmt, filt, alpha, shape))
+# More plain blits of format 2 over format 2 (sub_40B330's SSE pairs and
+# its scalar odd pixel).
+rotate_cases += [(2, 2, 0, 0, 0)] * 24
+for n, (sfmt, dfmt, filt, alpha, shape) in enumerate(rotate_cases):
+    heap_top = global_heap
+    sw, sh = rng.randrange(1, 16), rng.randrange(1, 16)
+    dw, dh = rng.randrange(1, 16), rng.randrange(1, 16)
+    if shape == 0:
+        # The plain-blit path: whole anchors, unit scale, 360 * k degrees.
+        dw, dh = min(dw, sw), min(dh, sh)
+        sx, sy = rng.randrange(0, sw - dw + 1) << 16, rng.randrange(0, sh - dh + 1) << 16
+        params = (0, 0, sx, sy, 23592960 * rng.randrange(-2, 3), 0x10000, 0x10000)
+    elif shape == 1:
+        params = (rng.randrange(-4 << 16, 20 << 16), rng.randrange(-4 << 16, 20 << 16),
+                  rng.randrange(-4 << 16, 20 << 16), rng.randrange(-4 << 16, 20 << 16),
+                  rng.randrange(-400 << 16, 400 << 16), rng.randrange(0x4000, 0x30000),
+                  rng.randrange(0x4000, 0x30000))
+    else:
+        params = (dw << 15, dh << 15, sw << 15, sh << 15, rng.choice((90, 180, -90, 45, 30)) << 16,
+                  rng.choice((0x10000, 0x8000, 0x20000)), rng.choice((0x10000, 0x18000)))
+    src = rand_pixels(sw * sh)
+    for i in range(0, len(src), 4 * 5):
+        src[i + 3] = 0
+    for i in range(8, len(src), 4 * 7):
+        src[i + 3] = 255
+    dst_before = rand_pixels(dw * dh)
+    for i in range(4, len(dst_before), 4 * 6):
+        dst_before[i + 3] = 0
+    src_desc, _ = bitmap(sw, sh, src, sfmt)
+    dst_desc, dst_data = bitmap(dw, dh, dst_before, dfmt)
+    call(FPU, [], {})
+    dx, dy, sx, sy, angle, xs, ys = params
+    call(0x416B60, [dst_desc, dx, dy, src_desc, sx, sy, angle, xs, ys, alpha, filt, 0], {})
+    after = mu.mem_read(dst_data, dw * dh * 4)
+    emit_extra(f"rotate_{n:03}", 6, sw, sh, dw, dh, (filt << 16 | dfmt << 8 | sfmt, alpha, 7), params,
+               src, dst_before, after)
+print("rotates done", len(rotate_cases))

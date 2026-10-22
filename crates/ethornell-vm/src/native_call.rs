@@ -17094,7 +17094,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_RECT_COMPOSITE_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_481100 validates both bitmaps, dimensions and alpha before dispatching the format-dependent rectangle compositor rooted at sub_4168E0.",
+        notes: "sub_402F30 -> sub_416B60 ported (bitmap_kernels::rotate_blit) and matched under Unicorn: the plain-blit path (whole anchors, unit scales, 360k degrees, source covering the destination -> sub_40B560), else a format-1 destination only: sub_4169D0's x87 walk (53-bit precision) and sub_418500/sub_4173B0 (nearest), sub_417ED0/sub_416E20 (4-bit bilinear), sub_4177E0/sub_4174E0 (format-2 source). The target's worker-thread band split (sub_41A120) is not reproduced.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_COMPOSITE_BITMAP_RECT_CONVERTED,
@@ -20306,6 +20306,7 @@ const PORTABLE_EQUIVALENT_OPCODES: &[NativeOpcode] = &[
     opcodes::GRAPH91_SCALE_TRUE_COLOR_BITMAP,
     opcodes::GRAPH91_PROCESS_BITMAP,
     opcodes::GRAPH91_APPLY_GRAYSCALE_MASK,
+    opcodes::GRAPH91_COMPOSITE_BITMAP_RECT_ALPHA,
 ];
 
 const PARTIAL_IMPLEMENTATION_OPCODES: &[NativeOpcode] = &[
@@ -20383,7 +20384,6 @@ const PARTIAL_IMPLEMENTATION_OPCODES: &[NativeOpcode] = &[
     opcodes::GRAPH92_CANCEL_PENDING_BITMAP_PRELOADS,
     opcodes::GRAPH92_LOAD_EXTERNAL_BMP,
     opcodes::GRAPH92_LOAD_BURIKO_MOVIE_RESOURCE,
-    opcodes::GRAPH91_COMPOSITE_BITMAP_RECT_ALPHA,
     opcodes::GRAPH91_COMPOSITE_BITMAP_RECT_CONVERTED,
     opcodes::SOUND_SET_BGM_PRIMARY_VOLUME,
     opcodes::SOUND_SET_SE_PRIMARY_VOLUME,

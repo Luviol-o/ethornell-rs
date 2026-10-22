@@ -11098,9 +11098,11 @@ mod input_tests {
             .iter()
             .copied()
             .collect::<std::collections::BTreeSet<_>>();
-        // Ink is the packed colour with no antialiased intermediate tones;
-        // the format-1 fourth byte keeps its value (0).
-        assert_eq!(colors, [[0, 0, 0, 0], [255, 0, 0, 0]].into());
+        // The cell has no antialiased tones, but sub_40B1B0 blends it in
+        // pixel pairs: two ink pixels are copied raw (alpha byte 255
+        // included), an ink pixel paired with background takes the 7-bit
+        // weight 127 (255 -> 253) and keeps the fourth byte (0).
+        assert_eq!(colors, [[0, 0, 0, 0], [253, 0, 0, 0], [255, 0, 0, 255]].into());
         {
             // Nothing is drawn below the cell height.
             assert!((12..16).all(|row| {
