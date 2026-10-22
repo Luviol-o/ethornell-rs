@@ -534,11 +534,20 @@ impl WaveTable {
     }
 }
 
+/// sub_409AE0 / sub_409C50: the amplitude is converted as unsigned,
+/// cvttsd2si gives 0x80000000 out of range, and the sample keeps its low
+/// 16 bits.
 fn append_sine_cycle(samples: &mut Vec<[i16; 2]>, cycle_len: usize, amplitude: i32, shift: usize) {
     let divisor = 2_f64.powi(shift.min(30) as i32);
     for index in 0..cycle_len {
         let phase = index as f64 * std::f64::consts::TAU / cycle_len as f64;
-        let value = (phase.sin() * amplitude as f64 / divisor) as i16;
+        let scaled = phase.sin() * f64::from(amplitude as u32) / divisor;
+        let truncated = if scaled.is_finite() && scaled > -2147483649.0 && scaled < 2147483648.0 {
+            scaled as i32
+        } else {
+            i32::MIN
+        };
+        let value = truncated as i16;
         samples.push([value, value]);
     }
 }
@@ -906,10 +915,10 @@ impl VectorMap {
     }
 
     fn generate_radial(&mut self, mode: i32, center_x: i32, center_y: i32, period: i32) {
-        let divisor = if period > 0 {
-            period.saturating_mul(4) as u32
-        } else {
-            u32::MAX
+        // sub_404CA0: 4 * period as unsigned, 0xFFFFFFFF for zero.
+        let divisor = match (period as u32).wrapping_mul(4) {
+            0 => u32::MAX,
+            divisor => divisor,
         };
         for y in 0..self.height as i32 {
             for x in 0..self.width as i32 {

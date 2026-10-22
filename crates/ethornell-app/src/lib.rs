@@ -571,6 +571,8 @@ struct RuntimeTraceApi {
     /// Target dword_565D34/dword_565D38, updated by Graph92:9C and
     /// copied through the VM-owned Graph92:9B pointer bridge.
     system92_text_output_pair: [i32; 2],
+    /// dword_565D4C as of the last styled draw (colour tags not followed).
+    system92_text_colour: i32,
     /// Target unk_50E240/dword_565CF8 fragment table. Graph92:9C produces
     /// records and Graph92:9E drains them through BP memory.
     system92_text_fragment_records: Vec<ethornell_vm::System92TextFragmentRecord>,
@@ -1051,6 +1053,7 @@ impl RuntimeTraceApi {
             text_runtime: TextRuntime::default(),
             graph_defaults: GraphRuntimeDefaults::default(),
             system92_text_output_pair: [0, 0],
+            system92_text_colour: 0,
             system92_text_fragment_records: Vec::new(),
             // dword_507650 starts at -1: link glyphs keep the surrounding colour.
             system92_text_render_override: -1,
@@ -1837,13 +1840,17 @@ impl RuntimeTraceApi {
         Some(result)
     }
 
+    /// sub_408310: a missing source is 9, a destination outside the table
+    /// 10; sub_40E510 converts only 24/32-bit sources and leaves any other
+    /// freshly allocated format-3 destination blank.
     fn convert_bitmap_to_alpha_mask(&mut self, source: i32, destination: i32) -> i32 {
-        let Some(source_format @ (1 | 2)) = self.bitmap_formats.get(&source).copied() else {
-            return 9;
-        };
         let Some(mut source_image) = self.graph_bitmap_image(source) else {
             return 9;
         };
+        if !(0..0x4000).contains(&destination) {
+            return 10;
+        }
+        let source_format = self.bitmap_formats.get(&source).copied().unwrap_or(2);
         if let Some((width, height)) = self.bitmap_dimensions.get(&source).copied() {
             source_image = fit_decoded_image_canvas(&source_image, width, height);
         }
@@ -1851,10 +1858,10 @@ impl RuntimeTraceApi {
         for pixel in source_image.rgba.as_chunks::<4>().0 {
             let weighted =
                 77 * u32::from(pixel[0]) + 151 * u32::from(pixel[1]) + 28 * u32::from(pixel[2]);
-            let luma = if source_format == 1 {
-                (weighted >> 8) as u8
-            } else {
-                ((weighted * u32::from(pixel[3])) >> 16) as u8
+            let luma = match source_format {
+                1 => (weighted >> 8) as u8,
+                2 => ((weighted * u32::from(pixel[3])) >> 16) as u8,
+                _ => 0,
             };
             rgba.extend_from_slice(&[luma, luma, luma, luma]);
         }
@@ -15662,10 +15669,11 @@ mod input_tests {
         ];
         call_graph(&mut api, 0x92, 0x97, &mut ruby_style).unwrap();
 
+        // 92:9D takes a font number; an unregistered one clears the face.
         let mut font_override = vec![
-            Value::Str("MS Gothic".into()),
+            Value::Int(77),
             Value::Int(24),
-            Value::Int(400),
+            Value::Int(100),
             Value::Int(1),
             Value::Int(0),
         ];
@@ -15684,7 +15692,7 @@ mod input_tests {
             (0, 7, -3, -1, -1, -1)
         );
         let font = &api.graph_defaults.text_font_override;
-        assert_eq!(font.face_name.as_deref(), Some("MS Gothic"));
+        assert_eq!(font.face_name.as_deref(), None);
         assert_eq!(
             (
                 font.height,
@@ -15692,8 +15700,16 @@ mod input_tests {
                 font.creation_field_1,
                 font.italic
             ),
-            (24, 400, 1, false)
+            (24, 100, 1, false)
         );
+        let mut too_wide = vec![
+            Value::Int(77),
+            Value::Int(24),
+            Value::Int(400),
+            Value::Int(1),
+            Value::Int(0),
+        ];
+        assert_eq!(call_graph(&mut api, 0x92, 0x9d, &mut too_wide).unwrap(), Value::Int(3));
     }
 
     #[test]
@@ -22540,6 +22556,8 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
     }
 
     fn query_movie_position(&self, bitmap: i32) -> std::result::Result<i32, i32> {
+        // 92:F5 -> sub_4085F0: slot 4, no movie 1.
+        self.movie_slot(bitmap)?;
         self.graph_effects.position_ms(bitmap)
     }
 
@@ -23365,6 +23383,10 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
         self.system92_text_output_pair
     }
 
+    fn system92_text_colour(&self) -> i32 {
+        self.system92_text_colour
+    }
+
     fn take_system92_text_fragment_records(
         &mut self,
     ) -> Vec<ethornell_vm::System92TextFragmentRecord> {
@@ -23519,22 +23541,14 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                     text_override_0,
                     text_override_1,
                 ];
-                // A direct VM string is already resolved. Zero clears the
-                // target face buffer. A nonzero numeric registry selector is
-                // retained as unresolved rather than fabricated as a hex font
-                // name; this is one reason the handler remains Partial.
-                match &font_name_value {
-                    ethornell_vm::Value::Str(name) => {
-                        self.graph_defaults.text_style.font_name =
-                            (!name.is_empty()).then(|| name.clone());
-                    }
-                    ethornell_vm::Value::Int(0)
-                    | ethornell_vm::Value::Ptr(0)
-                    | ethornell_vm::Value::None => {
-                        self.graph_defaults.text_style.font_name = None;
-                    }
-                    _ => {}
-                }
+                // sub_4870E0 -> sub_463820: the first argument is a font
+                // number; sub_469110 gives no face for an unregistered one
+                // and sub_4347E0 then clears the face buffer.
+                self.graph_defaults.text_style.font_name = self
+                    .native_user
+                    .font_face(value_to_i32(&font_name_value))
+                    .filter(|name| !name.is_empty())
+                    .map(str::to_string);
                 self.graph_defaults.text_style.set_fields(values);
                 tracing::info!(
                     ?font_name_value,
@@ -23640,6 +23654,8 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                 let values = args.iter().map(value_to_i32).collect::<Vec<_>>();
                 let mut applied = false;
                 if let [alpha, mode, source, y, x, destination] = values.as_slice() {
+                    // sub_486DA0: validators, then sub_4411D0 -> sub_42B950.
+                    self.graph92_check_window_draw(*destination, *source, *x, *y, *mode, *alpha)?;
                     applied = self
                         .composite_graph_bitmap(*destination, *source, *x, *y, *mode, *alpha)
                         .is_some();
@@ -23656,9 +23672,10 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                 let width = args.get(1).map(value_to_i32).unwrap_or_default();
                 let resource = args.get(4).and_then(value_to_string).unwrap_or_default();
                 let archive = args.get(5).and_then(value_to_string).unwrap_or_default();
+                // sub_487680.
                 if width <= 0 || height <= 0 {
                     return Err(ethornell_vm::VmError::Runtime(format!(
-                        "Graph92:F0 invalid movie size {width}x{height}"
+                        "無効な動画ウィンドウサイズ [ {width}, {height} ] が指定されました"
                     )));
                 }
                 let opened = self.open_runtime_movie(&archive, &resource, (width, height));
@@ -25416,8 +25433,10 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                 );
             }
             (0x92, 0x88) => {
+                // sub_486BD0 -> sub_440EC0 -> sub_42B7A0: window+0x178.
                 let value = pop_int_value(stack).unwrap_or_default();
                 let object = pop_int_value(stack).unwrap_or_default();
+                self.graph92_require_window(object)?;
                 self.graph_object_properties
                     .entry(object)
                     .or_default()
@@ -25462,6 +25481,10 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                 let args = pop_args(stack, 11);
                 let text = args.get(9).and_then(value_to_string);
                 let target = args.get(10).map(value_to_i32).unwrap_or_default();
+                // sub_487000 -> sub_463600 -> sub_4412D0.
+                if Self::is_window_surface_handle(target) {
+                    self.graph91_window_with_font(target)?;
+                }
                 // Source order (object, text, colour, _, _, _, five style
                 // fields): the system scripts pass their text colour setting
                 // and its edge style here.
@@ -25525,6 +25548,8 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                 let y = pop_int_value(stack).unwrap_or_default();
                 let x = pop_int_value(stack).unwrap_or_default();
                 let work_surface = pop_int_value(stack).unwrap_or_default();
+                // sub_486C10: validators, then sub_440F40 -> sub_42B7F0.
+                self.graph92_check_window_draw(work_surface, resource, x, y, mode, parameter)?;
                 let composited = self
                     .composite_graph_bitmap(work_surface, resource, x, y, mode, parameter)
                     .is_some();
@@ -25550,6 +25575,12 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                 let args = pop_args(stack, 15);
                 let text = args.get(13).and_then(value_to_string);
                 let target = args.get(14).map(value_to_i32).unwrap_or_default();
+                // sub_486EE0 -> sub_491D20: window, then its font. Handles
+                // without the window tag are the older engines' bitmap
+                // targets (see graph92_window_target).
+                if Self::is_window_surface_handle(target) {
+                    self.graph91_window_with_font(target)?;
+                }
                 // Source order (object, text, colour, _, _, _, five style
                 // fields, ...), the same head as Graph92:91.
                 if args.len() == 15 {
@@ -25602,7 +25633,9 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                 }
             }
             (0x92, 0x8e) => {
+                // sub_486EB0 -> sub_441340: cursor reset, buffer clear.
                 let target = pop_int_value(stack).unwrap_or_default();
+                self.graph92_require_window(target)?;
                 self.reset_window_text_cursor(target);
                 self.clear_bitmap_text(target);
                 self.surface_text_buffers.insert(target, String::new());
@@ -25616,6 +25649,8 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                 // update flag in field 380 of the resolved graph object.
                 let enabled = pop_int_value(stack).unwrap_or_default();
                 let object = pop_int_value(stack).unwrap_or_default();
+                // sub_486D60 -> sub_441180 -> sub_42B930: window+0x198.
+                self.graph92_require_window(object)?;
                 self.graph_object_properties
                     .entry(object)
                     .or_default()
@@ -25648,25 +25683,21 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                 let font = int(12);
                 let size = int(11);
                 let horizontal_scale = int(10);
-                let fail = |what: String| {
-                    Err(ethornell_vm::VmError::Runtime(format!("Graph92:9C {what}")))
-                };
-                // sub_497B60, sub_497AF0, then sub_403B10 (bitmap) and the
-                // font checks of sub_42EAB0 reached through sub_4035A0.
-                if target as u32 >= 0x4000 {
-                    return fail(format!("bitmap handle {target} is out of range"));
-                }
+                let fail = |text: String| Err(ethornell_vm::VmError::Runtime(text));
+                // sub_4872D0: sub_4986D0, sub_498660, then sub_403B10 (bitmap)
+                // and sub_42EE90's ranges reached through sub_4035A0.
+                target_checks::bitmap(target)?;
                 if self.native_user.font_face(font).is_none() {
-                    return fail(format!("font {font} is not registered"));
+                    return fail(format!("無効なフォント番号 [ {font} ] が指定されました"));
                 }
                 if self.query_bitmap_info(target).is_none() {
-                    return fail(format!("bitmap {target} does not exist"));
+                    return fail(format!("指定されたビットマップ [ {target} ] は存在しません"));
                 }
                 if !(4..=200).contains(&size) {
-                    return fail(format!("font size {size} is out of range"));
+                    return fail(format!("指定されたフォントサイズ [ {size} ] は無効です"));
                 }
                 if !(25..=200).contains(&horizontal_scale) {
-                    return fail(format!("font scale {horizontal_scale}% is out of range"));
+                    return fail(format!("指定されたフォント幅 [ {horizontal_scale} ] は無効です"));
                 }
                 // sub_434E30 keeps a valid style (mode <= 2, offsets <= 100%,
                 // concentration <= 256); an invalid one leaves the local
@@ -26061,7 +26092,15 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                 let args = pop_args(stack, 2);
                 let position_ms = args.first().map(value_to_i32).unwrap_or_default();
                 let handle = args.get(1).map(value_to_i32).unwrap_or_default();
-                let status = self.graph_effects.seek(handle, position_ms);
+                // sub_487910 -> sub_408590: slot 4, no movie 1, seek
+                // failure 5.
+                let status = match self.movie_slot(handle) {
+                    Err(status) => status,
+                    Ok(()) => match self.graph_effects.seek(handle, position_ms) {
+                        0 => 0,
+                        _ => 5,
+                    },
+                };
                 tracing::debug!(
                     args = ?summarize_values(&args),
                     handle,
@@ -26082,7 +26121,12 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                 let args = pop_args(stack, 2);
                 let volume = args.first().map(value_to_i32).unwrap_or_default();
                 let handle = args.get(1).map(value_to_i32).unwrap_or_default();
-                let status = self.graph_effects.set_volume(handle, volume);
+                // sub_487A10 -> sub_408640: slot 4, no movie 1, refused
+                // volume 3.
+                let status = match self.movie_slot(handle) {
+                    Err(status) => status,
+                    Ok(()) => self.graph_effects.set_volume(handle, volume),
+                };
                 tracing::debug!(
                     args = ?summarize_values(&args),
                     handle,

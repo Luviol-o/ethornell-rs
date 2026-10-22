@@ -1073,6 +1073,7 @@ impl RuntimeTraceApi {
     /// Records the colour and style a 92:90/92:91 call gives the text it
     /// draws in `target`.
     pub(crate) fn set_message_text_style(&mut self, target: i32, packed_rgb: i32, style: [i32; 5]) {
+        self.system92_text_colour = packed_rgb;
         let font_size = self.window_text_state(Some(target)).font_size.round() as i32;
         self.surface_text_states
             .entry(target)

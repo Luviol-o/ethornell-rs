@@ -13,24 +13,26 @@ impl RuntimeTraceApi {
         let stack = call.args_mut();
         let value = match id {
             0x00 => {
-                // sub_4854A0 -> sub_461ED0 -> sub_409AF0. pop_args keeps
+                // sub_485FA0 -> sub_462430 -> sub_409AE0. pop_args keeps
                 // native reverse-pop order, which configure_compact_wave_table
                 // consumes directly.
                 let args = pop_args(stack, 5);
                 if !self.effects.configure_compact_wave_table(&args) {
-                    return Some(Err(ethornell_vm::VmError::Runtime(
-                        "Graph92:00 invalid wave-table slot".to_string(),
-                    )));
+                    return Some(Err(ethornell_vm::VmError::Runtime(format!(
+                        "無効な波紋番号 [ {} ] が指定されました",
+                        args.last().map(value_to_i32).unwrap_or_default()
+                    ))));
                 }
                 ethornell_vm::Value::None
             }
             0x01 => {
-                // sub_485550 -> sub_461EF0 -> sub_409C60.
+                // sub_486050 -> sub_462450 -> sub_409C50.
                 let args = pop_args(stack, 7);
                 if !self.effects.configure_wave_table(&args) {
-                    return Some(Err(ethornell_vm::VmError::Runtime(
-                        "Graph92:01 invalid wave-table slot".to_string(),
-                    )));
+                    return Some(Err(ethornell_vm::VmError::Runtime(format!(
+                        "無効な波紋番号 [ {} ] が指定されました",
+                        args.last().map(value_to_i32).unwrap_or_default()
+                    ))));
                 }
                 ethornell_vm::Value::None
             }
@@ -41,25 +43,16 @@ impl RuntimeTraceApi {
                 let center_x = pop_int_value(stack).unwrap_or_default();
                 let mode = pop_int_value(stack).unwrap_or_default();
                 let bitmap = pop_int_value(stack).unwrap_or_default();
-                let Some(info) = self.query_bitmap_info(bitmap) else {
+                // sub_486120 -> sub_404E20 -> sub_404CA0.
+                if let Err(error) = self.system92_vector_map_target(bitmap) {
+                    return Some(Err(error));
+                }
+                if mode as u32 >= 2 {
                     return Some(Err(ethornell_vm::VmError::Runtime(format!(
-                        "Graph92:10 invalid bitmap #{bitmap}"
-                    ))));
-                };
-                if info.format != 6 || info.width == 0 || info.height == 0 {
-                    return Some(Err(ethornell_vm::VmError::Runtime(format!(
-                        "Graph92:10 bitmap #{bitmap} is not a non-empty format-6 vector map"
+                        "無効な波紋タイプ [ {mode} ] が指定されました"
                     ))));
                 }
-                if !(0..=1).contains(&mode)
-                    || !self
-                        .effects
-                        .generate_ripple_map(bitmap, mode, center_x, center_y, period)
-                {
-                    return Some(Err(ethornell_vm::VmError::Runtime(format!(
-                        "Graph92:10 invalid radial vector mode {mode}"
-                    ))));
-                }
+                self.effects.generate_ripple_map(bitmap, mode, center_x, center_y, period);
                 ethornell_vm::Value::None
             }
             0x11 => {
@@ -67,22 +60,16 @@ impl RuntimeTraceApi {
                 // fixed axis vector/phase fields to a format-6 map.
                 let mode = pop_int_value(stack).unwrap_or_default();
                 let bitmap = pop_int_value(stack).unwrap_or_default();
-                let Some(info) = self.query_bitmap_info(bitmap) else {
+                // sub_486220 -> sub_404FA0 -> sub_404E70.
+                if let Err(error) = self.system92_vector_map_target(bitmap) {
+                    return Some(Err(error));
+                }
+                if mode as u32 >= 4 {
                     return Some(Err(ethornell_vm::VmError::Runtime(format!(
-                        "Graph92:11 invalid bitmap #{bitmap}"
-                    ))));
-                };
-                if info.format != 6 || info.width == 0 || info.height == 0 {
-                    return Some(Err(ethornell_vm::VmError::Runtime(format!(
-                        "Graph92:11 bitmap #{bitmap} is not a non-empty format-6 vector map"
+                        "無効な振動タイプ [ {mode} ] が指定されました"
                     ))));
                 }
-                if !(0..=3).contains(&mode) || !self.effects.generate_axis_vector_map(bitmap, mode)
-                {
-                    return Some(Err(ethornell_vm::VmError::Runtime(format!(
-                        "Graph92:11 invalid axis vector mode {mode}"
-                    ))));
-                }
+                self.effects.generate_axis_vector_map(bitmap, mode);
                 ethornell_vm::Value::None
             }
             // BP-owned pointer bridge in the VM.
@@ -132,9 +119,15 @@ impl RuntimeTraceApi {
                 let destination_descriptor = pop_int_value(stack).unwrap_or_default();
                 let status =
                     self.convert_bitmap_to_alpha_mask(source_descriptor, destination_descriptor);
-                if status == 9 || status == 10 {
+                // sub_4864A0.
+                if status == 9 {
                     return Some(Err(ethornell_vm::VmError::Runtime(format!(
-                        "Graph92:18 alpha conversion failed with target status {status}"
+                        "生成元に指定されたビットマップ [ {source_descriptor} ] は無効です"
+                    ))));
+                }
+                if status == 10 {
+                    return Some(Err(ethornell_vm::VmError::Runtime(format!(
+                        "格納先に指定されたビットマップ [ {destination_descriptor} ] は無効です"
                     ))));
                 }
                 ethornell_vm::Value::None
@@ -152,11 +145,14 @@ impl RuntimeTraceApi {
                 let mut source=pop_args(stack,if id==0x1c {10}else{11});source.reverse();
                 let int=|i:usize|source.get(i).map(value_to_i32).unwrap_or_default();
                 let (bitmap,x,y,font,size,width_percent)=(int(0),int(1),int(2),int(4),int(5),int(6));
-                let fail=|reason:&str|Some(Err(ethornell_vm::VmError::Runtime(format!("92:{id:02X}: {reason}"))));
-                if bitmap as u32>=0x4000 {return fail("bitmap handle is out of range");}
-                if self.native_user.font_face(font).is_none() {return fail("font is not registered");}
-                if !(4..=200).contains(&size)||!(25..=200).contains(&width_percent) {return fail("invalid font height or width percentage");}
-                let Some(mut image)=self.graph_bitmap_image(bitmap) else{return fail("destination bitmap is absent");};
+                // sub_4866A0 / sub_486850: sub_4986D0, sub_498660, then
+                // sub_403600 / sub_403680: bitmap, size, width.
+                let fail=|text:String|Some(Err(ethornell_vm::VmError::Runtime(text)));
+                if let Err(error)=target_checks::bitmap(bitmap) {return Some(Err(error));}
+                if self.native_user.font_face(font).is_none() {return fail(format!("無効なフォント番号 [ {font} ] が指定されました"));}
+                let Some(mut image)=self.graph_bitmap_image(bitmap) else{return fail(format!("指定されたビットマップ [ {bitmap} ] は存在しません"));};
+                if !(4..=200).contains(&size) {return fail(format!("指定されたフォントサイズ [ {size} ] は無効です"));}
+                if !(25..=200).contains(&width_percent) {return fail(format!("指定されたフォント幅 [ {width_percent} ] は無効です"));}
                 let text=source.get(3).and_then(value_to_string).unwrap_or_default();
                 let bytes=encoding_rs::SHIFT_JIS.encode(&text).0.into_owned();
                 let (glyphs,result)=snapshot::layout_styled_bitmap_text(&bytes,[x,y],size as u32,width_percent,int(7)!=0,int(8)!=0,int(9) as u32,id==0x1d,if id==0x1d {int(10)}else{0},[image.width,image.height]);
@@ -175,25 +171,23 @@ impl RuntimeTraceApi {
                 let text = source.get(3).and_then(value_to_string).unwrap_or_default();
                 let (font, size, bold, spacing, packed_rgb) =
                     (int(4), int(5), int(6), int(7), int(8));
-                let fail = |what: String| {
-                    Some(Err(ethornell_vm::VmError::Runtime(format!("Graph92:1E {what}"))))
-                };
-                // sub_497B60, sub_497AF0, then sub_4039E0's own checks.
-                if bitmap as u32 >= 0x4000 {
-                    return fail(format!("bitmap handle {bitmap} is out of range"));
+                let fail = |text: String| Some(Err(ethornell_vm::VmError::Runtime(text)));
+                // sub_486A10: sub_4986D0, sub_498660, then sub_4039E0.
+                if let Err(error) = target_checks::bitmap(bitmap) {
+                    return Some(Err(error));
                 }
                 if self.native_user.font_face(font).is_none() {
-                    return fail(format!("font {font} is not registered"));
+                    return fail(format!("無効なフォント番号 [ {font} ] が指定されました"));
                 }
                 let Some(mut image) = self
                     .query_bitmap_info(bitmap)
                     .and_then(|_| self.graph_bitmap_image(bitmap))
                 else {
-                    return fail(format!("bitmap {bitmap} does not exist"));
+                    return fail(format!("指定されたビットマップ [ {bitmap} ] は存在しません"));
                 };
-                // sub_42F4F0 accepts heights 8..=200.
+                // sub_42F8D0 accepts heights 8..=200.
                 if (size - 8) as u32 > 0xC0 {
-                    return fail(format!("font size {size} is out of range"));
+                    return fail(format!("指定されたフォントサイズ [ {size} ] は無効です"));
                 }
                 let bytes = encoding_rs::SHIFT_JIS.encode(&text).0.into_owned();
                 let (glyphs, advance) = snapshot::layout_direct_bitmap_text(
@@ -234,6 +228,74 @@ impl RuntimeTraceApi {
         Some(Ok(value))
     }
 
+    /// A missing bitmap (0x80000001), then anything but a non-empty format-6
+    /// vector & distance map (0x80000003).
+    fn system92_vector_map_target(&mut self, bitmap: i32) -> ethornell_vm::VmResult<()> {
+        let Some(info) = self.query_bitmap_info(bitmap) else {
+            return Err(ethornell_vm::VmError::Runtime(format!(
+                "指定された出力先ビットマップ [ {bitmap} ] は存在しません"
+            )));
+        };
+        if info.format != 6 || info.width == 0 || info.height == 0 {
+            return Err(ethornell_vm::VmError::Runtime(format!(
+                "指定された出力先ビットマップ [ {bitmap} ] はベクトル＆ディスタンスマップではない、\n\n若しくは無効なピクセル数のベクトル＆ディスタンスマップです"
+            )));
+        }
+        Ok(())
+    }
+
+    /// sub_440A80 for the 92:88..8E window calls.
+    pub(super) fn graph92_require_window(&self, window: i32) -> ethornell_vm::VmResult<()> {
+        if Self::is_window_surface_handle(window) && self.graph_surfaces.contains_key(&window) {
+            Ok(())
+        } else {
+            Err(ethornell_vm::VmError::Runtime("無効なウィンドウハンドルが指定されました".into()))
+        }
+    }
+
+    /// 92:89/8D: bitmap, blend mode and level validators, the window, a
+    /// missing bitmap, then sub_40A520's format test against the 32-bit
+    /// window buffer, made only when the bitmap overlaps it.
+    pub(super) fn graph92_check_window_draw(
+        &mut self,
+        window: i32,
+        bitmap: i32,
+        x: i32,
+        y: i32,
+        mode: i32,
+        level: i32,
+    ) -> ethornell_vm::VmResult<()> {
+        target_checks::bitmap(bitmap)?;
+        target_checks::effect_mode(mode)?;
+        target_checks::effect_level(level)?;
+        // 1.622 resolves only CDspObjWindow handles here. Wonderful
+        // Everyday's scrmsg._bp draws into plain bitmaps with the same
+        // selector (an older build); those handles keep the bitmap path.
+        if !Self::is_window_surface_handle(window) && self.graph_resources.contains_key(&window) {
+            return Ok(());
+        }
+        self.graph92_require_window(window)?;
+        let Some(info) = self.query_bitmap_info(bitmap) else {
+            return Err(ethornell_vm::VmError::Runtime(format!(
+                "指定されたビットマップ [ {bitmap} ] は存在しません"
+            )));
+        };
+        let (width, height) = self
+            .graph_surfaces
+            .get(&window)
+            .map_or((0, 0), |surface| (surface.width as i32, surface.height as i32));
+        let overlaps = x < width
+            && y < height
+            && x.saturating_add(info.width as i32) > 0
+            && y.saturating_add(info.height as i32) > 0;
+        if overlaps && !matches!(info.format, 1 | 2) {
+            return Err(ethornell_vm::VmError::Runtime(format!(
+                "指定されたビットマップ [ {bitmap} ] とスクリーンのピクセルモードが一致しません"
+            )));
+        }
+        Ok(())
+    }
+
     fn invert_system92_alpha_bitmap(&mut self, bitmap: i32) -> bool {
         if self.bitmap_formats.get(&bitmap).copied() != Some(3) {
             return false;
@@ -241,8 +303,9 @@ impl RuntimeTraceApi {
         let Some(mut image) = self.graph_bitmap_image(bitmap) else {
             return false;
         };
+        // sub_40E690 inverts the coverage byte (red in app rasters).
         for pixel in image.rgba.as_chunks_mut::<4>().0 {
-            let value = 255_u8.wrapping_sub(pixel[3]);
+            let value = 255_u8.wrapping_sub(pixel[0]);
             pixel.copy_from_slice(&[value, value, value, value]);
         }
         let key = format!("runtime:bitmap:{bitmap}:alpha-invert");

@@ -1151,6 +1151,12 @@ pub trait GraphApi {
         [0, 0]
     }
 
+    /// dword_565D4C: the text colour the last layout ended with (92:9B
+    /// selector 257).
+    fn system92_text_colour(&self) -> i32 {
+        0
+    }
+
     /// Drains the process-global fragment table copied by target helper
     /// sub_437EB0. The producer (Graph92:9C) owns record segmentation.
     fn take_system92_text_fragment_records(&mut self) -> Vec<System92TextFragmentRecord> {
@@ -4708,11 +4714,11 @@ impl Vm {
                     // funcs_486FEE[0x17] -> sub_485950 -> sub_4025E0.
                     // The destination DWORD is cleared before copying the
                     // native pixel's one-to-four bytes into it.
+                    // Only a pixel that passed the checks clears the DWORD.
                     let y = self.pop_int()?;
                     let x = self.pop_int()?;
                     let bitmap = self.pop_int()?;
                     let destination = self.pop_ptr()?;
-                    self.write_int(destination, 2, 0)?;
                     let status = if let Some(info) = api.query_bitmap_info(bitmap) {
                         if info.format == 6 {
                             2
@@ -4723,9 +4729,16 @@ impl Vm {
                         {
                             3
                         } else if let Some([r, g, b, a]) = api.read_bitmap_pixel(bitmap, x, y) {
+                            // App rasters keep format 3 coverage in red and
+                            // format 0 as 5-bit channels.
                             let value = match info.format {
+                                0 => {
+                                    (u32::from(r >> 3) << 10)
+                                        | (u32::from(g >> 3) << 5)
+                                        | u32::from(b >> 3)
+                                }
                                 1 => u32::from_le_bytes([b, g, r, 0]),
-                                3 => u32::from(a),
+                                3 => u32::from(r),
                                 _ => u32::from_le_bytes([b, g, r, a]),
                             };
                             self.write_int(destination, 2, value)?;
@@ -5124,20 +5137,27 @@ impl Vm {
                     }
                     Value::None
                 } else if (code, id) == (0x92, 0x9b) {
-                    // sub_486760 pops selector first and a BP destination
-                    // pointer second. sub_434410 accepts only selector 256
-                    // and writes dword_565D34/dword_565D38.
+                    // sub_487260 -> sub_4347B0: selector 256 writes
+                    // dword_565D44/48, 257 dword_565D4C; anything else is a
+                    // script error.
                     let selector = self.pop_int()?;
                     let destination = self.pop_ptr()?;
-                    if selector != 256 {
-                        return Err(VmError::Runtime(format!(
-                            "Graph92:9B invalid output selector {selector}"
-                        )));
+                    match selector {
+                        256 => {
+                            let [first, second] = api.system92_text_output_pair();
+                            let _ = self.resolve_write_range(destination, 8)?;
+                            self.write_int(destination, 2, first as u32)?;
+                            self.write_int(destination.wrapping_add(4), 2, second as u32)?;
+                        }
+                        257 => {
+                            self.write_int(destination, 2, api.system92_text_colour() as u32)?;
+                        }
+                        _ => {
+                            return Err(VmError::Runtime(format!(
+                                "無効なパラメータ番号 [ {selector} ] が指定されました"
+                            )));
+                        }
                     }
-                    let [first, second] = api.system92_text_output_pair();
-                    let _ = self.resolve_write_range(destination, 8)?;
-                    self.write_int(destination, 2, first as u32)?;
-                    self.write_int(destination.wrapping_add(4), 2, second as u32)?;
                     Value::None
                 } else if (code, id) == (0x92, 0x9e) {
                     // sub_437EB0 copies count * 128 bytes and clears the

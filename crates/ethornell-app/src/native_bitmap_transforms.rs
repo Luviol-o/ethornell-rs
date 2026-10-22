@@ -18,19 +18,29 @@ impl RuntimeTraceApi {
         };
         let format = |api: &Self, id| api.bitmap_formats.get(&id).copied().unwrap_or(2);
         if group == 0x92 {
-            let primary = image(self, a[3])?;
+            // sub_486560 -> sub_403C20: first source (0x8000000A), second
+            // source unless -1 (0x8000000B), the screen-sized format-3
+            // destination (0x80000009), then sub_418BE0's format match
+            // (0x8000000C).
+            let target = |text: String| ethornell_vm::VmError::Runtime(text);
+            let source_error =
+                |bitmap: i32| target(format!("参照元に指定されたビットマップ [ {bitmap} ] は無効です"));
+            let primary = self.graph_bitmap_image(a[3]).ok_or_else(|| source_error(a[3]))?;
             let pf = format(self, a[3]);
             let other = if a[4] == -1 {
                 None
             } else {
-                Some(image(self, a[4])?)
+                Some(self.graph_bitmap_image(a[4]).ok_or_else(|| source_error(a[4]))?)
             };
-            if other.is_some() && format(self, a[4]) != pf {
-                return Err(fail("alpha sources have different formats"));
-            }
             let (width, height) = snapshot::runtime_frame_size(self);
             if a[0] as u32 >= 0x4000 {
-                return Err(fail("temporary alpha bitmap is out of range"));
+                return Err(target(format!("生成先に指定されたビットマップ [ {} ] は無効です", a[0])));
+            }
+            if other.is_some() && format(self, a[4]) != pf {
+                return Err(target(format!(
+                    "参照元に指定されたビットマップ [ {} ] 及び [ {} ] のピクセルモードが一致しません",
+                    a[3], a[4]
+                )));
             }
             let mut out = DecodedImage {
                 width,

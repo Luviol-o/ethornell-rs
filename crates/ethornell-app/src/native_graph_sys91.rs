@@ -789,13 +789,13 @@ impl RuntimeTraceApi {
     }
 
     /// sub_440A80: a live CDspObjWindow handle.
-    fn graph91_is_window(&self, window: i32) -> bool {
+    pub(super) fn graph91_is_window(&self, window: i32) -> bool {
         Self::is_window_surface_handle(window) && self.graph_surfaces.contains_key(&window)
     }
 
     /// sub_491D20 / sub_42BB00: the window must exist and have a font from
     /// 91:88.
-    fn graph91_window_with_font(&self, window: i32) -> ethornell_vm::VmResult<()> {
+    pub(super) fn graph91_window_with_font(&self, window: i32) -> ethornell_vm::VmResult<()> {
         if !self.graph91_is_window(window) {
             return Err(ethornell_vm::VmError::Runtime(WINDOW_HANDLE.into()));
         }

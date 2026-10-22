@@ -16822,7 +16822,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH92_CONFIGURE_COMPACT_WAVE_TABLE_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "0x004854A0 -> sub_409AF0 fills one of eight wave slots with one sine cycle followed by zero rows in each block.",
+        notes: "sub_485FA0 -> sub_409AE0: slot < 8 (fatal text), quarter period, unsigned amplitude, zero rows after each cycle; cvttsd2si then low 16 bits.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH92_CONFIGURE_WAVE_TABLE,
@@ -16830,7 +16830,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH92_CONFIGURE_WAVE_TABLE_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "0x00485550 -> sub_409C60 builds attenuated lead/full/trail sine cycles in the last row of each block.",
+        notes: "sub_486050 -> sub_409C50: slot < 8, zero rows first, lead levels 1<<n, main cycle, trail levels 2^n.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH92_GENERATE_RADIAL_VECTOR_MAP,
@@ -16838,7 +16838,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH92_RADIAL_VECTOR_MAP_PARAMETERS,
         returns: "void; target raises status 1/3/9 for invalid descriptor, format, or mode",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "0x00485620 writes normalized signed radial vectors and a distance-derived phase to a format-6 map.",
+        notes: "sub_486120 -> sub_404CA0: missing, not a format-6 map, mode < 2 with target texts; 32767*d/dist vectors, phase (4*dist) mod 4*period as unsigned (0 -> 0xFFFFFFFF).",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH92_GENERATE_AXIS_VECTOR_MAP,
@@ -16846,7 +16846,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH92_AXIS_VECTOR_MAP_PARAMETERS,
         returns: "void; target raises status 1/3/10 for invalid descriptor, format, or mode",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "0x00485720 writes one of four fixed vector/phase-axis fields to a format-6 map.",
+        notes: "sub_486220 -> sub_404E70: same checks, mode < 4.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH92_SET_BITMAP_AUXILIARY_PAIR,
@@ -16854,7 +16854,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH92_BITMAP_AUXILIARY_PAIR_PARAMETERS,
         returns: "i32 boolean",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "0x004857F0 -> sub_402440 stores bitmap-registry DWORDs +0x28/+0x2C. They are an auxiliary reference point, not dimensions; sub_401EF0 initializes the same pair from CBG +0x1C/+0x1E when CBG +0x1A == 1.",
+        notes: "sub_4862F0 -> sub_402440: descriptor +0x28/+0x2C = p1/p2; returns found.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH92_REPLACE_BITMAP_COLOR,
@@ -16862,7 +16862,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH92_REPLACE_BITMAP_COLOR_PARAMETERS,
         returns: "status 0/1/2",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "0x00485830 -> sub_4024A0 performs exact native color replacement on format-1/2 four-byte pixels with special zero-alpha matching.",
+        notes: "sub_486330 -> sub_4024A0: missing 1, not 4 bytes 2; format 1/2 colour replacement rules.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH92_PRELOAD_BITMAP_RESOURCE,
@@ -16886,7 +16886,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH92_GET_BITMAP_AUXILIARY_PAIR_PARAMETERS,
         returns: "i32 boolean",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "0x00485910 -> sub_402470 writes the bitmap-registry auxiliary reference point at +0x28/+0x2C to caller BP memory; a freshly allocated slot contains -1/-1.",
+        notes: "sub_486410 -> sub_402470: writes +0x28/+0x2C.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH92_READ_BITMAP_PIXEL_VALUE,
@@ -16894,7 +16894,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH92_READ_BITMAP_PIXEL_VALUE_PARAMETERS,
         returns: "status 0/1/2/3",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "0x00485950 clears the destination DWORD then copies the native pixel's exact one-to-four bytes; format-6 is rejected.",
+        notes: "sub_486450 -> sub_4025E0: missing 1, >4 bytes 2, coordinates 3; output cleared only on success.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH_CONVERT_BITMAP_TO_ALPHA_DESCRIPTOR,
@@ -16902,7 +16902,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH_CONVERT_BITMAP_TO_ALPHA_DESCRIPTOR_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "0x004859A0 -> sub_408320 creates or updates the first descriptor from the second. Format-1 uses RGB luma; format-2 uses luma multiplied by source alpha.",
+        notes: "sub_4864A0 -> sub_408310: missing source 9, destination outside 10; other formats leave a blank format-3 destination.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH92_INVERT_ALPHA_BITMAP,
@@ -16910,7 +16910,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH92_INVERT_ALPHA_BITMAP_PARAMETERS,
         returns: "i32 boolean",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "0x00485A30 accepts only format-3 and inverts every byte in place.",
+        notes: "sub_486530 -> sub_408390: format-3 coverage inverted.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH92_COMPOSE_BITMAP_ALPHA_AT_OFFSET,
@@ -16918,7 +16918,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH92_COMPOSE_ALPHA_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "486560 ->403C20 ->418BE0: allocate screen-sized format3 plane, extract or mix source alpha in translated overlap; zero outside.",
+        notes: "sub_486560 -> sub_403C20: source, second source, screen-sized destination, pixel-mode match with target texts.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH92_DRAW_BITMAP_TEXT_MEASURE,
@@ -16926,7 +16926,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH92_BITMAP_TEXT_MEASURE_PARAMETERS,
         returns: "largest line advance",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "4866A0 ->403600 ->4097F0: styled plain SJIS bitmap text, fixed/proportional metrics, RGB/bold/width percentage; returns maximum successful line advance. Host glyph outlines use the CPU font session.",
+        notes: "sub_4866A0 -> sub_403600: bitmap validator, font number, bitmap exists, size, width; glyphs are a renderer item.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH92_DRAW_WRAPPED_BITMAP_TEXT,
@@ -16934,7 +16934,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH92_BITMAP_TEXT_WRAP_PARAMETERS,
         returns: "wrapped line count",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "486850 ->403680 ->4097F0: styled bitmap text wrapping with recovered hanging punctuation and extra line-pitch percentage; returns last successfully drawn line number.",
+        notes: "sub_486850 -> sub_403680: same checks as 1C.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH92_DRAW_BITMAP_TEXT,
@@ -16942,7 +16942,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH92_DRAW_BITMAP_TEXT_PARAMETERS,
         returns: "text advance",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_485F10 pops packed_rgb, spacing, bold, size, font, text, y, x, bitmap. Bitmap handle >= 0x4000, an unregistered font id (sub_468BB0), a missing bitmap and a size outside 8..=200 are fatal. sub_403840 draws 1-bit GDI glyph cells (CreateFont height=size, width=size/2, weight 700 when bold) with fixed advances (size for double-byte codes, size/2 for single bytes) plus spacing; 0x03 n sets the line pitch to n% of size, 0x04 wraps at the bitmap width, 0x0A starts a new line; each cell is a format-2 bitmap (color|0xFF000000 or 0) blitted with mode 0, and drawing stops at the first cell outside the bitmap. Returns the accumulated advance.",
+        notes: "sub_486A10 -> sub_4039E0: bitmap validator, font, bitmap, height 8..=200.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH92_LOAD_EXTERNAL_BMP,
@@ -17830,7 +17830,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH92_TEXT_OBJECT_VALUE_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_4860D0 -> sub_462CB0 -> sub_440B00 resolves the text object, stores the scalar at native offset +348 through sub_42B3B0, invalidates it, and invokes its update virtuals.",
+        notes: "sub_486BD0 -> sub_42B7A0: window fatal; window+0x178.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH92_COMPOSITE_RESOURCE_INTO_TEXT_OBJECT,
@@ -17838,7 +17838,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH92_TEXT_OBJECT_COMPOSITE_PARAMETERS,
         returns: "void or script error",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_486110 maps target object/resource/rectangle composition statuses. The portable renderer preserves the object/resource boundary but not the proprietary native rectangle kernel.",
+        notes: "sub_486C10 -> sub_42B7F0: validators, window, bitmap, pixel mode vs screen; non-window bitmap handles (older engines) keep the bitmap path.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH92_SET_TEXT_OBJECT_AUXILIARY_VALUE,
@@ -17846,7 +17846,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH92_TEXT_OBJECT_VALUE_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_486220 -> sub_440B50 -> sub_42B3C0 writes the recovered object substructure at +356 when the text object is initialized.",
+        notes: "sub_486D20 -> sub_42B7B0: window fatal; buffer fill.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH92_SET_TEXT_OBJECT_UPDATE_FLAG,
@@ -17854,7 +17854,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH92_TEXT_OBJECT_VALUE_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_486260 -> sub_440DC0 stores the scalar at native offset +380, invalidates the object, and invokes update virtuals.",
+        notes: "sub_486D60 -> sub_42B930: window fatal; window+0x198.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH92_APPLY_EFFECT_RESOURCE,
@@ -17862,7 +17862,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH92_TEXT_OBJECT_COMPOSITE_PARAMETERS,
         returns: "void or script error",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_4862A0 -> sub_440E10 -> sub_42B560/sub_42B5B0 validates a resource rectangle and applies it to the text object with target status mapping.",
+        notes: "sub_486DA0 -> sub_42B950: as 92:89.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH92_RESET_TEXT_OBJECT,
@@ -17870,7 +17870,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH92_RESET_TEXT_OBJECT_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_440F80 clears cursor/layout state, the object text bitmap, eight state records, and allocated child text entries before invoking update virtuals.",
+        notes: "sub_486EB0 -> sub_441340: window fatal; cursor reset and buffer clear.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH92_START_STYLED_MESSAGE,
@@ -17878,7 +17878,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH92_START_STYLED_MESSAGE_PARAMETERS,
         returns: "native procedure status 2",
         scheduling: NativeSchedulingEffect::WaitProcedure,
-        notes: "sub_4863E0 builds a five-DWORD style tuple and installs CProcDspMsgEx or CProcDspMsgExVE through sub_491220. The inherited CProcDspMsg owns exact +0x78 input-scope registration/drain/unregistration. Raw/newline <cr> controls are processed without consuming Graph90:94 glyph cadence.",
+        notes: "sub_486EE0 -> sub_491D20 (variant 1 selects the vertical class): window and font fatal for window handles.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH92_DRAW_FORMATTED_TEXT,
@@ -17886,7 +17886,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH92_DRAW_FORMATTED_TEXT_PARAMETERS,
         returns: "void or script error",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_486500 renders formatted text directly into the resolved text object through sub_42B710 and refreshes it.",
+        notes: "sub_487000 -> sub_463600: window and font fatal for window handles.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH92_CONFIGURE_TEXT_BITMAP_SLOT,
@@ -17894,7 +17894,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH92_CONFIGURE_TEXT_BITMAP_SLOT_PARAMETERS,
         returns: "void or script error",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_486650 -> sub_432E40 configures one fixed slot by copying/cropping a source descriptor, or releases it when source is -1.",
+        notes: "sub_487150 -> sub_433210: code 0xFF01..=0xFFFF, -1 clears, bitmap, nonzero size with target texts.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH92_GET_TEXT_OUTPUT_PAIR,
@@ -17902,7 +17902,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH92_GET_TEXT_OUTPUT_PAIR_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_434410 accepts selector 256 and writes the two cursor/output globals. The VM owns both DWORD writes.",
+        notes: "sub_487260 -> sub_4347B0: 256 pair, 257 colour (dword_565D4C, colour tags not followed), else fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH92_RENDER_TEXT,
@@ -17910,7 +17910,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH92_RENDER_TEXT_PARAMETERS,
         returns: "updated x/cursor i32",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_4867D0 pops 21 values (the first is discarded): bitmap, x, y, text, colour, flag, ruby text, colour 2, font id, size, scale %, style, vertical, kinsoku, line spacing, then shadow mode / x% / y% / colour / concentration (sub_434E30: mode <= 2, offsets <= 100, concentration <= 256). Exact: bitmap >= 0x4000, unregistered font, missing bitmap, size outside 4..=200 and scale outside 25..=200 are fatal; each character is a record (sub_435290) holding the shadow - mode 1 recoloured glyph at (size*x%/100, size*y%/100) (sub_4188D0), mode 2 clamped box-sum glow of that radius (sub_433180) with the glyph moved by it - blended with parameter 256-concentration, then the glyph; records are blitted with mode 0 (sub_437940). Partial: the sub_435290 layout (GDI metrics, ruby records, the shadow advance term) is the portable text_layout approximation.",
+        notes: "sub_4872D0 -> sub_403B10: bitmap validator, font, bitmap, size, width texts; glyphs renderer item.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH92_CONFIGURE_FONT_OVERRIDE,
@@ -17918,7 +17918,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH92_CONFIGURE_FONT_OVERRIDE_PARAMETERS,
         returns: "status 0..=3 or -1",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_437FA0 validates a native font through sub_42EAB0 and stores face, height, italic and two additional creation fields. Exact GDI validation remains platform-specific.",
+        notes: "sub_487550 -> sub_438360: font number face; nonzero height outside 4..=200 is 2, width 25..=200 is 3; nothing stored on refusal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH92_DRAIN_TEXT_FRAGMENT_RECORDS,
@@ -17926,7 +17926,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH92_DRAIN_TEXT_FRAGMENT_RECORDS_PARAMETERS,
         returns: "record count 0..=16",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_437EB0 copies count * 128 bytes then clears the global table. Each record is 96 zero-padded text bytes followed by x/y DWORDs at offsets 120/124.",
+        notes: "sub_487630 -> sub_438270: fragment records copied and cleared.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH92_SET_TEXT_RENDER_OVERRIDE,
@@ -17934,7 +17934,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH92_SET_TEXT_RENDER_OVERRIDE_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_486B60 -> sub_463370 -> sub_438050 stores the scalar in dword_507650.",
+        notes: "sub_487660 -> sub_438410: dword_507650.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH92_OPEN_GLOBAL_DIRECTSHOW_MOVIE,
@@ -17942,7 +17942,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH92_OPEN_GLOBAL_MOVIE_PARAMETERS,
         returns: "duration milliseconds or 0",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_486B80 validates positive width/height, converts archive/resource strings, and calls sub_48F270 to open the process-global movie and return its duration.",
+        notes: "sub_487680: zero size fatal with target text; DirectShow host item.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH92_LOAD_BURIKO_MOVIE_RESOURCE,
@@ -17958,7 +17958,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH92_OPEN_BITMAP_MOVIE_PARAMETERS,
         returns: "status 0/1/2/3/4",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_486D30 converts archive/resource and calls sub_48F7B0/sub_4083F0 to construct DCMovieRenderer in the selected bitmap slot with loop and volume options.",
+        notes: "sub_487830 -> sub_4902B0 with archive: host DirectShow item; statuses as 91:F0.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH92_SEEK_BITMAP_DIRECTSHOW_MOVIE,
@@ -17966,7 +17966,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH92_SEEK_BITMAP_MOVIE_PARAMETERS,
         returns: "status 0/1/4/5",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_486E10 -> sub_4085A0 resolves the slot renderer and forwards the absolute millisecond position to sub_44D2C0.",
+        notes: "sub_487910 -> sub_408590: slot 4, no movie 1, seek failure 5.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH92_GET_BITMAP_DIRECTSHOW_MOVIE_POSITION,
@@ -17974,7 +17974,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH92_GET_BITMAP_MOVIE_POSITION_PARAMETERS,
         returns: "status 0/1/4",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_486EA0 -> sub_408600 writes the current DirectShow position through the first source argument. The VM owns the DWORD write.",
+        notes: "sub_4879A0 -> sub_4085F0: slot 4, no movie 1.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH92_SET_BITMAP_DIRECTSHOW_MOVIE_VOLUME,
@@ -17982,7 +17982,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH92_SET_BITMAP_MOVIE_VOLUME_PARAMETERS,
         returns: "status 0/1/3/4",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_486F10 -> sub_408650 resolves the slot renderer and applies the inclusive 0..=128 native volume.",
+        notes: "sub_487A10 -> sub_408640: slot 4, no movie 1, volume 3.",
     },
     // SystemA0 target sound dispatcher.
     NativeOpcodeSpec {
@@ -18985,7 +18985,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH_PERSISTENT_TEXT_STYLE_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target helper 0x00434440 stores dword_565CE0/CE4/CE8/CEC and dword_507644/7648. sub_4370A0 and sub_437110 prove CE0 is ruby height and CE8/CEC are ruby x/y offsets; CE4 and the final two override meanings remain open.",
+        notes: "sub_4870E0 -> sub_463820: font number resolved through sub_469110, six fields.",
     },
 ];
 
@@ -20179,6 +20179,27 @@ const PORTABLE_EQUIVALENT_OPCODES: &[NativeOpcode] = &[
     opcodes::GRAPH91_START_FLASH_CONTROL,
     opcodes::GRAPH91_CAPTURE_AND_RELEASE_FLASH_CONTROL,
     opcodes::GRAPH91_GET_MOVIE_POSITION,
+    opcodes::GRAPH92_READ_BITMAP_PIXEL_VALUE,
+    opcodes::GRAPH92_COMPOSE_BITMAP_ALPHA_AT_OFFSET,
+    opcodes::GRAPH92_DRAW_BITMAP_TEXT_MEASURE,
+    opcodes::GRAPH92_DRAW_WRAPPED_BITMAP_TEXT,
+    opcodes::GRAPH92_SET_TEXT_OBJECT_VALUE,
+    opcodes::GRAPH92_COMPOSITE_RESOURCE_INTO_TEXT_OBJECT,
+    opcodes::GRAPH92_SET_TEXT_OBJECT_AUXILIARY_VALUE,
+    opcodes::GRAPH92_SET_TEXT_OBJECT_UPDATE_FLAG,
+    opcodes::GRAPH92_APPLY_EFFECT_RESOURCE,
+    opcodes::GRAPH92_RESET_TEXT_OBJECT,
+    opcodes::GRAPH92_START_STYLED_MESSAGE,
+    opcodes::GRAPH92_DRAW_FORMATTED_TEXT,
+    opcodes::GRAPH_SET_PERSISTENT_TEXT_STYLE,
+    opcodes::GRAPH92_CONFIGURE_TEXT_BITMAP_SLOT,
+    opcodes::GRAPH92_RENDER_TEXT,
+    opcodes::GRAPH92_CONFIGURE_FONT_OVERRIDE,
+    opcodes::GRAPH92_OPEN_GLOBAL_DIRECTSHOW_MOVIE,
+    opcodes::GRAPH92_OPEN_BITMAP_DIRECTSHOW_MOVIE,
+    opcodes::GRAPH92_SEEK_BITMAP_DIRECTSHOW_MOVIE,
+    opcodes::GRAPH92_GET_BITMAP_DIRECTSHOW_MOVIE_POSITION,
+    opcodes::GRAPH92_SET_BITMAP_DIRECTSHOW_MOVIE_VOLUME,
 ];
 
 const PARTIAL_IMPLEMENTATION_OPCODES: &[NativeOpcode] = &[
@@ -20294,29 +20315,8 @@ const PARTIAL_IMPLEMENTATION_OPCODES: &[NativeOpcode] = &[
     opcodes::SYS_READ_WINDOWS_PATH_FILE,
     opcodes::GRAPH92_PRELOAD_BITMAP_RESOURCE,
     opcodes::GRAPH92_CANCEL_PENDING_BITMAP_PRELOADS,
-    opcodes::GRAPH92_READ_BITMAP_PIXEL_VALUE,
-    opcodes::GRAPH92_COMPOSE_BITMAP_ALPHA_AT_OFFSET,
-    opcodes::GRAPH92_DRAW_BITMAP_TEXT_MEASURE,
-    opcodes::GRAPH92_DRAW_WRAPPED_BITMAP_TEXT,
     opcodes::GRAPH92_LOAD_EXTERNAL_BMP,
-    opcodes::GRAPH92_SET_TEXT_OBJECT_VALUE,
-    opcodes::GRAPH92_COMPOSITE_RESOURCE_INTO_TEXT_OBJECT,
-    opcodes::GRAPH92_SET_TEXT_OBJECT_AUXILIARY_VALUE,
-    opcodes::GRAPH92_SET_TEXT_OBJECT_UPDATE_FLAG,
-    opcodes::GRAPH92_APPLY_EFFECT_RESOURCE,
-    opcodes::GRAPH92_RESET_TEXT_OBJECT,
-    opcodes::GRAPH92_START_STYLED_MESSAGE,
-    opcodes::GRAPH92_DRAW_FORMATTED_TEXT,
-    opcodes::GRAPH92_CONFIGURE_TEXT_BITMAP_SLOT,
-    opcodes::GRAPH92_RENDER_TEXT,
-    opcodes::GRAPH92_CONFIGURE_FONT_OVERRIDE,
-    opcodes::GRAPH92_OPEN_GLOBAL_DIRECTSHOW_MOVIE,
     opcodes::GRAPH92_LOAD_BURIKO_MOVIE_RESOURCE,
-    opcodes::GRAPH92_OPEN_BITMAP_DIRECTSHOW_MOVIE,
-    opcodes::GRAPH92_SEEK_BITMAP_DIRECTSHOW_MOVIE,
-    opcodes::GRAPH92_GET_BITMAP_DIRECTSHOW_MOVIE_POSITION,
-    opcodes::GRAPH92_SET_BITMAP_DIRECTSHOW_MOVIE_VOLUME,
-    opcodes::GRAPH_SET_PERSISTENT_TEXT_STYLE,
     opcodes::GRAPH91_COMPOSITE_BITMAP_RECT_ALPHA,
     opcodes::GRAPH91_COMPOSITE_BITMAP_RECT_CONVERTED,
     opcodes::GRAPH91_CONCENTRATE_BITMAP,
