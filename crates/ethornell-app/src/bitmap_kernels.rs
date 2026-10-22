@@ -130,6 +130,234 @@ pub(crate) fn concentrate(
     }
 }
 
+fn read_pixel(bitmap: &TargetBitmap, offset: usize) -> [u8; 4] {
+    bitmap
+        .pixels
+        .get(offset..offset + 4)
+        .map_or([0; 4], |bytes| bytes.try_into().unwrap())
+}
+
+fn write_pixel(bitmap: &mut TargetBitmap, offset: usize, value: u32) {
+    if let Some(target) = bitmap.pixels.get_mut(offset..offset + 4) {
+        target.copy_from_slice(&value.to_le_bytes());
+    }
+}
+
+/// x87 `fild`, `fdiv`, `fmul`, truncating `fistp` (control word set to
+/// round toward zero).
+fn x87_scaled(numerator: i32, denominator: u32, factor: f64) -> i64 {
+    (f64::from(numerator) / f64::from(denominator) * factor) as i64
+}
+
+/// `sub_495680` (91:1C without interpolation): nearest sampling of the
+/// source scaled by `x_scale` / `y_scale` (16.16) and centred in the
+/// destination.
+pub(crate) fn scale_nearest(
+    destination: &mut TargetBitmap,
+    source: &TargetBitmap,
+    x_scale: u32,
+    y_scale: u32,
+) {
+    let source_width = (source.width as u32) << 16;
+    let source_height = (source.height as u32) << 16;
+    let scaled_width = x_scale.wrapping_mul(source.width as u32).wrapping_add(0x8000) >> 16;
+    let scaled_height = (source.height as u32).wrapping_mul(y_scale).wrapping_add(0x8000) >> 16;
+    if scaled_width == 0 || scaled_height == 0 {
+        return;
+    }
+    let left = (destination.width as i32 >> 1)
+        - (x_scale.wrapping_mul(source.width as u32).wrapping_add(0x8000) >> 17) as i32;
+    let top = (destination.height as i32 >> 1)
+        - ((source.height as u32).wrapping_mul(y_scale).wrapping_add(0x8000) >> 17) as i32;
+    let right = (left + scaled_width as i32).min(destination.width as i32);
+    let bottom = (top + scaled_height as i32).min(destination.height as i32);
+    let first_x = left.max(0);
+    let first_y = top.max(0);
+    let step_x = source_width / scaled_width;
+    let step_y = source_height / scaled_height;
+    let start_y = x87_scaled(first_y - top, scaled_height, f64::from(source_height as i32));
+    let start_x = x87_scaled(first_x - left, scaled_width, f64::from(source_width as i32)) as u32;
+    let mut source_row = source.stride.wrapping_mul((start_y as u32 >> 16) as usize);
+    let mut fraction_y = start_y as u32 & 0xFFFF;
+    let destination_stride = 4 * (destination.stride >> 2);
+    let mut destination_row = first_y as usize * destination.stride;
+    for _ in first_y..bottom {
+        let mut position = start_x;
+        for x in first_x..right {
+            let pixel = read_pixel(source, source_row + 4 * (position >> 16) as usize);
+            position = position.wrapping_add(step_x);
+            write_pixel(destination, destination_row + 4 * x as usize, u32::from_le_bytes(pixel));
+        }
+        fraction_y = fraction_y.wrapping_add(step_y);
+        destination_row += destination_stride;
+        source_row += 4 * ((source.stride as u32).wrapping_mul(fraction_y >> 16) >> 2) as usize;
+        fraction_y &= 0xFFFF;
+    }
+}
+
+/// The weight table of `sub_495640`: entry k is k in every lane.
+fn area_weight(k: u32) -> u16 {
+    k.min(256) as u16
+}
+
+/// `sub_495E10`: bilinear sample at 16.16 (x, y); neighbours past the
+/// last row or column read the zero pixel `dword_566AE0`.
+fn sample_bilinear(source: &TargetBitmap, x: u32, y: u32) -> u32 {
+    let fx = (x >> 8) & 0xFF;
+    let fy = (y >> 8) & 0xFF;
+    let (ix, iy) = ((x >> 16) as usize, (y >> 16) as usize);
+    let at = iy * source.stride + 4 * ix;
+    let p00 = read_pixel(source, at);
+    let mut p01 = read_pixel(source, at + 4);
+    let mut p10 = read_pixel(source, at + source.stride);
+    let mut p11 = read_pixel(source, at + source.stride + 4);
+    if ix >= source.width.wrapping_sub(1) {
+        p01 = [0; 4];
+        p11 = [0; 4];
+    }
+    if iy >= source.height.wrapping_sub(1) {
+        p10 = [0; 4];
+        p11 = [0; 4];
+    }
+    let (gx, gy) = (256 - fx, 256 - fy);
+    let channel = |c: usize| {
+        gy.wrapping_mul(gx * u32::from(p00[c]) + fx * u32::from(p01[c]))
+            .wrapping_add(fy.wrapping_mul(gx * u32::from(p10[c]) + fx * u32::from(p11[c])))
+    };
+    let (b, g, r, a) = (channel(0), channel(1), channel(2), channel(3));
+    (((b >> 8) | (g & 0xFFFF_00FF)) >> 8) | (r & 0xFFFF_0000) | ((a << 8) & 0xFF00_0000)
+}
+
+/// `sub_495B60`: average over the footprint rectangle, colour only from
+/// pixels with alpha (or any pixel of a format-1 source).
+fn sample_box(source: &TargetBitmap, format: u32, x: u32, y: u32, width: u32, height: u32) -> u32 {
+    let left = (x >> 16) as i32;
+    let top = (y >> 16) as i32;
+    let right = (left + ((width.wrapping_add(255)) >> 8) as i32).min(source.width as i32);
+    let bottom = (top + ((height.wrapping_add(255)) >> 8) as i32).min(source.height as i32);
+    let (left, top) = (left.max(0), top.max(0));
+    let (mut b, mut g, mut r, mut a, mut counted, mut total) = (0u32, 0u32, 0u32, 0u32, 0u32, 0u32);
+    for row in top..bottom {
+        if (left as u32) < right as u32 {
+            total = total.wrapping_add((right - left) as u32);
+        }
+        for column in left..right {
+            let pixel = read_pixel(source, row as usize * source.stride + 4 * column as usize);
+            if pixel[3] != 0 || format == 1 {
+                b += u32::from(pixel[0]);
+                g += u32::from(pixel[1]);
+                r += u32::from(pixel[2]);
+                a += u32::from(pixel[3]);
+                counted += 1;
+            }
+        }
+    }
+    let counted = counted.max(1);
+    let alpha = if total == 0 { 0 } else { a / total };
+    ((((g / counted) | (((r / counted) | (alpha << 8)) << 8)) << 8)) | (b / counted)
+}
+
+/// `sub_495CA0`: area-weighted footprint in 24.8 coordinates with the
+/// saturating 16-bit SSE accumulation.
+fn sample_area(source: &TargetBitmap, x: u32, y: u32, width: u32, height: u32) -> u32 {
+    let mut left = (x >> 8) as i32;
+    let mut top = (y >> 8) as i32;
+    let mut right = left.wrapping_add(width as i32);
+    let mut bottom = top.wrapping_add(height as i32);
+    left = left.max(0);
+    top = top.max(0);
+    right = right.min((source.width as i32) << 8);
+    bottom = bottom.min((source.height as i32) << 8);
+    let area = (right - left).wrapping_mul(bottom - top) >> 8;
+    let mut sum = [0u16; 4];
+    let mut row = (top >> 8) as usize * source.stride;
+    while top < bottom {
+        let next = ((top + 256) as u32 & 0xFFFF_FF00) as i32;
+        let next = next.min(bottom);
+        let span_y = next - top;
+        let mut column = left;
+        while column < right {
+            let end = (((column + 256) as u32 & 0xFFFF_FF00) as i32).min(right);
+            let weight = if area == 0 { 0 } else { ((span_y * (end - column)) << 8) / area };
+            let pixel = read_pixel(source, row + ((column as u32 >> 6) & 0x3FF_FFFC) as usize);
+            let k = area_weight((weight >> 8) as u32);
+            for lane in 0..4 {
+                sum[lane] = sum[lane].saturating_add(u16::from(pixel[lane]).wrapping_mul(k));
+            }
+            column = end;
+        }
+        row += source.stride;
+        top = next;
+    }
+    u32::from_le_bytes(sum.map(|value| (value >> 8).min(255) as u8))
+}
+
+/// `sub_495880` (91:1C with interpolation): the sampler is chosen by the
+/// scales — bilinear when both enlarge, a box average when either shrinks
+/// below one half, the area sampler otherwise.
+pub(crate) fn scale_filtered(
+    destination: &mut TargetBitmap,
+    source: &TargetBitmap,
+    format: u32,
+    x_scale: u32,
+    y_scale: u32,
+) {
+    let scaled_width = x_scale.wrapping_mul(source.width as u32).wrapping_add(0x8000) >> 16;
+    let scaled_height = y_scale.wrapping_mul(source.height as u32).wrapping_add(0x8000) >> 16;
+    if scaled_width == 0 || scaled_height == 0 || x_scale >> 8 == 0 || y_scale >> 8 == 0 {
+        return;
+    }
+    let mut footprint = [0x10000 / (x_scale >> 8), 0x10000 / (y_scale >> 8)];
+    let left = (destination.width as i32 >> 1) - (scaled_width >> 1) as i32;
+    let top = (destination.height as i32 >> 1) - (scaled_height >> 1) as i32;
+    let first_x = left.max(0);
+    let first_y = top.max(0);
+    let right = (left + scaled_width as i32).min(destination.width as i32);
+    let bottom = (top + scaled_height as i32).min(destination.height as i32);
+    let mut bias = [footprint[0] << 7, footprint[1] << 7];
+    let mut shift = 8;
+    #[derive(Clone, Copy)]
+    enum Sampler {
+        Bilinear,
+        Box,
+        Area,
+    }
+    let mut sampler = Sampler::Bilinear;
+    if (x_scale >= 0x10000 || x_scale <= 0x7FFF) && y_scale.wrapping_sub(0x8000) > 0x7FFF {
+        if x_scale < 0x8000 || y_scale < 0x8000 {
+            sampler = Sampler::Box;
+        } else {
+            footprint = [512, 512];
+            shift = 9;
+            bias = [0, 0];
+        }
+    } else {
+        sampler = Sampler::Area;
+    }
+    let span_x = ((source.width as u32).wrapping_sub(footprint[0] >> shift)) << 16;
+    let span_y = ((source.height as u32).wrapping_sub(footprint[1] >> shift)) << 16;
+    let step_x = span_x / scaled_width;
+    let step_y = span_y / scaled_height;
+    let mut y = bias[1].wrapping_add(x87_scaled(first_y - top, scaled_height, f64::from(span_y as i32)) as u32);
+    let row_x = bias[0].wrapping_add(x87_scaled(first_x - left, scaled_width, f64::from(span_x as i32)) as u32);
+    let mut destination_row = first_y as usize * destination.stride;
+    let destination_stride = 4 * (destination.stride >> 2);
+    for _ in first_y..bottom {
+        let mut x = row_x;
+        for column in first_x..right {
+            let value = match sampler {
+                Sampler::Bilinear => sample_bilinear(source, x, y),
+                Sampler::Box => sample_box(source, format, x, y, footprint[0], footprint[1]),
+                Sampler::Area => sample_area(source, x, y, footprint[0], footprint[1]),
+            };
+            x = x.wrapping_add(step_x);
+            write_pixel(destination, destination_row + 4 * column as usize, value);
+        }
+        y = y.wrapping_add(step_y);
+        destination_row += destination_stride;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -172,6 +400,8 @@ mod tests {
             let mut destination = TargetBitmap { pixels: before, stride: dw * 4, width: dw, height: dh };
             match kind {
                 1 => concentrate(&mut destination, &source, p0, p1, p2),
+                2 => scale_nearest(&mut destination, &source, p0, p1),
+                3 => scale_filtered(&mut destination, &source, p2, p0, p1),
                 _ => panic!("unknown kernel {kind}"),
             }
             assert_eq!(destination.pixels, expected, "{}", path.display());

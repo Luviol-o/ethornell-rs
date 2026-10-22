@@ -17126,7 +17126,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_SCALE_TRUE_COLOR_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_4815C0 accepts only target true-color formats and allocates each destination dimension as source dimension multiplied by 16.16 scale.",
+        notes: "sub_402B90 reallocates the destination at (w*p2>>16, h*p3>>16) in the source format; sub_495880 (p4 != 0: bilinear / box / area sampler by scale) and sub_495680 (nearest) ported literally (bitmap_kernels::scale_filtered / scale_nearest) and matched under Unicorn (src/tools/emu_kernels.py).",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_PROCESS_BITMAP,
@@ -20303,6 +20303,7 @@ const PORTABLE_EQUIVALENT_OPCODES: &[NativeOpcode] = &[
     opcodes::USER2_SET_RAIN_LENGTH,
     opcodes::USER2_SET_RAIN_STEP,
     opcodes::GRAPH91_CONCENTRATE_BITMAP,
+    opcodes::GRAPH91_SCALE_TRUE_COLOR_BITMAP,
 ];
 
 const PARTIAL_IMPLEMENTATION_OPCODES: &[NativeOpcode] = &[
@@ -20382,7 +20383,6 @@ const PARTIAL_IMPLEMENTATION_OPCODES: &[NativeOpcode] = &[
     opcodes::GRAPH92_LOAD_BURIKO_MOVIE_RESOURCE,
     opcodes::GRAPH91_COMPOSITE_BITMAP_RECT_ALPHA,
     opcodes::GRAPH91_COMPOSITE_BITMAP_RECT_CONVERTED,
-    opcodes::GRAPH91_SCALE_TRUE_COLOR_BITMAP,
     opcodes::GRAPH91_PROCESS_BITMAP,
     opcodes::GRAPH91_APPLY_GRAYSCALE_MASK,
     opcodes::SOUND_SET_BGM_PRIMARY_VOLUME,

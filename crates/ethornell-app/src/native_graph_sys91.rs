@@ -2413,30 +2413,43 @@ impl RuntimeTraceApi {
         self.graph91_store_bitmap(destination, target.to_image(true), 1);
     }
 
+    /// 91:1C -> sub_402B90: the destination is reallocated at
+    /// (w * p2 >> 16, h * p3 >> 16) in the source format, then
+    /// sub_402C60 runs sub_495880 (p4 != 0) or sub_495680
+    /// (bitmap_kernels::scale_filtered / scale_nearest).
     fn graph91_scale_bitmap(
         &mut self,
         destination: i32,
         source: i32,
         scale_x: i32,
         scale_y: i32,
-        _interpolation: i32,
+        interpolation: i32,
     ) {
-        let source_image = self.graph_bitmap_image(source);
-        tracing::info!(
-            destination,
-            source,
-            scale_x,
-            scale_y,
-            source_size = ?source_image.as_ref().map(|image| (image.width, image.height)),
-            "GraphScaleTrueColorBitmap"
-        );
-        let Some(image) =
-            source_image.and_then(|image| scale_decoded_image_fixed(&image, scale_x, scale_y))
-        else {
+        let Some(source_image) = self.graph_bitmap_image(source) else {
             return;
         };
         let format = self.bitmap_formats.get(&source).copied().unwrap_or(2);
-        self.graph91_store_bitmap(destination, image, format);
+        let width = (scale_x as u32).wrapping_mul(source_image.width) >> 16;
+        let height = (scale_y as u32).wrapping_mul(source_image.height) >> 16;
+        let source = crate::bitmap_kernels::TargetBitmap::from_image(&source_image);
+        let mut target = crate::bitmap_kernels::TargetBitmap {
+            pixels: vec![0; width as usize * height as usize * 4],
+            stride: width as usize * 4,
+            width: width as usize,
+            height: height as usize,
+        };
+        if interpolation != 0 {
+            crate::bitmap_kernels::scale_filtered(
+                &mut target,
+                &source,
+                format as u32,
+                scale_x as u32,
+                scale_y as u32,
+            );
+        } else {
+            crate::bitmap_kernels::scale_nearest(&mut target, &source, scale_x as u32, scale_y as u32);
+        }
+        self.graph91_store_bitmap(destination, target.to_image(format == 1), format);
     }
 
     fn graph91_process_bitmap(

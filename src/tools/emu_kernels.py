@@ -31,6 +31,41 @@ mu.mem_map(RET, 0x1000)
 
 heap_top = HEAP
 
+# Windows imports the kernels call are stubbed: each IAT slot points at a
+# hooked address in STUBS.
+STUBS = 0x50000000
+mu.mem_map(STUBS, 0x1000)
+stubs = {}
+
+
+def stub(name, argc, impl):
+    for entry in pe.DIRECTORY_ENTRY_IMPORT:
+        for imp in entry.imports:
+            if imp.name and imp.name.decode() == name:
+                at = STUBS + 16 * len(stubs)
+                mu.mem_write(at, b"\xC3")
+                mu.mem_write(imp.address, struct.pack("<I", at))
+                stubs[at] = (argc, impl)
+
+
+def on_stub(uc, address, size, user):
+    if address in stubs:
+        argc, impl = stubs[address]
+        sp = uc.reg_read(UC_X86_REG_ESP)
+        ret, *args = struct.unpack("<%dI" % (argc + 1), uc.mem_read(sp, 4 * (argc + 1)))
+        uc.reg_write(UC_X86_REG_EAX, impl(*args) & 0xFFFFFFFF)
+        uc.reg_write(UC_X86_REG_ESP, sp + 4 * (argc + 1))
+        uc.reg_write(UC_X86_REG_EIP, ret)
+
+
+def set_rect(rect, left, top, right, bottom):
+    mu.mem_write(rect, struct.pack("<4I", left, top, right, bottom))
+    return 1
+
+
+stub("SetRect", 5, set_rect)
+mu.hook_add(UC_HOOK_CODE, on_stub, begin=STUBS, end=STUBS + 0xFFF)
+
 
 def alloc(n):
     global heap_top
@@ -97,3 +132,36 @@ for n, (w, h, att, xf, yf) in enumerate(cases):
     after = mu.mem_read(dst_data, w * h * 4)
     emit(f"concentrate_{n}", 1, w, h, w, h, (att, xf, yf), src, dst_before, after)
     print("concentrate", n, w, h, att, hex(xf), hex(yf))
+
+# sub_495640 fills the 16-bit weight table used by sub_495CA0.
+call(0x495640, [], {})
+
+# kind 2: sub_495680 (91:1C nearest), cdecl (destination, source, xs, ys).
+# kind 3: sub_495880 (91:1C filtered), cdecl (source, xs, ys), ecx = dest.
+scale_cases = [(8, 6, 0x10000, 0x10000), (8, 6, 0x18000, 0x20000), (16, 12, 0x8000, 0x8000),
+               (16, 12, 0x6000, 0x5000), (10, 10, 0xC000, 0x9000), (12, 9, 0x24000, 0xA000),
+               (7, 13, 0x3000, 0x28000), (20, 4, 0x10000, 0x8800)]
+for _ in range(12):
+    scale_cases.append((rng.randrange(1, 24), rng.randrange(1, 24),
+                        rng.randrange(0x1000, 0x40000), rng.randrange(0x1000, 0x40000)))
+for kind, address in ((2, 0x495680), (3, 0x495880)):
+    for n, (w, h, xs, ys) in enumerate(scale_cases):
+        for fmt in (1, 2):
+            heap_top = global_heap
+            dw, dh = (w * xs) >> 16, (h * ys) >> 16
+            if dw == 0 or dh == 0:
+                continue
+            src = rand_pixels(w * h, None if fmt == 2 else 0)
+            if fmt == 2:
+                for i in range(0, len(src), 4 * 3):
+                    src[i + 3] = 0
+            dst_before = rand_pixels(dw * dh)
+            src_desc, _ = bitmap(w, h, src, fmt)
+            dst_desc, dst_data = bitmap(dw, dh, dst_before, fmt)
+            if kind == 2:
+                call(address, [dst_desc, src_desc, xs, ys], {})
+            else:
+                call(address, [src_desc, xs, ys], {UC_X86_REG_ECX: dst_desc})
+            after = mu.mem_read(dst_data, dw * dh * 4)
+            emit(f"scale{kind}_{n}_{fmt}", kind, w, h, dw, dh, (xs, ys, fmt), src, dst_before, after)
+print("scales done")
