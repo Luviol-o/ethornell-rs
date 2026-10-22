@@ -2409,6 +2409,9 @@ pub struct Vm {
     timing: time::VmTime,
     rng_seed: u32,
     recent_trace: VecDeque<String>,
+    /// The last instructions run, as (program, pc, offset); formatted into
+    /// the report only when the slice stops fatally.
+    recent_steps: VecDeque<(usize, usize, u64)>,
     scheduler_signal: Option<SchedulerSignal>,
     /// Target thread selected by native status 3 (`Sys80:5E`). The value is
     /// consumed by the flat cooperative scheduler, not persisted in CThread.
@@ -2777,7 +2780,7 @@ impl Vm {
                     self.stack.last()
                 );
             }
-            if trace_events || options.trace || options.fail_on_stub {
+            if trace_events || options.trace {
                 self.push_trace(format!(
                     "program={} pc={} off=0x{:08X} {} {:?}",
                     self.program_name(program_index),
@@ -2786,6 +2789,13 @@ impl Vm {
                     inst.opcode_name,
                     inst.operands
                 ));
+            } else if options.fail_on_stub {
+                // Formatting a trace line per instruction was half of a
+                // console frame; keep the position and format on failure.
+                if self.recent_steps.len() >= 30 {
+                    self.recent_steps.pop_front();
+                }
+                self.recent_steps.push_back((program_index, self.pc, inst.offset));
             }
             self.trace_mtn_body_dispatch(inst.offset);
             match self.dispatch_program(
@@ -3031,7 +3041,25 @@ impl Vm {
                 .unwrap_or_default(),
             recent_trace: options
                 .collect_diagnostics
-                .then(|| self.recent_trace.iter().cloned().collect())
+                .then(|| {
+                    let mut trace = Vec::new();
+                    if stop_reason.is_fatal() {
+                        trace.extend(self.recent_steps.iter().map(|&(program_index, pc, offset)| {
+                            let program = &self.programs[program_index.min(self.programs.len().saturating_sub(1))];
+                            let (name, operands) = program
+                                .instructions
+                                .get(pc)
+                                .map(|inst| (inst.opcode_name.as_str(), format!("{:?}", inst.operands)))
+                                .unwrap_or(("?", String::new()));
+                            format!(
+                                "program={} pc={pc} off=0x{offset:08X} {name} {operands}",
+                                self.program_name(program_index)
+                            )
+                        }));
+                    }
+                    trace.extend(self.recent_trace.iter().cloned());
+                    trace
+                })
                 .unwrap_or_default(),
         }
     }

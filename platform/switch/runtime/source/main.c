@@ -203,6 +203,8 @@ int main(void) {
   bool quit = false;
   uint64_t request = 0;
   uint64_t last = armGetSystemTick(), origin = last, report_at = last;
+  /* Per-report frame timing: steps that ran an engine frame (> 1 ms). */
+  uint64_t frames = 0, step_ticks = 0, step_max = 0;
   while (appletMainLoop() && !quit) {
     padUpdate(&pad);
     uint64_t down = padGetButtonsDown(&pad), up = padGetButtonsUp(&pad),
@@ -267,13 +269,27 @@ int main(void) {
       if (down & HidNpadButton_R)
         ethornell_console_input(engine, 6, 0, 0, 0, -1);
     }
+    uint64_t step_start = armGetSystemTick();
     if (ethornell_console_step(engine, armTicksToNs(now - origin)) != 0) {
       error();
       break;
     }
+    uint64_t step = armGetSystemTick() - step_start;
+    if (armTicksToNs(step) > 1000000) {
+      frames++;
+      step_ticks += step;
+      if (step > step_max)
+        step_max = step;
+    }
     pump_audio();
     if (now - report_at >= 5 * armGetSystemTickFreq()) {
       char status[2048];
+      snprintf(status, sizeof(status), "frames=%llu step_avg_ms=%.1f step_max_ms=%.1f ",
+               (unsigned long long)frames,
+               frames ? armTicksToNs(step_ticks) / 1e6 / frames : 0.0,
+               armTicksToNs(step_max) / 1e6);
+      ethornell_switch_log_message(status);
+      frames = step_ticks = step_max = 0;
       ethornell_console_diagnostics(engine, status, sizeof(status));
       ethornell_switch_log_message(status);
       ethornell_switch_log_message("\n");
