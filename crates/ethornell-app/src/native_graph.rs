@@ -2763,6 +2763,9 @@ impl RuntimeTraceApi {
                     // the mode-0 path even before a full 90:56 configure.
                     0,
                 );
+                if handle != 0 {
+                    self.display_changes += 1;
+                }
                 tracing::info!(sprite = handle, "GraphCreateSpriteObject");
                 ethornell_vm::Value::Int(handle)
             }
@@ -2801,7 +2804,7 @@ impl RuntimeTraceApi {
                         "Graph90:51 #{handle} is not a sprite object"
                     ))));
                 }
-                self.display_releases += 1;
+                self.display_changes += 1;
                 tracing::debug!(handle, "GraphReleaseSpriteObject");
                 ethornell_vm::Value::None
             }
