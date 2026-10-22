@@ -14710,6 +14710,16 @@ mod input_tests {
         assert_eq!(shown_message(&api), "Third line.");
     }
 
+    fn draw_at_once(api: &mut super::RuntimeTraceApi, window: i32, text: &str) {
+        // Wonderful Everyday's scrmsg._bp draws a skipped line at once with
+        // Graph92:91 (its text colour setting and edge style).
+        let mut args = [window, 0, 0, 1, 0, 1, 2, 1, 1, 0xffffff, 192]
+            .map(Value::Int)
+            .to_vec();
+        args[1] = Value::Str(text.into());
+        call_graph(api, 0x92, 0x91, &mut args).unwrap();
+    }
+
     #[test]
     fn a_page_feed_clears_the_text_graph92_91_drew_on_the_window() {
         let manager =
@@ -14718,28 +14728,91 @@ mod input_tests {
         let window = message_window(&mut api);
         let home = api.surface_text_states[&window];
 
-        // Wonderful Everyday draws a skipped line at once with Graph92:91.
-        // When skipping has stopped by the time the line is done,
-        // scrmsg._bp ends the page with Graph90:90(window, "\x0c") rather
+        // When skipping has stopped by the time a skipped line is done,
+        // scrmsg._bp ends its page with Graph90:90(window, "\x0c") rather
         // than Graph92:8E.
-        let mut args = [window, 0, 0, 1, 0, 1, 2, 1, 1, 0xffffff, 192]
-            .map(Value::Int)
-            .to_vec();
-        args[1] = Value::Str("A skipped line.".into());
-        call_graph(&mut api, 0x92, 0x91, &mut args).unwrap();
-        assert!(api.text_nodes.contains_key(&window));
+        draw_at_once(&mut api, window, "A skipped line.");
+        assert_eq!(shown_message(&api), "A skipped line.");
 
         // sub_433890 clears the window's text bitmap (sub_42B9B0), where
         // Graph92:91 drew too, so the next line doesn't show over it.
         api.start_native_message("\x0c".into(), Some(window));
+        assert_eq!(shown_message(&api), "");
         assert!(!api.text_nodes.contains_key(&window));
-        assert!(!api.bitmap_text_runs.contains_key(&window));
         assert_eq!(api.surface_text_buffers[&window], "");
         assert_eq!(api.surface_text_states[&window].cursor_x, home.cursor_x);
         api.start_native_message("The next line.".into(), Some(window));
         api.tick_text(10_000);
         assert_eq!(shown_message(&api), "The next line.");
+    }
+
+    #[test]
+    fn graph92_91_draws_on_its_window_page_at_the_text_cursor() {
+        let manager =
+            ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let mut api = super::RuntimeTraceApi::new(manager);
+        let window = message_window(&mut api);
+        let home = api.surface_text_states[&window];
+
+        // sub_42B710 draws at the window's text cursor and leaves the cursor
+        // after the text (sub_42C700), as a message does.
+        draw_at_once(&mut api, window, "A skipped line.");
+        assert_eq!(shown_message(&api), "A skipped line.");
+        let after_line = api.surface_text_states[&window];
+        assert_eq!(after_line.cursor_y, home.cursor_y);
+        assert!(after_line.cursor_x > home.cursor_x);
         assert!(!api.text_nodes.contains_key(&window));
+        assert_eq!(
+            api.text_nodes[&api.text_runtime.target_node.unwrap()].z,
+            api.graph_surfaces[&window].z
+        );
+
+        // On a page of several lines scrmsg._bp asks Graph91:8E whether the
+        // cursor is at a line's start and, when it isn't, draws a line feed
+        // with Graph92:91 before the next line.
+        let at_line_start = call_graph(&mut api, 0x91, 0x8e, &mut vec![Value::Int(window)]);
+        assert_eq!(at_line_start.unwrap(), Value::Int(0));
+        draw_at_once(&mut api, window, "\n");
+        let next_line = api.surface_text_states[&window];
+        assert_eq!(next_line.cursor_x, home.cursor_x);
+        assert!(next_line.cursor_y > home.cursor_y);
+
+        // The line typed after skipping stops goes on the next line; the
+        // skipped one stays above it.
+        api.start_native_message("The next line.".into(), Some(window));
+        assert_eq!(shown_message(&api), "A skipped line.\n");
+        api.tick_text(10_000);
+        assert_eq!(shown_message(&api), "A skipped line.\nThe next line.");
+
+        // Graph92:8E clears both.
+        call_graph(&mut api, 0x92, 0x8e, &mut vec![Value::Int(window)]).unwrap();
+        assert!(api
+            .text_nodes
+            .values()
+            .filter(|node| node.target_surface == Some(window))
+            .all(|node| node.text.is_empty()));
+        assert_eq!(api.surface_text_states[&window].cursor_x, home.cursor_x);
+        assert_eq!(api.surface_text_states[&window].cursor_y, home.cursor_y);
+    }
+
+    #[test]
+    fn graph92_91_leaves_another_windows_message_where_it_is() {
+        let manager =
+            ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let mut api = super::RuntimeTraceApi::new(manager);
+        let window = message_window(&mut api);
+        let other = 0xB000_0001_u32 as i32;
+        api.graph_surfaces
+            .insert(other, RuntimeSurface::display(other, 600.0, 100.0));
+        api.reset_window_text_cursor(other);
+
+        // The engine keeps one message node: text drawn on another window
+        // while it shows a message stays a node of that window.
+        api.start_native_message("A message.".into(), Some(window));
+        api.tick_text(10_000);
+        draw_at_once(&mut api, other, "Other text.");
+        assert_eq!(shown_message(&api), "A message.");
+        assert_eq!(api.text_nodes[&other].text, "Other text.");
     }
 
     #[test]
@@ -24586,31 +24659,39 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                     // sub_42B710, so direct formatted draws must preserve the
                     // same ruby spans and kinsoku wrapping as 92:90.
                     let parsed = text::parse_and_wrap_styled_message(text, &state);
-                    let x = state.x;
-                    let y = state.y;
-                    self.store_bitmap_text_run(
-                        target,
-                        RuntimeTextNode {
-                            text: parsed.text.clone(),
-                            enabled: true,
-                            owner_object: Some(target),
-                            screen_attached: false,
-                            target_surface: Some(target),
-                            x,
-                            y,
-                            size: state.font_size,
-                            line_height: state.line_height,
-                            formatted_layout: true,
-                            color: state.color,
-                            z: target,
-                            ruby_spans: parsed.ruby_spans,
-                            style_spans: parsed.style_spans,
-                        },
-                    );
                     self.surface_text_buffers
                         .entry(target)
                         .or_default()
                         .push_str(&parsed.text);
+                    if self.graph_surfaces.contains_key(&target)
+                        && self.message_text_node_is_free_for(target)
+                    {
+                        // Into the window's text bitmap, at its cursor, as
+                        // a message draws.
+                        self.draw_window_text_at_once(target, text);
+                    } else {
+                        let x = state.x;
+                        let y = state.y;
+                        self.store_bitmap_text_run(
+                            target,
+                            RuntimeTextNode {
+                                text: parsed.text.clone(),
+                                enabled: true,
+                                owner_object: Some(target),
+                                screen_attached: false,
+                                target_surface: Some(target),
+                                x,
+                                y,
+                                size: state.font_size,
+                                line_height: state.line_height,
+                                formatted_layout: true,
+                                color: state.color,
+                                z: target,
+                                ruby_spans: parsed.ruby_spans,
+                                style_spans: parsed.style_spans,
+                            },
+                        );
+                    }
                 }
                 tracing::debug!(
                     target,
