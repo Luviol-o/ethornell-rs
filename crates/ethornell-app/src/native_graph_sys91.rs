@@ -2452,6 +2452,7 @@ impl RuntimeTraceApi {
         self.graph91_store_bitmap(destination, target.to_image(format == 1), format);
     }
 
+    /// 91:1D -> sub_403110 -> sub_419CF0 (bitmap_kernels::process).
     fn graph91_process_bitmap(
         &mut self,
         destination: i32,
@@ -2460,42 +2461,25 @@ impl RuntimeTraceApi {
         parameter: i32,
         alpha: i32,
     ) {
-        if !(0..=5).contains(&process_type) || !(0..=256).contains(&alpha) {
-            return;
-        }
-        let Some(source_image) = self.graph_bitmap_image(source) else {
+        let (Some(source_image), Some(destination_image)) =
+            (self.graph_bitmap_image(source), self.graph_bitmap_image(destination))
+        else {
             return;
         };
-        let mut output = self
-            .graph_bitmap_image(destination)
-            .unwrap_or_else(|| source_image.clone());
-        let width = output.width.min(source_image.width);
-        let height = output.height.min(source_image.height);
-        for y in 0..height {
-            for x in 0..width {
-                let so = (y as usize * source_image.width as usize + x as usize) * 4;
-                let doff = (y as usize * output.width as usize + x as usize) * 4;
-                for channel in 0..3 {
-                    let src = source_image.rgba[so + channel] as i32;
-                    let dst = output.rgba[doff + channel] as i32;
-                    let processed = match process_type {
-                        0 => src,
-                        1 => dst.saturating_add(src.saturating_mul(parameter) / 256),
-                        2 => dst.saturating_sub(src.saturating_mul(parameter) / 256),
-                        3 => dst.saturating_mul(src) / 255,
-                        4 => 255 - (255 - dst).saturating_mul(255 - src) / 255,
-                        5 => (dst + src + parameter).saturating_sub(128),
-                        _ => unreachable!(),
-                    }
-                    .clamp(0, 255);
-                    output.rgba[doff + channel] =
-                        ((processed * alpha + dst * (256 - alpha)) / 256).clamp(0, 255) as u8;
-                }
-                output.rgba[doff + 3] = output.rgba[doff + 3].max(source_image.rgba[so + 3]);
-            }
-        }
-        let format = self.bitmap_formats.get(&destination).copied().unwrap_or(2);
-        self.graph91_store_bitmap(destination, output, format);
+        let source_format = self.bitmap_formats.get(&source).copied().unwrap_or(2);
+        let destination_format = self.bitmap_formats.get(&destination).copied().unwrap_or(2);
+        let source_bitmap = crate::bitmap_kernels::TargetBitmap::from_image(&source_image);
+        let mut target = crate::bitmap_kernels::TargetBitmap::from_image(&destination_image);
+        crate::bitmap_kernels::process(
+            &mut target,
+            destination_format as u32,
+            &source_bitmap,
+            source_format as u32,
+            process_type as u32,
+            parameter as u32,
+            alpha as u32,
+        );
+        self.graph91_store_bitmap(destination, target.to_image(destination_format == 1), destination_format);
     }
 
     fn graph91_allocate_tagged_handle<T>(registry: &BTreeMap<i32, T>, tag: u32, slots: u32) -> i32 {

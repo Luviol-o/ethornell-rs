@@ -358,6 +358,218 @@ pub(crate) fn scale_filtered(
     }
 }
 
+/// The overlap `sub_410D80` and the other 91:1D kernels clip to.
+fn overlap(destination: &TargetBitmap, source: &TargetBitmap) -> (usize, usize) {
+    (destination.width.min(source.width), destination.height.min(source.height))
+}
+
+/// `x + ((target - x) * weight >> 7)` per lane with `packus` saturation.
+fn lerp7(x: u8, target: i32, weight: i32) -> u8 {
+    let x = i32::from(x);
+    (x + (((target - x) * weight) >> 7)).clamp(0, 255) as u8
+}
+
+/// Runs `kernel` over the overlap two pixels at a time like the SSE
+/// loops; with `skip_transparent` (format 2) a pair whose two alphas are
+/// zero, or an odd last pixel with alpha zero, is written as zero.
+fn for_each_pair(
+    destination: &mut TargetBitmap,
+    source: &TargetBitmap,
+    skip_transparent: bool,
+    kernel: impl Fn([u8; 4]) -> [u8; 4],
+) {
+    let (width, height) = overlap(destination, source);
+    for y in 0..height {
+        let (source_row, destination_row) = (y * source.stride, y * destination.stride);
+        for x in (0..width).step_by(2) {
+            let pair = x + 1 < width;
+            let first = read_pixel(source, source_row + 4 * x);
+            let second = if pair { read_pixel(source, source_row + 4 * x + 4) } else { [0; 4] };
+            let clear = skip_transparent && first[3] == 0 && (!pair || second[3] == 0);
+            for (index, pixel) in [first, second].into_iter().enumerate().take(1 + pair as usize) {
+                let value = if clear { [0; 4] } else { kernel(pixel) };
+                write_pixel(destination, destination_row + 4 * (x + index), u32::from_le_bytes(value));
+            }
+        }
+    }
+}
+
+/// `sub_40AF70` (91:1D type 0): copy over the source size (not clipped
+/// to the destination); a format-1 source gains alpha 255, a format-2
+/// source going to another format is premultiplied (`qword_50B0F0`) with
+/// alpha 0.
+fn convert_copy(destination: &mut TargetBitmap, destination_format: u32, source: &TargetBitmap, source_format: u32) {
+    if destination_format == source_format {
+        let row_bytes = source.width * 4;
+        for y in 0..source.height {
+            let from = &source.pixels[y * source.stride..(y * source.stride + row_bytes).min(source.pixels.len())];
+            let at = y * destination.stride;
+            let end = (at + from.len()).min(destination.pixels.len());
+            if at < end {
+                destination.pixels[at..end].copy_from_slice(&from[..end - at]);
+            }
+        }
+        return;
+    }
+    for y in 0..source.height {
+        for x in 0..source.width {
+            let pixel = read_pixel(source, y * source.stride + 4 * x);
+            let value = match source_format {
+                1 => u32::from_le_bytes(pixel) | 0xFF00_0000,
+                2 => {
+                    let weight = u16::from(pixel[3] >> 1);
+                    let channel = |c: u8| ((u16::from(c) * weight) >> 7) as u8;
+                    u32::from_le_bytes([channel(pixel[0]), channel(pixel[1]), channel(pixel[2]), 0])
+                }
+                _ => return,
+            };
+            write_pixel(destination, y * destination.stride + 4 * x, value);
+        }
+    }
+}
+
+/// `sub_40DE80`: 91:1D type 3 with colour 0 (fade to black).
+fn fade_to_black(destination: &mut TargetBitmap, destination_format: u32, source: &TargetBitmap, source_format: u32, alpha: u32) {
+    if alpha == 0 {
+        return convert_copy(destination, destination_format, source, source_format);
+    }
+    let keep = 256u32.wrapping_sub(alpha) as u16;
+    match (source_format, destination_format) {
+        // sub_40A610: clear the destination.
+        (1, 1) if alpha >= 0x100 => {
+            for y in 0..destination.height {
+                let at = y * destination.stride;
+                let end = (at + destination.width * 4).min(destination.pixels.len());
+                destination.pixels[at.min(end)..end].fill(0);
+            }
+        }
+        // sub_40DF10: scale by 256 - alpha over the source size, alpha 0.
+        (1, 1) => {
+            for y in 0..source.height {
+                for x in 0..source.width {
+                    let pixel = read_pixel(source, y * source.stride + 4 * x);
+                    let channel = |c: u8| (u16::from(c).wrapping_mul(keep) >> 8).min(255) as u8;
+                    let value = [channel(pixel[0]), channel(pixel[1]), channel(pixel[2]), 0];
+                    write_pixel(destination, y * destination.stride + 4 * x, u32::from_le_bytes(value));
+                }
+            }
+        }
+        // sub_40E040: blend the scaled source over the destination by the
+        // source alpha; pairs with both alphas zero are left alone.
+        (2, 1) => {
+            for y in 0..source.height {
+                for x in (0..source.width).step_by(2) {
+                    let pair = x + 1 < source.width;
+                    let pixels = [x, x + 1].map(|column| read_pixel(source, y * source.stride + 4 * column));
+                    if pair && pixels[0][3] == 0 && pixels[1][3] == 0 || !pair && pixels[0][3] >> 1 == 0 {
+                        continue;
+                    }
+                    for (index, pixel) in pixels.into_iter().enumerate().take(1 + pair as usize) {
+                        let at = y * destination.stride + 4 * (x + index);
+                        let target = read_pixel(destination, at);
+                        let weight = i32::from(pixel[3] >> 1);
+                        let mut value = [0u8; 4];
+                        for lane in 0..4 {
+                            let scaled = if lane == 3 { 0 } else { i32::from((u16::from(pixel[lane]).wrapping_mul(keep)) >> 8) };
+                            value[lane] = lerp7(target[lane], scaled, if lane == 3 { 0 } else { weight });
+                        }
+                        write_pixel(destination, at, u32::from_le_bytes(value));
+                    }
+                }
+            }
+        }
+        // sub_40E220: scalar "over" with the destination alpha.
+        (2, 2) => {
+            let keep = 256u32.wrapping_sub(alpha);
+            for y in 0..source.height {
+                for x in 0..source.width {
+                    let pixel = read_pixel(source, y * source.stride + 4 * x);
+                    if pixel[3] == 0 {
+                        continue;
+                    }
+                    let at = y * destination.stride + 4 * x;
+                    let target = read_pixel(destination, at);
+                    let sa = u32::from(pixel[3]);
+                    let lower = u32::from(target[3]).wrapping_mul(256 - sa);
+                    let total = lower.wrapping_add(sa << 8);
+                    let source_weight = (keep.wrapping_mul(sa) << 16) / total;
+                    let destination_weight = (lower << 16) / total;
+                    let channel = |lane: usize| {
+                        (source_weight.wrapping_mul(u32::from(pixel[lane]))
+                            .wrapping_add(destination_weight.wrapping_mul(u32::from(target[lane])))
+                            >> 16) as u8
+                    };
+                    let value = [channel(0), channel(1), channel(2), (total >> 8) as u8];
+                    write_pixel(destination, at, u32::from_le_bytes(value));
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// `sub_419CF0` (91:1D) on 32-bit bitmaps: 0 copy/convert, 1 XOR with
+/// `colour`, 2 monochrome tint, 3 fade toward `colour`, 4/5 saturating
+/// add/subtract of `colour * alpha >> 8`; `alpha` is 0..=256. The format-0
+/// (RGB555) branches of types 3 are not reachable from the app's rasters.
+pub(crate) fn process(
+    destination: &mut TargetBitmap,
+    destination_format: u32,
+    source: &TargetBitmap,
+    source_format: u32,
+    kind: u32,
+    colour: u32,
+    alpha: u32,
+) {
+    let same = destination_format == source_format;
+    let truecolor = matches!(source_format, 1 | 2);
+    let bytes = colour.to_le_bytes();
+    let half = (alpha as u16 >> 1) as i32;
+    match kind {
+        0 => convert_copy(destination, destination_format, source, source_format),
+        // sub_410D80 / sub_410F80
+        1 if same && truecolor => for_each_pair(destination, source, source_format == 2, |pixel| {
+            let mut value = pixel;
+            for lane in 0..3 {
+                value[lane] = lerp7(pixel[lane], i32::from(pixel[lane] ^ bytes[lane]), half);
+            }
+            value
+        }),
+        // sub_4111E0 / sub_4113B0: luminance 29/150/77 times the colour.
+        2 if same && truecolor => for_each_pair(destination, source, source_format == 2, |pixel| {
+            let luminance = (29 * u32::from(pixel[0]) + 150 * u32::from(pixel[1]) + 77 * u32::from(pixel[2])) & 0xFFFF;
+            let mut value = pixel;
+            for lane in 0..3 {
+                value[lane] = lerp7(pixel[lane], ((luminance * u32::from(bytes[lane])) >> 16) as i32, half);
+            }
+            value
+        }),
+        3 if colour == 0 => fade_to_black(destination, destination_format, source, source_format, alpha),
+        // sub_4116F0
+        3 if same && truecolor => for_each_pair(destination, source, false, |pixel| {
+            let keep = 256u16.wrapping_sub(alpha as u16);
+            let mut value = pixel;
+            for lane in 0..3 {
+                let add = (alpha as u16).wrapping_mul(u16::from(bytes[lane]));
+                value[lane] = (u16::from(pixel[lane]).wrapping_mul(keep).saturating_add(add) >> 8).min(255) as u8;
+            }
+            value
+        }),
+        // sub_4118E0 / sub_411A00
+        4 | 5 if same && truecolor => {
+            let step = bytes.map(|c| ((u16::from(c).wrapping_mul(alpha as u16)) >> 8).min(255) as u8);
+            for_each_pair(destination, source, false, |pixel| {
+                let mut value = pixel;
+                for lane in 0..3 {
+                    value[lane] = if kind == 4 { pixel[lane].saturating_add(step[lane]) } else { pixel[lane].saturating_sub(step[lane]) };
+                }
+                value
+            })
+        }
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -402,6 +614,7 @@ mod tests {
                 1 => concentrate(&mut destination, &source, p0, p1, p2),
                 2 => scale_nearest(&mut destination, &source, p0, p1),
                 3 => scale_filtered(&mut destination, &source, p2, p0, p1),
+                4 => process(&mut destination, p2 >> 8 & 0xFF, &source, p2 & 0xFF, p2 >> 16, p0, p1),
                 _ => panic!("unknown kernel {kind}"),
             }
             assert_eq!(destination.pixels, expected, "{}", path.display());

@@ -165,3 +165,37 @@ for kind, address in ((2, 0x495680), (3, 0x495880)):
             after = mu.mem_read(dst_data, dw * dh * 4)
             emit(f"scale{kind}_{n}_{fmt}", kind, w, h, dw, dh, (xs, ys, fmt), src, dst_before, after)
 print("scales done")
+
+# kind 4: sub_419CF0 (91:1D), cdecl (destination, source, type, colour,
+# alpha, threaded=0). The alpha table qword_50B0F0 is filled like the
+# first loop of sub_407760 (entry k = k in the colour lanes, 0 in alpha);
+# the rest of that function needs the CRT.
+# p2 = type << 16 | destination format << 8 | source format.
+for k in range(129):
+    mu.mem_write(0x50B0F0 + 16 * k, struct.pack("<8H", k, k, k, 0, k, k, k, 0))
+process_cases = []
+for kind in range(6):
+    for dfmt, sfmt in ((1, 1), (2, 2), (1, 2), (2, 1)):
+        for colour, alpha in ((0, 0), (0, 128), (0, 256), (0x00FF8040, 77), (0x12345678, 256),
+                              (0x00FFFFFF, 1), (rng.randrange(1 << 32), rng.randrange(257))):
+            process_cases.append((kind, dfmt, sfmt, colour, alpha))
+for n, (kind, dfmt, sfmt, colour, alpha) in enumerate(process_cases):
+    heap_top = global_heap
+    sw, sh = rng.randrange(1, 12), rng.randrange(1, 10)
+    dw, dh = (sw, sh) if n % 3 else (rng.randrange(1, 12), rng.randrange(1, 10))
+    if kind == 0 or (kind == 3 and colour == 0):
+        # Kernels that write over the source size need the room.
+        dw, dh = max(dw, sw), max(dh, sh)
+    src = rand_pixels(sw * sh)
+    for i in range(0, len(src), 4 * 3):
+        src[i + 3] = 0
+    if n % 4 == 0 and len(src) >= 8:
+        src[3] = src[7] = 0
+    dst_before = rand_pixels(dw * dh)
+    src_desc, _ = bitmap(sw, sh, src, sfmt)
+    dst_desc, dst_data = bitmap(dw, dh, dst_before, dfmt)
+    call(0x419CF0, [dst_desc, src_desc, kind, colour, alpha, 0], {})
+    after = mu.mem_read(dst_data, dw * dh * 4)
+    emit(f"process_{n:03}", 4, sw, sh, dw, dh, (colour, alpha, kind << 16 | dfmt << 8 | sfmt),
+         src, dst_before, after)
+print("process done", len(process_cases))

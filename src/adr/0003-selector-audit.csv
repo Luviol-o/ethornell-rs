@@ -451,7 +451,7 @@ selector,handler,symbol,status
 91:1A,481F00,Graph91_1A_ReplaceBitmapRgbPreserveAlpha,verified
 91:1B,481FA0,Graph91_1B_ConcentrateBitmap,verified
 91:1C,4820C0,Graph91_1C_ScaleTrueColorBitmap,verified
-91:1D,4821F0,Graph91_1D_ProcessBitmap,todo
+91:1D,4821F0,Graph91_1D_ProcessBitmap,verified
 91:1E,4822F0,Graph91_1E_ApplyGrayscaleMask,todo
 91:1F,4823D0,Graph91_1F_CloneBitmap,verified
 91:31,482460,Graph91_31_SetObjectSuppressed,verified

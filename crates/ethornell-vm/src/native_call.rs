@@ -17134,7 +17134,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_PROCESS_BITMAP_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_4816F0 calls sub_4199D0 and selects one of six target pixel-processing operations with a native alpha parameter.",
+        notes: "sub_403110 -> sub_419CF0 ported literally for 32-bit bitmaps (bitmap_kernels::process: 0 copy/convert sub_40AF70, 1 XOR sub_410D80/sub_410F80, 2 mono tint sub_4111E0/sub_4113B0, 3 fade sub_4116F0 or colour 0 sub_40DE80, 4/5 saturating add/sub sub_4118E0/sub_411A00) and matched under Unicorn (src/tools/emu_kernels.py). The RGB555 branches (format 0) have no app raster.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_APPLY_GRAYSCALE_MASK,
@@ -20304,6 +20304,7 @@ const PORTABLE_EQUIVALENT_OPCODES: &[NativeOpcode] = &[
     opcodes::USER2_SET_RAIN_STEP,
     opcodes::GRAPH91_CONCENTRATE_BITMAP,
     opcodes::GRAPH91_SCALE_TRUE_COLOR_BITMAP,
+    opcodes::GRAPH91_PROCESS_BITMAP,
 ];
 
 const PARTIAL_IMPLEMENTATION_OPCODES: &[NativeOpcode] = &[
@@ -20383,7 +20384,6 @@ const PARTIAL_IMPLEMENTATION_OPCODES: &[NativeOpcode] = &[
     opcodes::GRAPH92_LOAD_BURIKO_MOVIE_RESOURCE,
     opcodes::GRAPH91_COMPOSITE_BITMAP_RECT_ALPHA,
     opcodes::GRAPH91_COMPOSITE_BITMAP_RECT_CONVERTED,
-    opcodes::GRAPH91_PROCESS_BITMAP,
     opcodes::GRAPH91_APPLY_GRAYSCALE_MASK,
     opcodes::SOUND_SET_BGM_PRIMARY_VOLUME,
     opcodes::SOUND_SET_SE_PRIMARY_VOLUME,
