@@ -4570,6 +4570,10 @@ impl RuntimeTraceApi {
         // window layouts, and after 16 such switches GraphCreateWindowObject
         // returned 0.
         self.clear_bitmap_text(surface);
+        // So does its caret (child sprite 0).
+        if self.message_caret.is_some_and(|caret| caret.window == surface) {
+            self.message_caret = None;
+        }
         self.graph_object_layers.remove(&surface);
         self.graph_object_enabled.remove(&surface);
         self.graph_object_draw_enabled.remove(&surface);
@@ -10426,6 +10430,15 @@ mod input_tests {
             caret_at(&api),
             [(window_x + 12.0, end.1 + layout.line_height)]
         );
+        // A new message, or the window's release, takes the caret away:
+        // window handles are reused slots.
+        api.start_native_message("ab".to_string(), Some(window));
+        assert!(caret_at(&api).is_empty());
+        GraphApi::reveal_native_message(&mut api);
+        GraphApi::tick_native_message_caret(&mut api, 4000);
+        assert_eq!(caret_at(&api).len(), 1);
+        assert!(api.remove_graph_surface(window));
+        assert!(api.message_caret.is_none());
     }
 
     #[test]
