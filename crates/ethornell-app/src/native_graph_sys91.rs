@@ -2137,6 +2137,17 @@ impl RuntimeTraceApi {
         let mut output = self
             .graph_bitmap_image(destination)
             .unwrap_or_else(|| source_image.clone());
+        let format = self.bitmap_formats.get(&destination).copied().unwrap_or(2);
+        if process_type == 0 {
+            // sub_4199D0 case 0 is sub_40AF50, the plain copy of mode 0x80:
+            // colour and alpha, whatever the last two arguments say.
+            let source_format = self.bitmap_formats.get(&source).copied().unwrap_or(2);
+            if crate::bitmap_blend::blit_copy(&mut output, format, &source_image, source_format, 0, 0)
+            {
+                self.graph91_store_bitmap(destination, output, format);
+            }
+            return;
+        }
         let width = output.width.min(source_image.width);
         let height = output.height.min(source_image.height);
         for y in 0..height {
@@ -2162,7 +2173,6 @@ impl RuntimeTraceApi {
                 output.rgba[doff + 3] = output.rgba[doff + 3].max(source_image.rgba[so + 3]);
             }
         }
-        let format = self.bitmap_formats.get(&destination).copied().unwrap_or(2);
         self.graph91_store_bitmap(destination, output, format);
     }
 

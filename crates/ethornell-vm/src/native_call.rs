@@ -2543,6 +2543,12 @@ pub mod opcodes {
         group: 0x92,
         id: 0x1A,
     };
+    /// Not in the reference build; inferred from Wonderful Everyday's
+    /// `logwnd._bp`: a white outline of a bitmap's opaque pixels.
+    pub const GRAPH92_OUTLINE_BITMAP_HALO: NativeOpcode = NativeOpcode {
+        group: 0x92,
+        id: 0x1B,
+    };
     pub const GRAPH92_DRAW_BITMAP_TEXT_MEASURE: NativeOpcode = NativeOpcode {
         group: 0x92,
         id: 0x1C,
@@ -9831,6 +9837,23 @@ const GRAPH92_INVERT_ALPHA_BITMAP_PARAMETERS: &[NativeParameterSpec] = &[NativeP
     kind: "format-3 bitmap handle",
     description: "Alpha/grayscale bytes inverted in place.",
 }];
+const GRAPH92_OUTLINE_BITMAP_HALO_PARAMETERS: &[NativeParameterSpec] = &[
+    NativeParameterSpec {
+        name: "destination",
+        kind: "bitmap handle",
+        description: "Created as a format-2 bitmap 16 pixels wider and taller than the source.",
+    },
+    NativeParameterSpec {
+        name: "source",
+        kind: "bitmap handle",
+        description: "Bitmap whose opaque pixels (text) are outlined.",
+    },
+    NativeParameterSpec {
+        name: "width",
+        kind: "i32",
+        description: "Outline width in pixels (1 in logwnd._bp).",
+    },
+];
 const GRAPH92_COMPOSE_ALPHA_PARAMETERS: &[NativeParameterSpec] = &[
     NativeParameterSpec {
         name: "temporary_alpha_bitmap",
@@ -17855,6 +17878,14 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         notes: "0x00485A60 intersects translated rectangles, derives or blends alpha from format-2 sources, and clears destination alpha outside the overlap.",
     },
     NativeOpcodeSpec {
+        opcode: opcodes::GRAPH92_OUTLINE_BITMAP_HALO,
+        symbol: "Graph92_1B_OutlineBitmapHalo",
+        parameters: GRAPH92_OUTLINE_BITMAP_HALO_PARAMETERS,
+        returns: "void",
+        scheduling: NativeSchedulingEffect::Continue,
+        notes: "Absent from the reference build's dispatch table, and Wonderful Everyday's executable is encrypted (SteamStub), so the behaviour is inferred from its only caller, logwnd._bp: per log entry it copies the entry's text bitmap into X (90:18 mode 0x80), calls 92:1B(B, X, 1), copies B into a cleared format-2 bitmap of B's size (91:1D type 0) and blends that over X at (-8, -8) with transparency 64 (90:18 mode 1). The original's log text has a light edge about one pixel wide around dark glyphs. Portable: B is X plus 8 pixels on every side, white, with the alpha of X's coverage summed over a (2 * width + 1) square box (capped at 255, as the text glow of style mode 2) outside X's own coverage, so the blend outlines the glyphs without lightening them.",
+    },
+    NativeOpcodeSpec {
         opcode: opcodes::GRAPH92_DRAW_BITMAP_TEXT_MEASURE,
         symbol: "Graph92_1C_DrawBitmapTextAndMeasureAdvance",
         parameters: GRAPH92_BITMAP_TEXT_MEASURE_PARAMETERS,
@@ -18068,7 +18099,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_PROCESS_BITMAP_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_4816F0 calls sub_4199D0 and selects one of six target pixel-processing operations with a native alpha parameter.",
+        notes: "sub_4816F0 calls sub_4199D0 and selects one of six target pixel-processing operations with a native alpha parameter. Type 0 is sub_40AF50, the plain copy of blit mode 0x80, which uses neither parameter.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_APPLY_GRAYSCALE_MASK,
@@ -20624,7 +20655,7 @@ const TARGET_CONFIRMED_OPCODES: &[NativeOpcode] = &[
     opcodes::SOUND_PLAY_WAVE_ASYNC,
 ];
 
-const TARGET_INFERRED_OPCODES: &[NativeOpcode] = &[];
+const TARGET_INFERRED_OPCODES: &[NativeOpcode] = &[opcodes::GRAPH92_OUTLINE_BITMAP_HALO];
 
 const ABI_ONLY_DOCUMENTED_OPCODES: &[NativeOpcode] = &[];
 
@@ -20951,6 +20982,7 @@ const PORTABLE_EQUIVALENT_OPCODES: &[NativeOpcode] = &[
 ];
 
 const PARTIAL_IMPLEMENTATION_OPCODES: &[NativeOpcode] = &[
+    opcodes::GRAPH92_OUTLINE_BITMAP_HALO,
     opcodes::USER2_CREATE_PARTICLE_SCREEN,
     opcodes::USER2_RELEASE_PARTICLE_SCREEN,
     opcodes::USER2_SET_PARTICLE_SCREEN_ENABLED,
