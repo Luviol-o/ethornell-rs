@@ -693,6 +693,8 @@ struct RuntimeTraceApi {
     fullwidth_glyph_cell_width: i32,
     surface_text_states: BTreeMap<i32, SurfaceTextState>,
     surface_text_buffers: BTreeMap<i32, String>,
+    /// Message text each window holds since its last clear (`text::MessagePage`).
+    message_pages: BTreeMap<i32, text::MessagePage>,
     /// Target CDspObjKnob registry: 32 slots, handles 0xF0000000 | slot.
     graph_knob_states: BTreeMap<i32, GraphKnobState>,
     /// Knob→target is a control pointer, not a CDspObj member/parent edge.
@@ -1158,6 +1160,7 @@ impl RuntimeTraceApi {
             fullwidth_glyph_cell_width: 0,
             surface_text_states: BTreeMap::new(),
             surface_text_buffers: BTreeMap::new(),
+            message_pages: BTreeMap::new(),
             graph_knob_states: BTreeMap::new(),
             graph_knob_watches: VecDeque::new(),
             graph_knob_input_mode: 0,
@@ -4509,6 +4512,7 @@ impl RuntimeTraceApi {
             .retain(|key, _| !is_composite(key));
         self.surface_text_states.remove(&surface);
         self.surface_text_buffers.remove(&surface);
+        self.message_pages.remove(&surface);
         // Text drawn into the window (Graph92:91 runs) goes with it, as in
         // the target, where it is part of the window's bitmap. Its text node
         // is keyed by the handle, so leaving it also kept the slot reserved
@@ -15454,6 +15458,70 @@ mod input_tests {
         );
     }
 
+    fn message_window(api: &mut super::RuntimeTraceApi) -> i32 {
+        let window = 0xB000_0000_u32 as i32;
+        api.graph_surfaces
+            .insert(window, RuntimeSurface::display(window, 1128.0, 200.0));
+        api.reset_window_text_cursor(window);
+        window
+    }
+
+    fn shown_message(api: &super::RuntimeTraceApi) -> String {
+        let node = api.text_runtime.target_node.unwrap();
+        api.text_nodes[&node].text.clone()
+    }
+
+    #[test]
+    fn a_message_continues_the_text_its_window_already_shows() {
+        let manager =
+            ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let mut api = super::RuntimeTraceApi::new(manager);
+        let window = message_window(&mut api);
+        let home = api.surface_text_states[&window];
+
+        // Wonderful Everyday extends a line in parts: messages that don't
+        // wait at their end, with neither 92:8E nor a page feed between.
+        api.start_native_message("Part one,".into(), Some(window));
+        api.tick_text(10_000);
+        assert_eq!(shown_message(&api), "Part one,");
+        let after_first = api.surface_text_states[&window];
+        assert_eq!(after_first.cursor_y, home.cursor_y);
+        assert!(after_first.cursor_x > home.cursor_x);
+
+        api.start_native_message(" part two.".into(), Some(window));
+        // The first part stays on screen while the second is typed out.
+        assert_eq!(shown_message(&api), "Part one,");
+        api.tick_text(10_000);
+        assert_eq!(shown_message(&api), "Part one, part two.");
+        assert!(api.surface_text_states[&window].cursor_x > after_first.cursor_x);
+    }
+
+    #[test]
+    fn a_reset_or_a_page_feed_starts_a_new_page() {
+        let manager =
+            ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let mut api = super::RuntimeTraceApi::new(manager);
+        let window = message_window(&mut api);
+        let home = api.surface_text_states[&window];
+
+        api.start_native_message("First line.".into(), Some(window));
+        api.tick_text(10_000);
+        // scrmsg._bp ends a waited line with Graph90:90(window, "\x0c"):
+        // sub_433890 clears the window and sends the cursor home.
+        api.start_native_message("\x0c".into(), Some(window));
+        assert_eq!(shown_message(&api), "");
+        assert_eq!(api.surface_text_states[&window].cursor_x, home.cursor_x);
+        api.start_native_message("Second line.".into(), Some(window));
+        api.tick_text(10_000);
+        assert_eq!(shown_message(&api), "Second line.");
+
+        // Graph92:8E (sub_440F80) clears the window too.
+        call_graph(&mut api, 0x92, 0x8e, &mut vec![Value::Int(window)]).unwrap();
+        api.start_native_message("Third line.".into(), Some(window));
+        api.tick_text(10_000);
+        assert_eq!(shown_message(&api), "Third line.");
+    }
+
     #[test]
     fn graph_icon_batch_rebuilds_window_backing_in_record_order() {
         let manager =
@@ -16136,8 +16204,17 @@ mod input_tests {
         api.start_native_message("字幕".into(), Some(window));
         api.tick_text(1000);
         let target = api.text_runtime.target_node.unwrap();
+        // Byte 0x0C is CProcDspMsg's page feed (vtable+40, sub_433890): it
+        // clears the window and sends the cursor home.
         assert_eq!(api.start_native_message("\x0c".into(), Some(window)), 0);
-        assert_eq!(api.text_nodes[&target].text, "字幕");
+        assert_eq!(api.text_nodes[&target].text, "");
+        assert_eq!(
+            (
+                api.surface_text_states[&window].cursor_x,
+                api.surface_text_states[&window].cursor_y
+            ),
+            (118, 58)
+        );
     }
 
     #[test]
