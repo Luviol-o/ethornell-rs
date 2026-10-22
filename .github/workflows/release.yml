@@ -11,7 +11,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/') && 'rolling' || github.ref }}
+  group: release-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -45,6 +45,38 @@ jobs:
         with:
           name: ethornell-linux-${{ matrix.arch }}
           path: dist/ethornell-linux-${{ matrix.arch }}.tar.gz
+          if-no-files-found: error
+
+  freebsd:
+    name: FreeBSD (x86_64)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build in a FreeBSD VM
+        uses: vmactions/freebsd-vm@v1
+        with:
+          release: "14.4"
+          arch: x86_64
+          usesh: true
+          sync: rsync
+          copyback: true
+          prepare: |
+            set -e
+            pkg update
+            pkg install -y git curl rust pkgconf cmake gmake alsa-lib \
+              libX11 libXcursor libXi libXrandr libxcb wayland libxkbcommon vulkan-loader
+          run: |
+            set -e
+            freebsd-version
+            rustc -V
+            cargo build --release --locked -p ethornell-cli --bin ethornell
+            mkdir -p dist
+            test -f target/release/ethornell
+            tar -C target/release -czf dist/ethornell-freebsd-x86_64.tar.gz ethornell
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ethornell-freebsd-x86_64
+          path: dist/ethornell-freebsd-x86_64.tar.gz
           if-no-files-found: error
 
   macos:
@@ -167,8 +199,9 @@ jobs:
 
   rolling:
     name: Publish rolling prerelease
-    if: github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/')
-    needs: [linux, macos, windows, android, ios, web]
+    # Only main replaces the public pre-release; other branches just build.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [linux, freebsd, macos, windows, android, ios, web]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -187,6 +220,7 @@ jobs:
         run: |
           set -euo pipefail
           files=(dist/ethornell-linux-{x86_64,aarch64}.tar.gz
+                 dist/ethornell-freebsd-x86_64.tar.gz
                  dist/ethornell-macos-universal.{zip,tar.gz}
                  dist/ethornell-windows-x86_64.zip
                  dist/ethornell-android.apk
@@ -207,7 +241,7 @@ jobs:
   release:
     name: Publish versioned release
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    needs: [linux, macos, windows, android, ios, web]
+    needs: [linux, freebsd, macos, windows, android, ios, web]
     runs-on: ubuntu-latest
     permissions:
       contents: write

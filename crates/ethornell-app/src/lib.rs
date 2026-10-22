@@ -1468,6 +1468,16 @@ impl RuntimeTraceApi {
         let bitmap = update.bitmap;
         let width = update.image.width;
         let height = update.image.height;
+        // A 92:F2 slot was created at the picture size when the graph
+        // connected; sub_45C260 copies each sample into that same descriptor.
+        // Keep its resource (and generation) so projected sprites bound to it
+        // stay valid until moviemngr._bp refreshes them (90:53).
+        if self.graph_resources.contains_key(&bitmap)
+            && self.bitmap_dimensions.get(&bitmap) == Some(&(width, height))
+            && self.replace_graph_bitmap_pixels(bitmap, update.image.clone())
+        {
+            return;
+        }
         let key = format!("runtime:movie:{bitmap}");
         self.store_graph_image(key.clone(), update.image);
         self.graph_resources
@@ -1674,7 +1684,10 @@ impl RuntimeTraceApi {
     }
 
     fn is_primary_framebuffer(&self, bitmap: i32) -> bool {
-        if bitmap == NATIVE_SCREEN_BITMAP || self.primary_bitmap == Some(bitmap) {
+        // Slot 3790 is not special to BGI 1.622: endsys._bp captures the
+        // screen into it (90:04/05) only when 90:16 reports it free, and the
+        // save thumbnail then reads it as format 1.
+        if self.primary_bitmap == Some(bitmap) {
             return true;
         }
         if self.primary_bitmap.is_some() {
@@ -3507,6 +3520,17 @@ impl RuntimeTraceApi {
                 }
             }
             trace_graph!(self, "finalize object #{object}");
+        }
+        // Filter, map, effector and BackML rasters keep their layer under the
+        // object's own handle, outside graph_object_layers. A released object
+        // is no longer in the display list, so its layer must not be drawn.
+        if self
+            .graph_layers
+            .get(&object)
+            .is_some_and(|layer| layer.owner_object == Some(object))
+        {
+            self.graph_layers.remove(&object);
+            removed = true;
         }
         removed
     }
@@ -5994,6 +6018,11 @@ impl RuntimeTraceApi {
         self.tick_native_effect_state(elapsed_ms);
         let movie_elapsed_ms = elapsed_ms.min(i32::MAX as u64) as i32;
         for update in self.graph_effects.tick_movies(movie_elapsed_ms) {
+            // sub_45C260 -> sub_408AA0 -> sub_497060(0x10000, slot, 0):
+            // every delivered sample is a native event; sysmsg._bp posts it
+            // to moviemngr._bp, which counts frames at record +52 and
+            // refreshes the sprite showing the slot.
+            self.queued_system_events.push_back([0x10000, update.bitmap, 0]);
             self.store_movie_frame(update);
         }
         self.sync_movie_audio();
@@ -7859,6 +7888,12 @@ impl RuntimeTraceApi {
                     .display_order_serial(surface.id, None)
                     .saturating_add(1)
                     .saturating_add(layer.z.max(0) as u64);
+                // They sort with the window's native key (sub_42B520 draws
+                // its buffer, then its children), or the window's own item,
+                // which carries that key, covers them.
+                if let Some(key) = self.graph90_native_sort_key(surface.id) {
+                    order_serial = (u64::from(key & 65535) << 32) | (order_serial & 0xffff_ffff);
+                }
             }
             items.push(RuntimeGraphDrawItem {
                 owner_object: layer.owner_object.or(Some(*layer_id)),
@@ -20704,11 +20739,17 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
         if let Ok(name) = std::env::var("COMPUTERNAME") {
             return name;
         }
-        let mut buffer = [0u8; 256];
-        // SAFETY: the buffer is writable for its full length.
-        let ok = unsafe { libc::gethostname(buffer.as_mut_ptr().cast(), buffer.len()) } == 0;
-        let end = buffer.iter().position(|byte| *byte == 0).unwrap_or(buffer.len());
-        let host = if ok { String::from_utf8_lossy(&buffer[..end]).into_owned() } else { String::new() };
+        #[cfg(unix)]
+        let host = {
+            let mut buffer = [0u8; 256];
+            // SAFETY: the buffer is writable for its full length.
+            let ok = unsafe { libc::gethostname(buffer.as_mut_ptr().cast(), buffer.len()) } == 0;
+            let end = buffer.iter().position(|byte| *byte == 0).unwrap_or(buffer.len());
+            if ok { String::from_utf8_lossy(&buffer[..end]).into_owned() } else { String::new() }
+        };
+        // Windows always sets COMPUTERNAME; the web has no host name.
+        #[cfg(not(unix))]
+        let host = String::new();
         host.split('.').next().unwrap_or_default().to_ascii_uppercase().chars().take(15).collect()
     }
 
@@ -26252,6 +26293,12 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                             .set_movie_options(bitmap, looping, volume);
                         if options == 0 {
                             self.graph_process_handles.insert(bitmap);
+                            // sub_45C1C0 -> sub_407D90: connecting the graph
+                            // creates the slot at the picture size, format 1,
+                            // cleared, so the script can bind it at once.
+                            if let Some((width, height)) = self.graph_effects.movie_size(bitmap) {
+                                self.recreate_native_bitmap(bitmap, width, height, 1);
+                            }
                         }
                         options
                     } else {

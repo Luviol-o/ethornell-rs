@@ -125,7 +125,12 @@ struct MovieDecoder {
     packet_index: usize,
     frame_index: Option<usize>,
     current_frame: Option<Arc<Frame>>,
+    /// Index of the frame last handed to the bitmap. The target's renderer
+    /// (DCVideoImageSender, sub_45C260) copies each sample once.
+    delivered_index: Option<usize>,
     frame_interval_ms: i32,
+    /// Picture size from the first sequence header.
+    size: Option<(u32, u32)>,
     flushed: bool,
     failed: bool,
 }
@@ -161,6 +166,9 @@ impl MovieDecoder {
             .iter()
             .find_map(|packet| sequence_frame_rate(&packet.data))
             .unwrap_or(25.0);
+        let size = packets
+            .iter()
+            .find_map(|packet| sequence_frame_size(&packet.data));
         Some(Self {
             packets,
             audio: (!audio.is_empty()).then(|| StreamBytes(audio.into())),
@@ -169,7 +177,9 @@ impl MovieDecoder {
             packet_index: 1,
             frame_index: None,
             current_frame: None,
+            delivered_index: None,
             frame_interval_ms: (1000.0 / frame_rate).round().max(1.0) as i32,
+            size,
             flushed: false,
             failed: false,
         })
@@ -181,6 +191,7 @@ impl MovieDecoder {
         self.packet_index = 0;
         self.frame_index = None;
         self.current_frame = None;
+        self.delivered_index = None;
         self.flushed = false;
         self.failed = false;
     }
@@ -199,6 +210,10 @@ impl MovieDecoder {
             }
         }
         let frame = self.current_frame.as_ref()?;
+        if self.delivered_index == self.frame_index {
+            return None;
+        }
+        self.delivered_index = self.frame_index;
         let mut rgba = vec![0; frame.width * frame.height * 4];
         frame_to_rgba_bt601_limited(frame, &mut rgba);
         Some(DecodedImage {
@@ -447,6 +462,9 @@ impl GraphEffectRegistry {
         process.audio_generation += 1;
         if let Some(movie) = process.movie.as_mut() {
             let _ = movie.frame_at(position_ms);
+            // A seek on a running graph renders the sample at the new
+            // position again.
+            movie.delivered_index = None;
         }
         0
     }
@@ -522,6 +540,12 @@ impl GraphEffectRegistry {
         self.processes
             .get(&handle)
             .is_some_and(|process| process.movie.is_some() && process.active && !process.paused)
+    }
+
+    /// The picture size the target's renderer (DCVideoImageSender,
+    /// sub_45C1C0) gives the bitmap slot when the graph connects.
+    pub(crate) fn movie_size(&self, handle: i32) -> Option<(u32, u32)> {
+        self.processes.get(&handle)?.movie.as_ref()?.size
     }
 
     pub(crate) fn is_movie(&self, handle: i32) -> bool {
@@ -705,9 +729,25 @@ fn sequence_frame_rate(bytes: &[u8]) -> Option<f64> {
     })
 }
 
+/// Horizontal and vertical size of an MPEG-1/2 sequence header (12 bits each).
+fn sequence_frame_size(bytes: &[u8]) -> Option<(u32, u32)> {
+    bytes.windows(7).find_map(|window| {
+        let width = (u32::from(window[4]) << 4) | u32::from(window[5] >> 4);
+        let height = (u32::from(window[5] & 0x0F) << 8) | u32::from(window[6]);
+        (window[..4] == [0, 0, 1, 0xB3] && width > 0 && height > 0).then_some((width, height))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sequence_header_frame_size_is_decoded() {
+        // 1280 = 0x500, 720 = 0x2D0.
+        let bytes = [0, 0, 1, 0xB3, 0x50, 0x02, 0xD0, 3];
+        assert_eq!(sequence_frame_size(&bytes), Some((1280, 720)));
+    }
 
     #[test]
     fn sequence_header_frame_rate_is_decoded() {
@@ -775,6 +815,8 @@ mod tests {
             registry.configure_media(5, "a".into(), "m".into(), &tiny_movie()),
             0
         );
+        // 92:F2 sizes the bitmap slot from the sequence header.
+        assert_eq!(registry.movie_size(5), Some((320, 240)));
         let audio = registry.movie_audio();
         assert_eq!(audio.len(), 1);
         assert_eq!(&*audio[0].bytes.0, b"firstsecond");
