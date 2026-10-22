@@ -790,6 +790,9 @@ impl RuntimeTraceApi {
                 let x = pop_int_value(stack).unwrap_or_default();
                 let window = pop_int_value(stack).unwrap_or_default();
                 if self.graph_surfaces.contains_key(&window) {
+                    // The next message starts at the new cursor; the engine's
+                    // one message node can't keep the old text elsewhere.
+                    self.message_pages.remove(&window);
                     let state = self.surface_text_states.entry(window).or_default();
                     state.cursor_x = x;
                     state.cursor_y = y;
