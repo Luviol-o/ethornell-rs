@@ -21924,7 +21924,8 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
             return read_runtime_bytes(&self.manager, archive, entry);
         }
         let found = find_runtime_resource(&self.manager, archive, entry)?;
-        self.manager.read_by_entry_raw(&found).ok()
+        let bytes = self.manager.read_by_entry_raw(&found).ok();
+        regress_probe::probe_scenario_load(&self.manager, archive, entry, bytes)
     }
 
     fn archive_entry_exists(&mut self, archive: &str, entry: &str) -> bool {
