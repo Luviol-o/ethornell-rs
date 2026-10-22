@@ -3118,10 +3118,10 @@ impl Vm {
                 name: "push_offset",
                 ..
             } => {
-                self.push_value(Value::Func {
-                    program_index,
-                    offset: read_op_u32(instruction),
-                });
+                // Opcode 0x06 (sub_473650): the plain code-region offset
+                // `insn_start + disp`, without a segment tag.
+                let code = self.code_offset_of(program_index, read_op_u32(instruction));
+                self.push_value(Value::Int(code as i32));
             }
             BpOpcode::Known {
                 name: "load_base", ..
@@ -3266,7 +3266,9 @@ impl Vm {
                         self.program_name(program_index)
                     )));
                 }
-                next_pc = self.jump_target_index(program_index, dest)?;
+                let (target_program, parser_offset) = self.resolve_code_target(program_index, dest);
+                self.current_program = target_program;
+                next_pc = self.jump_target_index(target_program, parser_offset)?;
             }
             BpOpcode::Known { name: "jc", .. } => {
                 let kind = read_op_u8(instruction);
@@ -3298,7 +3300,9 @@ impl Vm {
                     );
                 }
                 if take {
-                    next_pc = self.jump_target_index(program_index, dest)?;
+                    let (target_program, parser_offset) = self.resolve_code_target(program_index, dest);
+                    self.current_program = target_program;
+                    next_pc = self.jump_target_index(target_program, parser_offset)?;
                 }
             }
             BpOpcode::Known { name: "call", .. } => match {
@@ -3446,9 +3450,10 @@ impl Vm {
                             "VM ret"
                         );
                     }
-                    self.current_program = program_id;
+                    let (return_program, parser_offset) = self.resolve_code_target(program_id, ret_offset);
+                    self.current_program = return_program;
                     next_pc = self
-                        .jump_target_index(program_id, ret_offset)
+                        .jump_target_index(return_program, parser_offset)
                         .unwrap_or(fallback_ret);
                 } else {
                     self.halted = true;
@@ -6898,7 +6903,7 @@ impl Vm {
         // a module only rewinds the chain (sub_444D80), so its code stays
         // callable until a later module is loaded over it; senmomo's ipl._bp
         // calls environ._bp's entry again after FreeLastProgramModule.
-        for index in (1..self.programs.len()).rev() {
+        for index in (0..self.programs.len()).rev() {
             let base = self.program_code_bases.get(index).copied()?;
             let program = self.programs.get(index)?;
             let size = Self::program_target_code_size(program);
@@ -6912,6 +6917,26 @@ impl Vm {
             }
         }
         None
+    }
+
+    /// A parser (file) offset of `program_index` as the thread's code-region
+    /// offset scripts see (push_offset, return addresses).
+    fn code_offset_of(&self, program_index: usize, parser_offset: u32) -> u32 {
+        let Some(program) = self.programs.get(program_index) else {
+            return parser_offset;
+        };
+        let base = self.program_code_bases.get(program_index).copied().unwrap_or_default();
+        base.wrapping_add(parser_offset.wrapping_sub(Self::program_parser_code_start(program)))
+    }
+
+    /// A code-region offset back to (module, parser offset): the newest
+    /// module covering it, else `program_index`.
+    fn resolve_code_target(&self, program_index: usize, code_offset: u32) -> (usize, u32) {
+        self.resolve_target_code_offset(code_offset).unwrap_or_else(|| {
+            let program = &self.programs[program_index];
+            let base = self.program_code_bases.get(program_index).copied().unwrap_or_default();
+            (program_index, code_offset.wrapping_sub(base).wrapping_add(Self::program_parser_code_start(program)))
+        })
     }
 
     fn resolve_indirect_call_target(
@@ -7345,7 +7370,7 @@ impl Vm {
             .programs
             .get(program_index)
             .and_then(|program| program.instructions.get(next_pc))
-            .map(|instruction| instruction.offset as u32)
+            .map(|instruction| self.code_offset_of(program_index, instruction.offset as u32))
             .unwrap_or_default();
         // sub_473A70 rejects a call whose frame pointer already reached the
         // data region limit.
@@ -14656,17 +14681,20 @@ mod tests {
             script_name: Some("watchdog-boundary-test".into()),
             functions: Vec::new(),
             strings: Vec::new(),
+            // Jump targets are code-region offsets: the loop starts at code
+            // offset 2 (file offset 0x12).
             instructions: vec![
+                test_instruction(0x10, 0x00, "push_byte", vec![0x00, 0x00], vec![BpOperand::U8(0)]),
                 test_instruction(
-                    0x10,
+                    0x12,
                     0x02,
                     "push_dword",
-                    vec![0x02, 0x10, 0x00, 0x00, 0x00],
-                    vec![BpOperand::U32(0x10)],
+                    vec![0x02, 0x02, 0x00, 0x00, 0x00],
+                    vec![BpOperand::U32(2)],
                 ),
-                test_instruction(0x15, 0x14, "jmp", vec![0x14], Vec::new()),
+                test_instruction(0x17, 0x14, "jmp", vec![0x14], Vec::new()),
             ],
-            labels: [(0x10, 0)].into_iter().collect(),
+            labels: [(0x10, 0), (0x12, 1)].into_iter().collect(),
             warnings: Vec::new(),
             module_size: 0,
             code: Vec::new(),
@@ -14685,7 +14713,7 @@ mod tests {
             "{report:#?}"
         );
         assert_eq!(report.steps, 4);
-        assert_eq!(report.pc, 0);
+        assert_eq!(report.pc, 2);
     }
 
     #[test]
