@@ -2386,7 +2386,9 @@ pub struct Vm {
     next_binary_or_bmv_async: bool,
     /// Target dword_566898/dword_56689C cooperative scheduling restriction.
     exclusive_thread_id: Option<i32>,
-    global_config: Vec<u8>,
+    /// Size of dword_56676C, the global segment (segment 0 of
+    /// sub_48E8C0): `memory[..global_size]` (Sys80:70).
+    pub(crate) global_size: usize,
     global_user_data: Vec<u8>,
     loaded_bcs_ranges: Vec<scenario::LoadedBcsRange>,
     async_tasks: Vec<async_program::AsyncProgramTask>,
@@ -2580,7 +2582,7 @@ impl Vm {
             // script thread through sub_48D080 (id 1); 0x80:0x44 children
             // continue from 2.
             next_thread_id: MAIN_THREAD_ID + 1,
-            global_config: vec![0; user_data::GLOBAL_CONFIG_SIZE],
+            global_size: user_data::GLOBAL_CONFIG_SIZE,
             global_user_data: vec![0; user_data::GLOBAL_USER_DATA_SIZE],
             ..Self::default()
         };
@@ -10651,12 +10653,31 @@ impl Vm {
                 Value::Int(1)
             }
             (0x80, 0x20) => {
-                let size = self.pop_int()?.max(0) as u32;
-                Value::Ptr(self.alloc_heap(size))
+                // sub_488E80: sub_498460 (1..=64 MiB, unsigned), then
+                // sub_48E760; no free slot is fatal.
+                let size = self.pop_int()? as u32;
+                if size == 0 || size > 0x400_0000 {
+                    return Err(VmError::Runtime(format!(
+                        "無効なサイズ [ {} ] byteのメモリ領域を確保しようとしました\nメモリサイズは最大で [ {} ] byteまでしか確保できません",
+                        size as i32, 0x400_0000
+                    )));
+                }
+                let ptr = self.alloc_heap(size);
+                if ptr == 0 {
+                    return Err(VmError::Runtime("グローバル領域に空きがありません".into()));
+                }
+                Value::Int(ptr as i32)
             }
             (0x80, 0x21) => {
-                let ptr = self.pop_ptr()?;
-                Value::Int(i32::from(self.free_heap(ptr)))
+                // sub_488ED0: 0 is accepted; anything sub_48E800 does not
+                // free (not a block start) is fatal.
+                let ptr = self.pop_int()? as u32;
+                if ptr != 0 && !self.free_heap(ptr) {
+                    return Err(VmError::Runtime(format!(
+                        "グローバルメモリの解放の対象に不正なアドレス [ ${ptr:08X} ] が指定されました"
+                    )));
+                }
+                Value::Int(1)
             }
             (0x80, 0x33) => self.sys80_33_delete_file(api)?,
             (0x80, 0x25) => self.sys80_25_enumerate_files(api)?,
@@ -10981,7 +11002,10 @@ impl Vm {
                 Value::Int(1)
             }
             (0x80, 0x71) => {
-                self.global_config.fill(0);
+                // sub_48A100: memset(dword_56676C, 0, Size).
+                let size = self.global_size;
+                self.global_bytes_mut().fill(0);
+                self.clear_shadow_values(0, size);
                 Value::None
             }
             (0x80, 0x74) => {

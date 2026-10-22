@@ -74,8 +74,25 @@ impl Vm {
         if shift > 12 {
             return false;
         }
-        self.global_config = vec![0; 4096usize << shift];
+        // sub_46C0F0: a fresh zeroed block of 4096 << shift bytes.
+        let size = 4096usize << shift;
+        self.global_size = size;
+        if self.memory.len() < size {
+            self.memory.resize(size, 0);
+        }
+        self.memory[..size].fill(0);
+        self.clear_shadow_values(0, size);
         true
+    }
+
+    /// dword_56676C: the global segment the scripts address from 0.
+    pub(crate) fn global_bytes(&self) -> &[u8] {
+        &self.memory[..self.global_size.min(self.memory.len())]
+    }
+
+    pub(crate) fn global_bytes_mut(&mut self) -> &mut [u8] {
+        let size = self.global_size.min(self.memory.len());
+        &mut self.memory[..size]
     }
 
     pub(crate) fn save_config_slot<A: SysApi>(
@@ -90,14 +107,14 @@ impl Vm {
                 "付加情報文字列が長すぎます\n\n文字列は39文字以内である必要があります".into(),
             ));
         }
-        let mut bytes = vec![0u8; 64 + self.global_config.len()];
+        let mut bytes = vec![0u8; 64 + self.global_size];
         // GetLocalTime; wMilliseconds (+0x0E) seeds the integrity stream.
         for (index, value) in crate::portable_local_system_time().into_iter().enumerate() {
             bytes[index * 2..index * 2 + 2].copy_from_slice(&value.to_le_bytes());
         }
         bytes[16..16 + encoded_label.len()].copy_from_slice(&encoded_label);
         bytes[16 + encoded_label.len()] = 0;
-        bytes[64..].copy_from_slice(&self.global_config);
+        bytes[64..].copy_from_slice(self.global_bytes());
         if self.save_data_integrity_enabled != 0 {
             encrypt_config_slot(&mut bytes);
         }
@@ -117,16 +134,18 @@ impl Vm {
     }
 
     pub(crate) fn load_config_slot<A: SysApi>(&mut self, api: &mut A, slot: i32) -> i32 {
-        let preserved_len = self.global_config.len().min(1024);
-        let preserved = self.global_config[..preserved_len].to_vec();
+        let preserved_len = self.global_size.min(1024);
+        let preserved = self.global_bytes()[..preserved_len].to_vec();
         let status = match self.read_config_slot(api, slot) {
             Ok(bytes) => {
-                self.global_config.copy_from_slice(&bytes[64..]);
+                self.global_bytes_mut().copy_from_slice(&bytes[64..]);
                 0
             }
             Err(status) => status,
         };
-        self.global_config[..preserved_len].copy_from_slice(&preserved);
+        self.global_bytes_mut()[..preserved_len].copy_from_slice(&preserved);
+        let size = self.global_size;
+        self.clear_shadow_values(0, size);
         status
     }
 
@@ -142,7 +161,7 @@ impl Vm {
         if bytes.is_empty() {
             return Err(1);
         }
-        if bytes.len() != 64 + self.global_config.len() {
+        if bytes.len() != 64 + self.global_size {
             return Err(2);
         }
         let mut header = [0u8; 64];
@@ -165,7 +184,7 @@ impl Vm {
         if bytes.is_empty() {
             return Err(1);
         }
-        if bytes.len() != 64 + self.global_config.len() {
+        if bytes.len() != 64 + self.global_size {
             return Err(2);
         }
         if self.save_data_integrity_enabled != 0 && !decrypt_and_validate_config_slot(&mut bytes) {
@@ -215,13 +234,6 @@ impl Vm {
     }
 
     pub(crate) fn save_global_user_data<A: SysApi>(&mut self, api: &mut A) -> bool {
-        // The first 1 KiB of the target's global allocation is also the BP
-        // common-memory configuration block.  Keep the serialized mirror in
-        // step with writes made by the script before producing BGI.gdb.
-        let config_len = GLOBAL_CONFIG_SIZE
-            .min(self.global_config.len())
-            .min(self.memory.len());
-        self.global_config[..config_len].copy_from_slice(&self.memory[..config_len]);
         // sub_46BA20: header +20/+24 = GetWindowRect left/top.
         let mut raw = self.serialize_global_data();
         let (x, y) = api.window_outer_position();
@@ -272,8 +284,8 @@ impl Vm {
         raw[..16].copy_from_slice(GDB_MAGIC);
         write_u32(&mut raw, 16, raw_len);
         write_u32(&mut raw, 28, GLOBAL_CONFIG_SIZE as u32);
-        let config_len = self.global_config.len().min(GLOBAL_CONFIG_SIZE);
-        raw[32..32 + config_len].copy_from_slice(&self.global_config[..config_len]);
+        let config_len = self.global_size.min(GLOBAL_CONFIG_SIZE);
+        raw[32..32 + config_len].copy_from_slice(&self.global_bytes()[..config_len]);
         write_u32(&mut raw, 0x420, GLOBAL_USER_DATA_SIZE as u32);
         raw[0x424..RAW_FIXED_SIZE].copy_from_slice(&self.global_user_data);
 
@@ -391,14 +403,12 @@ impl Vm {
     /// memcpy into dword_56676C (the global segment; its first 1 KiB is the
     /// BP configuration block).
     fn install_global_config(&mut self, config: &[u8]) {
-        let len = config.len().min(self.global_config.len().max(GLOBAL_CONFIG_SIZE));
-        if self.global_config.len() < len {
-            self.global_config.resize(len, 0);
+        let len = config.len().min(self.global_size.max(GLOBAL_CONFIG_SIZE));
+        if self.memory.len() < len {
+            self.memory.resize(len, 0);
         }
-        self.global_config[..len].copy_from_slice(&config[..len]);
-        let mirrored = len.min(self.memory.len());
-        self.memory[..mirrored].copy_from_slice(&config[..mirrored]);
-        self.clear_shadow_values(0, mirrored);
+        self.memory[..len].copy_from_slice(&config[..len]);
+        self.clear_shadow_values(0, len);
     }
 
     /// dword_566774: the data, then zeros up to 1 MiB.
@@ -842,7 +852,7 @@ use std::collections::BTreeMap;
     #[test]
     fn global_payload_round_trips_memory_names_and_flags() {
         let mut vm = Vm::new();
-        vm.global_config[134] = 42;
+        vm.global_bytes_mut()[134] = 42;
         vm.global_user_data[123..127].copy_from_slice(&[1, 2, 3, 4]);
         vm.set_resource_names(vec!["BG0001".into(), "face".into()]);
         vm.read_flags
@@ -942,10 +952,10 @@ use std::collections::BTreeMap;
     fn config_slot_save_validate_header_and_load_match_native_contract() {
         let mut vm = Vm::new();
         assert!(vm.allocate_global_config(0));
-        for (index, byte) in vm.global_config.iter_mut().enumerate() {
+        for (index, byte) in vm.global_bytes_mut().iter_mut().enumerate() {
             *byte = (index % 251) as u8;
         }
-        let original = vm.global_config.clone();
+        let original = vm.global_bytes().to_vec();
         vm.save_data_integrity_enabled = 1;
         let mut api = SlotApi::default();
 
@@ -962,10 +972,10 @@ use std::collections::BTreeMap;
             b"slot-seven"
         );
 
-        vm.global_config.fill(0xEE);
+        vm.global_bytes_mut().fill(0xEE);
         assert_eq!(vm.load_config_slot(&mut api, 7), 0);
-        assert!(vm.global_config[..1024].iter().all(|byte| *byte == 0xEE));
-        assert_eq!(&vm.global_config[1024..], &original[1024..]);
+        assert!(vm.global_bytes()[..1024].iter().all(|byte| *byte == 0xEE));
+        assert_eq!(&vm.global_bytes()[1024..], &original[1024..]);
     }
 
     #[test]
@@ -989,7 +999,7 @@ use std::collections::BTreeMap;
     fn config_slot_selectors_use_the_target_vm_dispatch_path() {
         let mut vm = Vm::new();
         assert!(vm.allocate_global_config(0));
-        vm.global_config.fill(0x5a);
+        vm.global_bytes_mut().fill(0x5a);
         let mut api = SlotApi::default();
 
         vm.stack
@@ -1014,13 +1024,13 @@ use std::collections::BTreeMap;
             vm.try_builtin_sys_with_api(&mut api, 0x80, 0x7b).unwrap(),
             Some(crate::Value::Int(0))
         );
-        vm.global_config[1024..].fill(0);
+        vm.global_bytes_mut()[1024..].fill(0);
         vm.stack.push(crate::Value::Int(12));
         assert_eq!(
             vm.try_builtin_sys_with_api(&mut api, 0x80, 0x79).unwrap(),
             Some(crate::Value::Int(0))
         );
-        assert!(vm.global_config[1024..].iter().all(|byte| *byte == 0x5a));
+        assert!(vm.global_bytes()[1024..].iter().all(|byte| *byte == 0x5a));
         assert!(vm.stack.is_empty());
     }
 }

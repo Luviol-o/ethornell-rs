@@ -30,8 +30,8 @@ selector,handler,symbol,status
 80:1D,488D90,Sys80_1D_QueryScopedInputEvent,verified
 80:1E,488DF0,Sys80_1E_SetMouseButtonMappingMode,verified
 80:1F,488E20,Sys80_1F_ConfigureCursorMotion,verified
-80:20,488E80,Sys80_20_Alloc,deferred
-80:21,488ED0,Sys80_21_Free,deferred
+80:20,488E80,Sys80_20_Alloc,verified
+80:21,488ED0,Sys80_21_Free,verified
 80:24,488F50,Sys80_24_CountFiles,verified
 80:25,488F90,Sys80_25_EnumerateFiles,verified
 80:26,489010,Sys80_26_EnumerateDirectories,verified
@@ -59,9 +59,9 @@ selector,handler,symbol,status
 80:3D,489620,Sys80_3D_GetConfiguredRoot,verified
 80:3E,489650,Sys80_3E_SetPrimaryRoot,verified
 80:3F,4896B0,Sys80_3F_ConfigureRemovableArchive,verified
-80:40,489700,Sys80_40_LoadProgramModule,deferred
-80:41,4897D0,Sys80_41_FreeLastProgramModule,deferred
-80:44,489800,Sys80_44_LoadProgramThread,deferred
+80:40,489700,Sys80_40_LoadProgramModule,verified
+80:41,4897D0,Sys80_41_FreeLastProgramModule,verified
+80:44,489800,Sys80_44_LoadProgramThread,verified
 80:45,489870,Sys80_45_RtcNoop,verified
 80:46,489880,Sys80_46_CurrentThreadId,verified
 80:47,4898A0,Sys80_47_ThreadExists,verified
@@ -97,8 +97,8 @@ selector,handler,symbol,status
 80:6D,48A020,Sys80_6D_QueryDroppedFile,verified
 80:6E,48A050,Sys80_6E_SetRasterWaitEnabled,verified
 80:6F,48A070,Sys80_6F_QueryDisplayAspectMismatch,verified
-80:70,48A090,Sys80_70_AllocateGlobalConfig,deferred
-80:71,48A100,Sys80_71_ClearGlobalConfig,deferred
+80:70,48A090,Sys80_70_AllocateGlobalConfig,verified
+80:71,48A100,Sys80_71_ClearGlobalConfig,verified
 80:74,48A120,Sys80_74_SetSaveDataIntegrity,verified
 80:78,48A140,Sys80_78_SaveConfigSlot,verified
 80:79,48A1C0,Sys80_79_LoadConfigSlot,verified

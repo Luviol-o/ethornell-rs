@@ -77,7 +77,7 @@ impl Vm {
         vm.save_data_integrity_enabled = self.save_data_integrity_enabled;
         vm.next_binary_or_bmv_async = self.next_binary_or_bmv_async;
         vm.exclusive_thread_id = self.exclusive_thread_id;
-        vm.global_config = self.global_config.clone();
+        vm.global_size = self.global_size;
         vm.global_user_data = self.global_user_data.clone();
         vm.loaded_bcs_ranges = self.loaded_bcs_ranges.clone();
         vm.timing = self.timing.clone();
@@ -660,7 +660,7 @@ fn transfer_async_shared_state(source: &mut Vm, destination: &mut Vm) {
         &mut source.exclusive_thread_id,
         &mut destination.exclusive_thread_id,
     );
-    std::mem::swap(&mut source.global_config, &mut destination.global_config);
+    std::mem::swap(&mut source.global_size, &mut destination.global_size);
     std::mem::swap(
         &mut source.global_user_data,
         &mut destination.global_user_data,
