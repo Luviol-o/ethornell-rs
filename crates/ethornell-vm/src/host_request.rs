@@ -61,7 +61,7 @@ mod tests {
             script_name: Some(format!("test-{name}")),
             functions: vec![],
             strings: vec![],
-            instructions: vec![BpInstruction {
+            instructions: std::sync::Arc::new(vec![BpInstruction {
                 offset: 8,
                 opcode: BpOpcode::Known { code, name },
                 opcode_hex: format!("{code:02x}"),
@@ -70,11 +70,11 @@ mod tests {
                 known_call: None,
                 raw: vec![code, id],
                 warning: None,
-            }],
+            }]),
             labels: Default::default(),
             warnings: vec![],
             module_size: 0,
-            code: Vec::new(),
+            code: std::sync::Arc::new(Vec::new()),
         }
     }
 
@@ -170,8 +170,8 @@ mod tests {
         // Parser's conservative headerless code-end probe stops at the first
         // ret; explicitly model both valid branch targets for this unit BP.
         let suffix=ethornell_script::parse_bp_program(None,&raw[8..]);
-        p.instructions.extend(suffix.instructions.into_iter().map(|mut i|{i.offset+=8;i}));
-        p.labels=p.instructions.iter().enumerate().map(|(n,i)|(i.offset as u32,n)).collect();
+        std::sync::Arc::make_mut(&mut p.instructions).extend(suffix.instructions.iter().cloned().map(|mut i|{i.offset+=8;i}));
+        p.labels=std::sync::Arc::new(p.instructions.iter().enumerate().map(|(n,i)|(i.offset as u32,n)).collect());
         let mut root=Vm::new();root.set_native_abi_profile(crate::NativeAbiProfile::Amachoco);
         root.start_async_program_with_args(Value::Program(std::sync::Arc::new(p.clone())),vec![],false).unwrap();
         root.async_tasks[0].vm.start_async_program_with_args(Value::Program(std::sync::Arc::new(p.clone())),vec![],false).unwrap();
@@ -740,8 +740,8 @@ mod tests {
     fn native_snapshot_decodes_wrapped_operand_ring_and_preserves_memory_output_isolation() {
         let mut root = Vm::new();
         let mut p = program(0xb0, "usr1", 0x84);
-        p.instructions
-            .extend(program(0x80, "sys1", 0x5f).instructions);
+        std::sync::Arc::make_mut(&mut p.instructions)
+            .extend(program(0x80, "sys1", 0x5f).instructions.iter().cloned());
         root.start_async_program_with_args(Value::Program(std::sync::Arc::new(p)), vec![], false)
             .unwrap();
         let child = &mut root.async_tasks[0].vm;
@@ -770,10 +770,10 @@ mod tests {
         // Accepted response is deferred; neither parent's bytes nor child's
         // local output are changed before its scheduler slice.
         assert_eq!(root.memory[offset], 7);
-        assert_eq!(root.async_tasks[0].vm.memory[offset], 0);
+        assert_eq!(crate::async_program::local_byte(&root.async_tasks[0].vm, offset), 0);
         root.run_loaded(&mut host, &VmRunOptions::default());
         assert_eq!(root.memory[offset], 7);
-        assert_eq!(root.async_tasks[0].vm.memory[offset], b'*');
+        assert_eq!(crate::async_program::local_byte(&root.async_tasks[0].vm, offset), b'*');
         assert!(
             root.complete_host_request(1, HostResponse::default())
                 .is_err()

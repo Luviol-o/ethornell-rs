@@ -2287,7 +2287,7 @@ fn placeholder_loaded_program(
         script_name: Some(name),
         functions: Vec::new(),
         strings: Vec::new(),
-        instructions: vec![BpInstruction {
+        instructions: std::sync::Arc::new(vec![BpInstruction {
             offset: 0x10,
             opcode: BpOpcode::Known {
                 code: 0x17,
@@ -2299,11 +2299,11 @@ fn placeholder_loaded_program(
             known_call: None,
             raw: vec![0x17],
             warning: Some(warning.into()),
-        }],
-        labels,
+        }]),
+        labels: std::sync::Arc::new(labels),
         warnings: vec![warning.into()],
         module_size: 0,
-        code: Vec::new(),
+        code: std::sync::Arc::new(Vec::new()),
     }
 }
 
@@ -2334,6 +2334,9 @@ pub struct Vm {
     target_loaded_programs: Vec<usize>,
     pub current_program: usize,
     pub memory: Vec<u8>,
+    /// An idle thread's local region (`LOCAL_MEMORY_BASE..HEAP_MEMORY_BASE`)
+    /// while another thread holds the process memory (`memory` is then empty).
+    parked_local: Option<Vec<u8>>,
     // Native writes and thread transfers operate on address ranges. Keep the
     // shadow values ordered so a small write does not scan every scene record.
     pub mem_values: BTreeMap<u32, Value>,
@@ -2406,6 +2409,9 @@ pub struct Vm {
     timing: time::VmTime,
     rng_seed: u32,
     recent_trace: VecDeque<String>,
+    /// The last instructions run, as (program, pc, offset); formatted into
+    /// the report only when the slice stops fatally.
+    recent_steps: VecDeque<(usize, usize, u64)>,
     scheduler_signal: Option<SchedulerSignal>,
     /// Target thread selected by native status 3 (`Sys80:5E`). The value is
     /// consumed by the flat cooperative scheduler, not persisted in CThread.
@@ -2583,6 +2589,7 @@ impl Vm {
             operand_slots: vec![Value::Int(0); OPERAND_STACK_CAPACITY],
             native_abi_profile: NativeAbiProfile::default(),
             memory: vec![0; INITIAL_MEMORY_SIZE],
+            parked_local: None,
             heap_ptr: 0x0020_0000,
             rng_seed: 1,
             system_wait_state: 1,
@@ -2773,7 +2780,7 @@ impl Vm {
                     self.stack.last()
                 );
             }
-            if trace_events || options.trace || options.fail_on_stub {
+            if trace_events || options.trace {
                 self.push_trace(format!(
                     "program={} pc={} off=0x{:08X} {} {:?}",
                     self.program_name(program_index),
@@ -2782,6 +2789,13 @@ impl Vm {
                     inst.opcode_name,
                     inst.operands
                 ));
+            } else if options.fail_on_stub {
+                // Formatting a trace line per instruction was half of a
+                // console frame; keep the position and format on failure.
+                if self.recent_steps.len() >= 30 {
+                    self.recent_steps.pop_front();
+                }
+                self.recent_steps.push_back((program_index, self.pc, inst.offset));
             }
             self.trace_mtn_body_dispatch(inst.offset);
             match self.dispatch_program(
@@ -3027,7 +3041,25 @@ impl Vm {
                 .unwrap_or_default(),
             recent_trace: options
                 .collect_diagnostics
-                .then(|| self.recent_trace.iter().cloned().collect())
+                .then(|| {
+                    let mut trace = Vec::new();
+                    if stop_reason.is_fatal() {
+                        trace.extend(self.recent_steps.iter().map(|&(program_index, pc, offset)| {
+                            let program = &self.programs[program_index.min(self.programs.len().saturating_sub(1))];
+                            let (name, operands) = program
+                                .instructions
+                                .get(pc)
+                                .map(|inst| (inst.opcode_name.as_str(), format!("{:?}", inst.operands)))
+                                .unwrap_or(("?", String::new()));
+                            format!(
+                                "program={} pc={pc} off=0x{offset:08X} {name} {operands}",
+                                self.program_name(program_index)
+                            )
+                        }));
+                    }
+                    trace.extend(self.recent_trace.iter().cloned());
+                    trace
+                })
                 .unwrap_or_default(),
         }
     }
@@ -3043,11 +3075,11 @@ impl Vm {
             script_name: None,
             functions: Vec::new(),
             strings: Vec::new(),
-            instructions: vec![instruction.clone()],
+            instructions: std::sync::Arc::new(vec![instruction.clone()]),
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
-            code: Vec::new(),
+            code: std::sync::Arc::new(Vec::new()),
         });
         self.current_program = self.programs.len() - 1;
         self.pc = 0;
@@ -14446,11 +14478,11 @@ mod tests {
             script_name: Some("debug-opcode-test".into()),
             functions: Vec::new(),
             strings: Vec::new(),
-            instructions,
+            instructions: std::sync::Arc::new(instructions),
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
-            code: Vec::new(),
+            code: std::sync::Arc::new(Vec::new()),
         };
         let mut api = SchedulingApi::default();
         let mut vm = Vm::new();
@@ -14584,7 +14616,7 @@ mod tests {
             script_name: Some("yield-boundary-test".into()),
             functions: Vec::new(),
             strings: Vec::new(),
-            instructions: vec![
+            instructions: std::sync::Arc::new(vec![
                 test_instruction(0x10, 0x80, "sys1", vec![0x80, 0x5F], Vec::new()),
                 test_instruction(
                     0x12,
@@ -14593,11 +14625,11 @@ mod tests {
                     vec![0x01, 99],
                     vec![BpOperand::U8(99)],
                 ),
-            ],
+            ]),
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
-            code: Vec::new(),
+            code: std::sync::Arc::new(Vec::new()),
         };
         let mut vm = Vm::new();
         let mut api = SchedulingApi::default();
@@ -14626,17 +14658,17 @@ mod tests {
             script_name: Some("unknown-dispatch-test".into()),
             functions: Vec::new(),
             strings: Vec::new(),
-            instructions: vec![test_instruction(
+            instructions: std::sync::Arc::new(vec![test_instruction(
                 0x10,
                 0x80,
                 "sys1",
                 vec![0x82, 0xff],
                 Vec::new(),
-            )],
+            )]),
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
-            code: Vec::new(),
+            code: std::sync::Arc::new(Vec::new()),
         };
         let options = VmRunOptions {
             max_steps: 100,
@@ -14662,7 +14694,7 @@ mod tests {
             script_name: Some("sys80-5a-unrecovered-procedure-test".into()),
             functions: Vec::new(),
             strings: Vec::new(),
-            instructions: vec![
+            instructions: std::sync::Arc::new(vec![
                 test_instruction(0x10, 0x80, "sys1", vec![0x80, 0x5A], Vec::new()),
                 test_instruction(
                     0x12,
@@ -14671,11 +14703,11 @@ mod tests {
                     vec![0x01, 99],
                     vec![BpOperand::U8(99)],
                 ),
-            ],
+            ]),
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
-            code: Vec::new(),
+            code: std::sync::Arc::new(Vec::new()),
         };
         let options = VmRunOptions {
             max_steps: 100,
@@ -14699,7 +14731,7 @@ mod tests {
             script_name: Some("sys80-54-unrecovered-procedure-test".into()),
             functions: Vec::new(),
             strings: Vec::new(),
-            instructions: vec![
+            instructions: std::sync::Arc::new(vec![
                 test_instruction(
                     0x10,
                     0x01,
@@ -14715,11 +14747,11 @@ mod tests {
                     vec![0x01, 99],
                     vec![BpOperand::U8(99)],
                 ),
-            ],
+            ]),
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
-            code: Vec::new(),
+            code: std::sync::Arc::new(Vec::new()),
         };
         let options = VmRunOptions {
             max_steps: 100,
@@ -14755,7 +14787,7 @@ mod tests {
             strings: Vec::new(),
             // Jump targets are code-region offsets: the loop starts at code
             // offset 2 (file offset 0x12).
-            instructions: vec![
+            instructions: std::sync::Arc::new(vec![
                 test_instruction(0x10, 0x00, "push_byte", vec![0x00, 0x00], vec![BpOperand::U8(0)]),
                 test_instruction(
                     0x12,
@@ -14765,11 +14797,11 @@ mod tests {
                     vec![BpOperand::U32(2)],
                 ),
                 test_instruction(0x17, 0x14, "jmp", vec![0x14], Vec::new()),
-            ],
-            labels: [(0x10, 0), (0x12, 1)].into_iter().collect(),
+            ]),
+            labels: std::sync::Arc::new([(0x10, 0), (0x12, 1)].into_iter().collect()),
             warnings: Vec::new(),
             module_size: 0,
-            code: Vec::new(),
+            code: std::sync::Arc::new(Vec::new()),
         };
         let mut vm = Vm::new();
         let mut api = SchedulingApi::default();
@@ -14795,7 +14827,7 @@ mod tests {
             script_name: Some("native-memory-opcodes".into()),
             functions: Vec::new(),
             strings: Vec::new(),
-            instructions: vec![
+            instructions: std::sync::Arc::new(vec![
                 test_instruction(
                     0x10,
                     0x02,
@@ -14826,11 +14858,11 @@ mod tests {
                     vec![BpOperand::Raw(vec![0xaa, 0xbb, 0xcc])],
                 ),
                 test_instruction(0x24, 0x17, "ret", vec![0x17], Vec::new()),
-            ],
+            ]),
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
-            code: Vec::new(),
+            code: std::sync::Arc::new(Vec::new()),
         };
         let mut api = SchedulingApi::default();
         let mut vm = Vm::new();
@@ -15367,7 +15399,7 @@ mod tests {
             script_name: Some("window-valid-region".into()),
             functions: Vec::new(),
             strings: Vec::new(),
-            instructions: vec![
+            instructions: std::sync::Arc::new(vec![
                 test_instruction(
                     0x10,
                     0x02,
@@ -15384,11 +15416,11 @@ mod tests {
                 ),
                 test_instruction(0x1a, 0x90, "grp1", vec![0x90, 0x89], Vec::new()),
                 test_instruction(0x1c, 0x17, "ret", vec![0x17], Vec::new()),
-            ],
+            ]),
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
-            code: Vec::new(),
+            code: std::sync::Arc::new(Vec::new()),
         };
         let mut api = SchedulingApi {
             window_valid_region: Some([11, 22, 333, 444]),
@@ -15413,7 +15445,7 @@ mod tests {
             script_name: Some("caret-frame-table".into()),
             functions: Vec::new(),
             strings: Vec::new(),
-            instructions: vec![
+            instructions: std::sync::Arc::new(vec![
                 test_instruction(0x10, 0x01, "push_word", vec![0x01], vec![BpOperand::U16(3)]),
                 test_instruction(
                     0x13,
@@ -15424,11 +15456,11 @@ mod tests {
                 ),
                 test_instruction(0x18, 0x90, "grp1", vec![0x90, 0x98], Vec::new()),
                 test_instruction(0x1a, 0x17, "ret", vec![0x17], Vec::new()),
-            ],
+            ]),
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
-            code: Vec::new(),
+            code: std::sync::Arc::new(Vec::new()),
         };
         let mut api = SchedulingApi::default();
         let mut vm = Vm::new();
@@ -15450,7 +15482,7 @@ mod tests {
             script_name: Some("bitmap-info-record".into()),
             functions: Vec::new(),
             strings: Vec::new(),
-            instructions: vec![
+            instructions: std::sync::Arc::new(vec![
                 test_instruction(
                     0x10,
                     0x02,
@@ -15467,11 +15499,11 @@ mod tests {
                 ),
                 test_instruction(0x18, 0x90, "grp1", vec![0x90, 0x16], Vec::new()),
                 test_instruction(0x1a, 0x17, "ret", vec![0x17], Vec::new()),
-            ],
+            ]),
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
-            code: Vec::new(),
+            code: std::sync::Arc::new(Vec::new()),
         };
         let mut api = SchedulingApi::default();
         let mut vm = Vm::new();
@@ -15496,7 +15528,7 @@ mod tests {
             script_name: Some("bitmap-auxiliary-reference-point".into()),
             functions: Vec::new(),
             strings: Vec::new(),
-            instructions: vec![
+            instructions: std::sync::Arc::new(vec![
                 test_instruction(
                     0x10,
                     0x01,
@@ -15535,11 +15567,11 @@ mod tests {
                 ),
                 test_instruction(0x23, 0x92, "grp3", vec![0x92, 0x16], Vec::new()),
                 test_instruction(0x25, 0x17, "ret", vec![0x17], Vec::new()),
-            ],
+            ]),
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
-            code: Vec::new(),
+            code: std::sync::Arc::new(Vec::new()),
         };
         let mut api = SchedulingApi::default();
         let mut vm = Vm::new();
@@ -15559,7 +15591,7 @@ mod tests {
             script_name: Some("bitmap-pixel-read".into()),
             functions: Vec::new(),
             strings: Vec::new(),
-            instructions: vec![
+            instructions: std::sync::Arc::new(vec![
                 test_instruction(
                     0x10,
                     0x02,
@@ -15578,11 +15610,11 @@ mod tests {
                 test_instruction(0x1a, 0x00, "push_byte", vec![0x00], vec![BpOperand::U8(3)]),
                 test_instruction(0x1c, 0x92, "grp3", vec![0x92, 0x17], Vec::new()),
                 test_instruction(0x1e, 0x17, "ret", vec![0x17], Vec::new()),
-            ],
+            ]),
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
-            code: Vec::new(),
+            code: std::sync::Arc::new(Vec::new()),
         };
         let mut api = SchedulingApi {
             bitmap_pixel: Some([0x11, 0x22, 0x33, 0x44]),
@@ -15723,7 +15755,7 @@ mod tests {
             script_name: Some("movie-position".into()),
             functions: Vec::new(),
             strings: Vec::new(),
-            instructions: vec![
+            instructions: std::sync::Arc::new(vec![
                 test_instruction(
                     0x10,
                     0x02,
@@ -15740,11 +15772,11 @@ mod tests {
                 ),
                 test_instruction(0x18, 0x92, "grp3", vec![0x92, 0xf5], Vec::new()),
                 test_instruction(0x1a, 0x17, "ret", vec![0x17], Vec::new()),
-            ],
+            ]),
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
-            code: Vec::new(),
+            code: std::sync::Arc::new(Vec::new()),
         };
         let mut api = SchedulingApi {
             movie_position: Some(12_345),
@@ -15766,7 +15798,7 @@ mod tests {
             script_name: Some("color-lut-registration".into()),
             functions: Vec::new(),
             strings: Vec::new(),
-            instructions: vec![
+            instructions: std::sync::Arc::new(vec![
                 test_instruction(
                     0x10,
                     0x01,
@@ -15783,11 +15815,11 @@ mod tests {
                 ),
                 test_instruction(0x18, 0x90, "grp1", vec![0x90, 0xcc], Vec::new()),
                 test_instruction(0x1a, 0x17, "ret", vec![0x17], Vec::new()),
-            ],
+            ]),
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
-            code: Vec::new(),
+            code: std::sync::Arc::new(Vec::new()),
         };
         let mut api = SchedulingApi::default();
         let mut vm = Vm::new();
@@ -15813,7 +15845,7 @@ mod tests {
             script_name: Some("graph-input-region-values".into()),
             functions: Vec::new(),
             strings: Vec::new(),
-            instructions: vec![
+            instructions: std::sync::Arc::new(vec![
                 test_instruction(
                     0x10,
                     0x02,
@@ -15830,11 +15862,11 @@ mod tests {
                 ),
                 test_instruction(0x18, 0x90, "grp1", vec![0x90, 0xbe], Vec::new()),
                 test_instruction(0x1a, 0x17, "ret", vec![0x17], Vec::new()),
-            ],
+            ]),
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
-            code: Vec::new(),
+            code: std::sync::Arc::new(Vec::new()),
         };
         let mut api = SchedulingApi {
             graph_input_object: Some(i32::from(object)),
@@ -15863,7 +15895,7 @@ mod tests {
             script_name: Some("graph90-compact-icon-variant-check".into()),
             functions: Vec::new(),
             strings: Vec::new(),
-            instructions: vec![
+            instructions: std::sync::Arc::new(vec![
                 test_instruction(
                     0x10,
                     0x01,
@@ -15880,11 +15912,11 @@ mod tests {
                 ),
                 test_instruction(0x18, 0x90, "grp1", vec![0x90, 0xba], Vec::new()),
                 test_instruction(0x1a, 0x17, "ret", vec![0x17], Vec::new()),
-            ],
+            ]),
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
-            code: Vec::new(),
+            code: std::sync::Arc::new(Vec::new()),
         };
         let mut api = SchedulingApi {
             graph_input_object: Some(i32::from(object)),
@@ -15909,7 +15941,7 @@ mod tests {
             script_name: Some("bitmap-rgb-roundtrip".into()),
             functions: Vec::new(),
             strings: Vec::new(),
-            instructions: vec![
+            instructions: std::sync::Arc::new(vec![
                 test_instruction(0x10, 0x01, "push_word", vec![0x01], vec![BpOperand::U16(7)]),
                 test_instruction(0x13, 0x01, "push_word", vec![0x01], vec![BpOperand::U16(2)]),
                 test_instruction(0x16, 0x01, "push_word", vec![0x01], vec![BpOperand::U16(1)]),
@@ -15940,11 +15972,11 @@ mod tests {
                 test_instruction(0x30, 0x01, "push_word", vec![0x01], vec![BpOperand::U16(7)]),
                 test_instruction(0x33, 0x90, "grp1", vec![0x90, 0x15], Vec::new()),
                 test_instruction(0x35, 0x17, "ret", vec![0x17], Vec::new()),
-            ],
+            ]),
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
-            code: Vec::new(),
+            code: std::sync::Arc::new(Vec::new()),
         };
         let mut api = SchedulingApi::default();
         let mut vm = Vm::new();
@@ -15966,7 +15998,7 @@ mod tests {
             script_name: Some("zero-reused-frame".into()),
             functions: Vec::new(),
             strings: Vec::new(),
-            instructions: vec![
+            instructions: std::sync::Arc::new(vec![
                 test_instruction(
                     0x10,
                     0x02,
@@ -15975,11 +16007,11 @@ mod tests {
                     vec![BpOperand::U32(0x120)],
                 ),
                 test_instruction(0x15, 0x11, "store_base", vec![0x11], Vec::new()),
-            ],
+            ]),
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
-            code: Vec::new(),
+            code: std::sync::Arc::new(Vec::new()),
         };
         let mut api = SchedulingApi::default();
         let mut vm = Vm::new();
@@ -16075,7 +16107,7 @@ mod tests {
             script_name: Some("loadbmpdx._bp".into()),
             functions: Vec::new(),
             strings: Vec::new(),
-            instructions: vec![
+            instructions: std::sync::Arc::new(vec![
                 test_instruction(0x10, 0x10, "load_base", vec![0x10], Vec::new()),
                 test_instruction(
                     0x11,
@@ -16147,17 +16179,17 @@ mod tests {
                 test_instruction(0x2e, 0x21, "sub", vec![0x21], Vec::new()),
                 test_instruction(0x2f, 0x11, "store_base", vec![0x11], Vec::new()),
                 test_instruction(0x30, 0x17, "ret", vec![0x17], Vec::new()),
-            ],
-            labels: std::iter::once((0x10, 0)).collect(),
+            ]),
+            labels: std::sync::Arc::new(std::iter::once((0x10, 0)).collect()),
             warnings: Vec::new(),
             module_size: 0,
-            code: Vec::new(),
+            code: std::sync::Arc::new(Vec::new()),
         };
         let main = BpProgram {
             script_name: Some("mediation-main".into()),
             functions: Vec::new(),
             strings: Vec::new(),
-            instructions: vec![
+            instructions: std::sync::Arc::new(vec![
                 test_instruction(0x10, 0x10, "load_base", vec![0x10], Vec::new()),
                 test_instruction(
                     0x11,
@@ -16235,11 +16267,11 @@ mod tests {
                 test_instruction(0x2d, 0x21, "sub", vec![0x21], Vec::new()),
                 test_instruction(0x2e, 0x11, "store_base", vec![0x11], Vec::new()),
                 test_instruction(0x2f, 0x17, "ret", vec![0x17], Vec::new()),
-            ],
+            ]),
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
-            code: Vec::new(),
+            code: std::sync::Arc::new(Vec::new()),
         };
         let mut api = MediationApi { program: mediation };
         let mut vm = Vm::new();
@@ -16823,7 +16855,7 @@ mod tests {
             script_name: Some("system-event-test".into()),
             functions: Vec::new(),
             strings: Vec::new(),
-            instructions: vec![
+            instructions: std::sync::Arc::new(vec![
                 test_instruction(
                     0x10,
                     0x02,
@@ -16848,11 +16880,11 @@ mod tests {
                 ),
                 test_instruction(0x21, 0x80, "sys1", vec![0x80, 0xa0], Vec::new()),
                 test_instruction(0x23, 0x17, "ret", vec![0x17], Vec::new()),
-            ],
+            ]),
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
-            code: Vec::new(),
+            code: std::sync::Arc::new(Vec::new()),
         };
         let mut api = SchedulingApi::default();
         let mut vm = Vm::new();
@@ -16873,7 +16905,7 @@ mod tests {
             script_name: Some("bgm-query-test".into()),
             functions: Vec::new(),
             strings: Vec::new(),
-            instructions: vec![
+            instructions: std::sync::Arc::new(vec![
                 test_instruction(
                     0x10,
                     0x02,
@@ -16890,11 +16922,11 @@ mod tests {
                 ),
                 test_instruction(0x1a, 0xa0, "snd1", vec![0xa0, 0x15], Vec::new()),
                 test_instruction(0x1c, 0x17, "ret", vec![0x17], Vec::new()),
-            ],
+            ]),
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
-            code: Vec::new(),
+            code: std::sync::Arc::new(Vec::new()),
         };
         let mut api = SchedulingApi {
             bgm_state: Some((0, 9)),
@@ -16916,7 +16948,7 @@ mod tests {
             script_name: Some("sound-memory-registration-test".into()),
             functions: Vec::new(),
             strings: Vec::new(),
-            instructions: vec![
+            instructions: std::sync::Arc::new(vec![
                 test_instruction(
                     0x10,
                     0x02,
@@ -16954,11 +16986,11 @@ mod tests {
                 ),
                 test_instruction(0x29, 0xa0, "snd1", vec![0xa0, 0x28], Vec::new()),
                 test_instruction(0x2b, 0x17, "ret", vec![0x17], Vec::new()),
-            ],
+            ]),
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
-            code: Vec::new(),
+            code: std::sync::Arc::new(Vec::new()),
         };
         let mut api = SchedulingApi::default();
         let mut vm = Vm::new();
@@ -16988,7 +17020,7 @@ mod tests {
             script_name: Some("wait-poll-stack-contract-test".into()),
             functions: Vec::new(),
             strings: Vec::new(),
-            instructions: vec![
+            instructions: std::sync::Arc::new(vec![
                 test_instruction(
                     0x10,
                     0x02,
@@ -16999,11 +17031,11 @@ mod tests {
                 test_instruction(0x15, 0x80, "sys1", vec![0x80, 0x14], Vec::new()),
                 test_instruction(0x17, 0x80, "sys1", vec![0x80, 0x16], Vec::new()),
                 test_instruction(0x19, 0x17, "ret", vec![0x17], Vec::new()),
-            ],
+            ]),
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
-            code: Vec::new(),
+            code: std::sync::Arc::new(Vec::new()),
         };
         let mut api = SchedulingApi::default();
         let mut vm = Vm::new();
@@ -17043,7 +17075,7 @@ mod tests {
             script_name: Some("terminate-interpreter-test".into()),
             functions: Vec::new(),
             strings: Vec::new(),
-            instructions: vec![
+            instructions: std::sync::Arc::new(vec![
                 test_instruction(0x10, 0x80, "sys1", vec![0x80, 0x6a], Vec::new()),
                 test_instruction(
                     0x12,
@@ -17053,11 +17085,11 @@ mod tests {
                     vec![BpOperand::U32(0x1234)],
                 ),
                 test_instruction(0x17, 0x17, "ret", vec![0x17], Vec::new()),
-            ],
+            ]),
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
-            code: Vec::new(),
+            code: std::sync::Arc::new(Vec::new()),
         };
         let mut api = SchedulingApi::default();
         let mut vm = Vm::new();
@@ -17076,7 +17108,7 @@ mod tests {
             script_name: Some("procedure-boundary-test".into()),
             functions: Vec::new(),
             strings: Vec::new(),
-            instructions: vec![
+            instructions: std::sync::Arc::new(vec![
                 test_instruction(
                     0x10,
                     0x01,
@@ -17121,11 +17153,11 @@ mod tests {
                     vec![0x01, 99],
                     vec![BpOperand::U8(99)],
                 ),
-            ],
+            ]),
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
-            code: Vec::new(),
+            code: std::sync::Arc::new(Vec::new()),
         };
         let options = VmRunOptions {
             max_steps: 100,
@@ -17153,7 +17185,7 @@ mod tests {
             script_name: Some("nonprocedure-boundary-test".into()),
             functions: Vec::new(),
             strings: Vec::new(),
-            instructions: vec![
+            instructions: std::sync::Arc::new(vec![
                 test_instruction(
                     0x10,
                     0x01,
@@ -17170,11 +17202,11 @@ mod tests {
                     vec![0x01, 99],
                     vec![BpOperand::U8(99)],
                 ),
-            ],
+            ]),
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
-            code: Vec::new(),
+            code: std::sync::Arc::new(Vec::new()),
         };
         let mut api = SchedulingApi::default();
         let mut vm = Vm::new();
@@ -17735,17 +17767,17 @@ mod tests {
             script_name: Some("wait-boundary-test".into()),
             functions: Vec::new(),
             strings: Vec::new(),
-            instructions: vec![test_instruction(
+            instructions: std::sync::Arc::new(vec![test_instruction(
                 0x10,
                 0x80,
                 "sys1",
                 vec![0x80, 0x5C],
                 Vec::new(),
-            )],
+            )]),
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
-            code: Vec::new(),
+            code: std::sync::Arc::new(Vec::new()),
         };
         let mut vm = Vm::new();
         vm.start(&program);
@@ -18341,14 +18373,14 @@ mod tests {
             script_name: Some("err-test".into()),
             functions: Vec::new(),
             strings: Vec::new(),
-            instructions: vec![
+            instructions: std::sync::Arc::new(vec![
                 test_instruction(0x10, 0x00, "push_byte", vec![0x00, 0x00], vec![BpOperand::U8(0)]),
                 test_instruction(0x12, 0x14, "jmp", vec![0x14], Vec::new()),
-            ],
-            labels: [(0x10, 0), (0x12, 1)].into_iter().collect(),
+            ]),
+            labels: std::sync::Arc::new([(0x10, 0), (0x12, 1)].into_iter().collect()),
             warnings: Vec::new(),
             module_size: 0,
-            code: Vec::new(),
+            code: std::sync::Arc::new(Vec::new()),
         };
         let mut vm = Vm::new();
         vm.system81_shared.lock().unwrap().error_capture_mode = 1;
@@ -18466,7 +18498,7 @@ mod tests {
         let mut vm = Vm::new();
         let mut root = empty_loaded_program("root._bp".into());
         let expected_base = Vm::program_target_code_size(&root);
-        root.labels.insert(expected_base, 0);
+        std::sync::Arc::make_mut(&mut root.labels).insert(expected_base, 0);
         vm.start(&root);
         let worker = empty_loaded_program("worker._bp".into());
 

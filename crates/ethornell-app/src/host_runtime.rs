@@ -29,7 +29,11 @@ fn host_physical_memory() -> Option<u64> {
         if pages<=0 || size<=0 {return None;}
         (pages as u64).checked_mul(size as u64)
     }
-    #[cfg(not(any(target_os="android", target_os="ios")))]
+    #[cfg(target_os="vita")]
+    {Some(512*1024*1024)}
+    #[cfg(target_os="horizon")]
+    {Some(4*1024*1024*1024)}
+    #[cfg(not(any(target_os="android",target_os="ios",target_os="vita",target_os="horizon")))]
     {Some(4*1024*1024*1024)} // host diagnostic profile, not device RAM evidence
 }
 
@@ -151,6 +155,8 @@ pub struct HostRuntime {
     audio: Option<AudioSystem>,
     backend: u32,
     input_queue: VecDeque<RuntimeInputEvent>,
+    /// Scripted input for unattended runs (`set_input_script`).
+    input_script: Option<HeadlessInputScript>,
     generation: u64,
     paused: u32,
     last_tick: Option<u64>,
@@ -237,6 +243,7 @@ impl HostRuntime {
             audio,
             backend: config.backend,
             input_queue: VecDeque::new(),
+            input_script: None,
             generation: 0,
             paused: 0,
             last_tick: None,
@@ -313,9 +320,9 @@ impl HostRuntime {
             "no host surface on this target".into(),
         ))
     }
-    /// The web host creates its renderer asynchronously (see
-    /// `Renderer::new_web`, with `HostRuntime::font`) and hands it over here.
-    #[cfg(target_arch = "wasm32")]
+    /// Attach a host-created renderer. Web creates it asynchronously; native
+    /// consoles supply their platform GPU callbacks and the session font.
+    #[cfg(any(target_arch="wasm32",feature="console",target_os="vita",target_os="horizon"))]
     pub fn attach_renderer(
         &mut self,
         renderer: Renderer<'static>,
@@ -332,6 +339,15 @@ impl HostRuntime {
         self.tick_remainder_ns = 0;
         self.install_renderer(renderer, w, h, generation)
     }
+    /// Console chrome is submitted as ordinary native GPU draw commands.
+    #[cfg(feature = "console")]
+    pub fn show_console_notice(&mut self, text: Option<String>) -> Result<()> {
+        if let Some(renderer) = self.renderer.as_mut() {
+            renderer.set_notice(text);
+            renderer.render()?;
+        }
+        Ok(())
+    }
     /// The attached surface changed size (the web canvas follows the page).
     pub fn resize_surface(&mut self, w: u32, h: u32) -> Result<()> {
         if let Some(renderer) = self.renderer.as_mut() {
@@ -346,7 +362,7 @@ impl HostRuntime {
     pub fn diagnostics(&self) -> String {
         let report = self.runtime.last_report.as_ref();
         format!(
-            "stop={:?} pc={} steps={} time_ms={} screen={}x{} surfaces={} textures={} renderer={} pending={}",
+            "stop={:?} pc={} steps={} time_ms={} screen={}x{} surfaces={} textures={} renderer={} pending={} program={:?} vm={:?} image_bytes={} blob_bytes={} program_cache={} cached_instructions={} vm_programs={} vm_instructions={}",
             report.map(|r| r.stop_reason),
             report.map_or(0, |r| r.pc),
             report.map_or(0, |r| r.steps),
@@ -357,13 +373,21 @@ impl HostRuntime {
             self.textures.len(),
             self.renderer.is_some(),
             self.runtime.api.host.pending.len(),
+            report.map(|r| r.program.as_str()),
+            self.runtime.vm.resource_usage(),
+            self.runtime.api.graph_images.values().map(|i|i.rgba.len()).sum::<usize>(),
+            self.runtime.api.graph_blob_cache.values().map(Vec::len).sum::<usize>(),
+            self.runtime.api.program_cache.len(),
+            self.runtime.api.program_cache.values().map(|p|p.instructions.len()).sum::<usize>(),
+            self.runtime.vm.programs.len(),
+            self.runtime.vm.programs.iter().map(|p|p.instructions.len()).sum::<usize>(),
         )
     }
     /// The game text font, for renderers the host builds itself.
     pub fn font(&self) -> FontArc {
         self.font.clone()
     }
-    #[cfg(any(target_os = "android", target_os = "ios", target_arch = "wasm32"))]
+    #[cfg(any(target_os="android",target_os="ios",target_arch="wasm32",feature="console",target_os="vita",target_os="horizon"))]
     fn install_renderer(
         &mut self,
         mut renderer: Renderer<'static>,
@@ -436,6 +460,13 @@ impl HostRuntime {
         }
         self.runtime.api.finish_graph_knob_drag();
     }
+    /// Plays an `ETHORNELL_INPUT_SCRIPT` script (`wait:N,click:x:y,key:enter,...`,
+    /// game coordinates, one step per engine frame) for unattended runs on
+    /// hosts without environment variables.
+    pub fn set_input_script(&mut self, source: &str) -> Result<()> {
+        self.input_script = Some(HeadlessInputScript::parse(source).map_err(EthornellError::Other)?);
+        Ok(())
+    }
     pub fn input(&mut self, kind: u32, x: f32, y: f32, code: i32, value: f32) -> Result<()> {
         if kind == 7 {
             self.clear_input();
@@ -443,6 +474,12 @@ impl HostRuntime {
         }
         if self.closed || self.paused != 0 || !self.runtime.api.host.pending.is_empty() {
             return Ok(());
+        }
+        #[cfg(feature = "console")]
+        if kind == 1 {
+            if let Some(renderer) = self.renderer.as_mut() {
+                renderer.set_cursor(x, y);
+            }
         }
         let Some(renderer) = self.renderer.as_ref() else {
             return Ok(());
@@ -553,7 +590,7 @@ impl HostRuntime {
         let report = runtime_frontend::drive_runtime_frame_checked(
             &mut self.runtime,
             &mut self.input_queue,
-            &mut None,
+            &mut self.input_script,
             RuntimeFramePacing,
             elapsed,
             raw_elapsed,

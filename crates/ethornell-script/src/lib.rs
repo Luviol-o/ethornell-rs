@@ -3,6 +3,7 @@ use encoding_rs::SHIFT_JIS;
 use ethornell_core::Result;
 use serde::Serialize;
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::io::{Cursor, Read};
 use std::path::Path;
 
@@ -77,8 +78,11 @@ pub struct BpProgram {
     pub script_name: Option<String>,
     pub functions: Vec<BpFunction>,
     pub strings: Vec<String>,
-    pub instructions: Vec<BpInstruction>,
-    pub labels: HashMap<u32, usize>,
+    /// Shared by every copy of the module: the VM keeps one program entry per
+    /// LoadProgram (each with its own instance name), so only the name may
+    /// differ between copies.
+    pub instructions: Arc<Vec<BpInstruction>>,
+    pub labels: Arc<HashMap<u32, usize>>,
     pub warnings: Vec<String>,
     /// Code length from the BP header (`a2[1]` of sub_465AB0): the number of
     /// bytes the module occupies in a thread's code region, including data
@@ -88,7 +92,7 @@ pub struct BpProgram {
     /// without its BP header, as sub_4450B0 copies it); code offset 0 is the
     /// first instruction.
     #[serde(skip)]
-    pub code: Vec<u8>,
+    pub code: Arc<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -788,7 +792,7 @@ pub fn known_call_name(group: u8, id: u16) -> Option<&'static str> {
 }
 
 pub fn disassemble_bp(buf: &[u8]) -> Vec<BpInstruction> {
-    parse_bp_program(None, buf).instructions
+    Arc::unwrap_or_clone(parse_bp_program(None, buf).instructions)
 }
 
 pub fn parse_bp_program(script_name: Option<String>, buf: &[u8]) -> BpProgram {
@@ -935,11 +939,11 @@ pub fn parse_bp_program(script_name: Option<String>, buf: &[u8]) -> BpProgram {
         script_name,
         functions,
         strings,
-        instructions,
-        labels,
+        instructions: Arc::new(instructions),
+        labels: Arc::new(labels),
         warnings,
         module_size,
-        code: buf[range.start..range.end].to_vec(),
+        code: Arc::new(buf[range.start..range.end].to_vec()),
     }
 }
 

@@ -627,15 +627,20 @@ fn program_key(program: &BpProgram) -> String {
 /// stay with each thread. The idle side keeps a buffer whose globals and heap
 /// are stale; it gets the live one back before it runs again. Sharing the
 /// heap by copying it instead cost every idle thread a full heap.
+///
+/// The idle side keeps only its local region (`parked_local`), not a buffer
+/// of stale globals: one process buffer exists, plus one local region per
+/// thread.
 fn hand_over_memory(source: &mut Vm, destination: &mut Vm) {
     let local = LOCAL_MEMORY_BASE as usize..HEAP_MEMORY_BASE;
-    for vm in [&mut *source, &mut *destination] {
-        if vm.memory.len() < HEAP_MEMORY_BASE {
-            vm.memory.resize(HEAP_MEMORY_BASE, 0);
-        }
+    let mut live = std::mem::take(&mut source.memory);
+    if live.len() < HEAP_MEMORY_BASE {
+        live.resize(HEAP_MEMORY_BASE, 0);
     }
-    std::mem::swap(&mut source.memory, &mut destination.memory);
-    destination.memory[local.clone()].swap_with_slice(&mut source.memory[local]);
+    let mut window = take_local_window(destination);
+    live[local].swap_with_slice(&mut window);
+    source.parked_local = Some(window);
+    destination.memory = live;
 
     let local_keys = LOCAL_MEMORY_BASE..HEAP_MEMORY_BASE as u32;
     let source_locals = source
@@ -650,6 +655,45 @@ fn hand_over_memory(source: &mut Vm, destination: &mut Vm) {
     destination.mem_values.extend(destination_locals);
     source.mem_values.clear();
     source.mem_values.extend(source_locals);
+}
+
+/// A thread's own local region, out of its parked copy or its buffer (a new
+/// thread starts with a buffer of its own). The buffer is released.
+pub(crate) fn take_local_window(vm: &mut Vm) -> Vec<u8> {
+    let local = LOCAL_MEMORY_BASE as usize..HEAP_MEMORY_BASE;
+    if let Some(window) = vm.parked_local.take() {
+        vm.memory = Vec::new();
+        return window;
+    }
+    let mut buffer = std::mem::take(&mut vm.memory);
+    if buffer.len() < HEAP_MEMORY_BASE {
+        buffer.resize(HEAP_MEMORY_BASE, 0);
+    }
+    buffer.truncate(HEAP_MEMORY_BASE);
+    buffer.drain(..LOCAL_MEMORY_BASE as usize);
+    buffer.shrink_to_fit();
+    debug_assert_eq!(buffer.len(), local.len());
+    buffer
+}
+
+/// A byte of a thread's local region, parked or not (tests).
+#[cfg(test)]
+pub(crate) fn local_byte(vm: &Vm, addr: usize) -> u8 {
+    match vm.parked_local.as_ref() {
+        Some(window) => window[addr - LOCAL_MEMORY_BASE as usize],
+        None => vm.memory[addr],
+    }
+}
+
+/// A thread's local region wherever it is: parked, or in its buffer.
+pub(crate) fn local_window_mut(vm: &mut Vm) -> &mut [u8] {
+    if vm.parked_local.is_none() && vm.memory.len() < HEAP_MEMORY_BASE {
+        vm.memory.resize(HEAP_MEMORY_BASE, 0);
+    }
+    match vm.parked_local.as_mut() {
+        Some(window) => window,
+        None => &mut vm.memory[LOCAL_MEMORY_BASE as usize..HEAP_MEMORY_BASE],
+    }
 }
 
 fn transfer_async_shared_state(source: &mut Vm, destination: &mut Vm) {
@@ -880,15 +924,15 @@ mod tests {
         transfer_async_shared_state(&mut root, &mut task);
         assert_eq!(task.read_c_string(ptr).unwrap(), "root");
         assert_eq!(task.read_value(ptr + 16, 2).unwrap(), Value::Str("value".into()));
-        assert_eq!((task.memory[local], root.memory[local]), (2, 1));
-        // The idle root holds the task's small buffer, not a heap copy.
-        assert_eq!(root.memory.len(), HEAP_MEMORY_BASE);
+        assert_eq!((local_byte(&task, local), local_byte(&root, local)), (2, 1));
+        // The idle root keeps only its local region, not a heap copy.
+        assert!(root.memory.is_empty());
         task.write_c_string_raw(ptr, "task").unwrap();
 
         transfer_async_shared_state(&mut task, &mut root);
         assert_eq!(root.read_c_string(ptr).unwrap(), "task");
-        assert_eq!((root.memory[local], task.memory[local]), (1, 2));
-        assert_eq!(task.memory.len(), HEAP_MEMORY_BASE);
+        assert_eq!((local_byte(&root, local), local_byte(&task, local)), (1, 2));
+        assert!(task.memory.is_empty());
     }
 
     #[test]

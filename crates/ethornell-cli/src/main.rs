@@ -918,7 +918,7 @@ fn run_bcs_catalog(game: PathBuf, json: bool) -> anyhow::Result<()> {
 
 fn print_script_summary(label: &str, bytes: &[u8], program: &ethornell_script::BpProgram) {
     let mut calls: BTreeMap<String, usize> = BTreeMap::new();
-    for inst in &program.instructions {
+    for inst in program.instructions.iter() {
         if let Some(name) = inst.known_call {
             *calls.entry(name.to_string()).or_default() += 1;
         }
