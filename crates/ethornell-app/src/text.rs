@@ -2037,13 +2037,14 @@ fn append_message_markup(
 }
 
 /// Where the text cursor stands after `text` (wrapped) is drawn from the
-/// state's origin, in the portable wrap model's advances.
+/// state's origin, measured with the advances text is drawn with.
 fn message_end_cursor(text: &str, state: &TextState) -> (i32, i32) {
     let row = text.matches('\n').count();
     let last_line = text.rsplit('\n').next().unwrap_or_default();
+    let size = state.font_size.max(1.0);
     let advance: f32 = last_line
         .chars()
-        .map(|ch| wrap_char_units(ch) * state.font_size)
+        .map(|ch| crate::snapshot::glyph_advance(ch, size, 100.0))
         .sum();
     (
         (state.x + advance).round() as i32,
