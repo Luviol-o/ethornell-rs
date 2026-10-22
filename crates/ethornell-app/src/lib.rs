@@ -20735,11 +20735,17 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
         if let Ok(name) = std::env::var("COMPUTERNAME") {
             return name;
         }
-        let mut buffer = [0u8; 256];
-        // SAFETY: the buffer is writable for its full length.
-        let ok = unsafe { libc::gethostname(buffer.as_mut_ptr().cast(), buffer.len()) } == 0;
-        let end = buffer.iter().position(|byte| *byte == 0).unwrap_or(buffer.len());
-        let host = if ok { String::from_utf8_lossy(&buffer[..end]).into_owned() } else { String::new() };
+        #[cfg(unix)]
+        let host = {
+            let mut buffer = [0u8; 256];
+            // SAFETY: the buffer is writable for its full length.
+            let ok = unsafe { libc::gethostname(buffer.as_mut_ptr().cast(), buffer.len()) } == 0;
+            let end = buffer.iter().position(|byte| *byte == 0).unwrap_or(buffer.len());
+            if ok { String::from_utf8_lossy(&buffer[..end]).into_owned() } else { String::new() }
+        };
+        // Windows always sets COMPUTERNAME; the web has no host name.
+        #[cfg(not(unix))]
+        let host = String::new();
         host.split('.').next().unwrap_or_default().to_ascii_uppercase().chars().take(15).collect()
     }
 
