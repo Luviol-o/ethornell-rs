@@ -69,6 +69,28 @@ impl MessageControlTemplate {
     }
 }
 
+/// Child sprite 0 of the message window while a message waits at its end
+/// (`sub_433F40`): frame `index` of the caret table, shown since `shown_at`
+/// at the window-local `(x, y)`; `frame` is `None` for a -1 (hidden) frame.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct MessageCaret {
+    pub(crate) window: i32,
+    pub(crate) index: usize,
+    pub(crate) frame: Option<i32>,
+    pub(crate) shown_at: u32,
+    pub(crate) x: f32,
+    pub(crate) y: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct MessageTextEnd {
+    pub(crate) window: i32,
+    pub(crate) x: f32,
+    pub(crate) y: f32,
+    pub(crate) line_start_x: f32,
+    pub(crate) line_height: f32,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct RuntimeTextNode {
     pub(crate) text: String,
@@ -1288,6 +1310,8 @@ impl RuntimeTraceApi {
         // control-only string. In particular, a lone 0x0A is a zero-delay
         // layout control, not a synthetic one-glyph message.
         self.user_controls.remove(&MESSAGE_INPUT_OBJECT_ID);
+        // The caret belongs to the previous message's wait.
+        self.message_caret = None;
         let target = self.place_message_text_node(target_surface, &state);
         self.text_runtime
             .set_glyph_delay_ms(self.graph_defaults.text_animation.glyph_delay_ms);
@@ -1467,6 +1491,132 @@ impl RuntimeTraceApi {
             node.style_spans.clear();
         }
         self.native_message_active = false;
+        self.message_caret = None;
+    }
+
+    /// One tick of `sub_433F40` while the message waits at its end: the
+    /// first tick shows frame 0 of the Graph90:98 table, every later tick
+    /// at least the Graph90:99 delay after the previous frame shows the next
+    /// one, wrapping. A -1 frame hides the sprite (the blink). The sprite is
+    /// child 0 of the message window, at the text cursor plus the Graph90:9A
+    /// offset, or at the offset itself in mode 1.
+    pub(crate) fn tick_message_caret(&mut self, now_tick: u32) {
+        let frames = &self.graph_defaults.caret_frames;
+        let Some(end) = (!frames.is_empty())
+            .then(|| self.message_text_end())
+            .flatten()
+        else {
+            self.message_caret = None;
+            return;
+        };
+        let delay = self.graph_defaults.caret_frame_delay_ms.max(0) as u32;
+        let index = match self.message_caret {
+            Some(caret) if caret.window == end.window => {
+                if now_tick.wrapping_sub(caret.shown_at) < delay {
+                    return;
+                }
+                (caret.index + 1) % frames.len()
+            }
+            _ => 0,
+        };
+        let defaults = &self.graph_defaults;
+        let (x, y) = if defaults.caret_mode == 1 {
+            (defaults.caret_x as f32, defaults.caret_y as f32)
+        } else {
+            // sub_42C680: the widest frame must fit before the valid
+            // rectangle's right edge, else sub_42C600 starts a new line.
+            let widest = frames
+                .iter()
+                .flatten()
+                .filter_map(|frame| self.bitmap_dimensions.get(frame))
+                .map(|(width, _)| *width as f32)
+                .fold(0.0f32, f32::max);
+            let right = self
+                .graph_surfaces
+                .get(&end.window)
+                .map_or(f32::INFINITY, |surface| surface.valid_right as f32 + 1.0);
+            let (x, y) = if end.x + widest > right {
+                (end.line_start_x, end.y + end.line_height)
+            } else {
+                (end.x, end.y)
+            };
+            (x + defaults.caret_x as f32, y + defaults.caret_y as f32)
+        };
+        self.message_caret = Some(MessageCaret {
+            window: end.window,
+            index,
+            frame: frames[index],
+            shown_at: now_tick,
+            x,
+            y,
+        });
+    }
+
+    /// Where the message window's text ends: the window-local cell top after
+    /// the last glyph, where the next glyph would go.
+    pub(crate) fn message_text_end(&self) -> Option<MessageTextEnd> {
+        let node = self.text_nodes.get(&MESSAGE_TEXT_NODE_ID)?;
+        let window = node.target_surface?;
+        let layout = self.formatted_text_layout(node);
+        let lines = node.text.split('\n').collect::<Vec<_>>();
+        let last = lines.last().copied().unwrap_or_default();
+        let advance = last
+            .chars()
+            .map(|ch| crate::snapshot::glyph_advance(ch, node.size, 100.0))
+            .sum::<f32>();
+        Some(MessageTextEnd {
+            window,
+            x: node.x + advance,
+            y: node.y + layout.body_y_offset + (lines.len() - 1) as f32 * layout.line_height,
+            line_start_x: node.x,
+            line_height: layout.line_height,
+        })
+    }
+
+    /// The caret's frame, drawn by its window after the window's own image
+    /// (the window composes its child sprites over its bitmap).
+    pub(crate) fn push_message_caret_draw_item(
+        &self,
+        items: &mut Vec<crate::graph::RuntimeGraphDrawItem>,
+    ) {
+        let Some(caret) = self.message_caret else {
+            return;
+        };
+        let Some(frame) = caret.frame else {
+            return;
+        };
+        let Some(surface) = self.graph_surfaces.get(&caret.window) else {
+            return;
+        };
+        if !self.surface_display_chain_visible(surface.id, surface) {
+            return;
+        }
+        let Some((key, region)) = self.resource_image_region(frame) else {
+            return;
+        };
+        let (window_x, window_y) = self.surface_world_position(surface.id);
+        items.push(crate::graph::RuntimeGraphDrawItem {
+            owner_object: Some(surface.id),
+            key: key.to_string(),
+            x: window_x + caret.x,
+            y: window_y + caret.y,
+            width: region.width,
+            height: region.height,
+            src_x: region.x,
+            src_y: region.y,
+            src_width: region.width,
+            src_height: region.height,
+            opacity: self.surface_display_opacity(surface.id),
+            ignore_source_alpha: self.bitmap_formats.get(&frame).copied() == Some(1),
+            rotation_degrees: 0.0,
+            destination_quad: None,
+            linear_sampling: true,
+            clip: self.surface_chain_clip(surface.id),
+            z: self.display_tree.effective_depth(surface.id, surface.z),
+            blend_mode: 128,
+            order_serial: self.display_order_serial(surface.id, None).saturating_add(1),
+            hit_id: 0,
+        });
     }
 
     pub(crate) fn tick_text(&mut self, elapsed_ms: u64) {
