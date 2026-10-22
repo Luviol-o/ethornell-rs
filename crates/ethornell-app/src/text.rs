@@ -1313,6 +1313,8 @@ impl RuntimeTraceApi {
         // control-only string. In particular, a lone 0x0A is a zero-delay
         // layout control, not a synthetic one-glyph message.
         self.user_controls.remove(&MESSAGE_INPUT_OBJECT_ID);
+        // The caret belongs to the previous message's wait.
+        self.message_caret = None;
         let target = self.place_message_text_node(target_surface, &state);
         self.text_runtime
             .set_glyph_delay_ms(self.graph_defaults.text_animation.glyph_delay_ms);
