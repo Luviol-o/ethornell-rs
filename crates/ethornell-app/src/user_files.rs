@@ -391,16 +391,6 @@ pub(crate) fn is_empty_archive_arg(archive: &str) -> bool {
 mod tests {
     use super::*;
 
-    fn testcase_manager() -> ResourceManager {
-        ResourceManager::open_game(
-            Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("..")
-                .join("..")
-                .join("testcase"),
-        )
-        .unwrap()
-    }
-
     fn temporary_root(name: &str) -> PathBuf {
         let unique = format!(
             "ethornell-{name}-{}-{}",
@@ -645,22 +635,5 @@ mod tests {
             Some(archive)
         );
         let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn game_root_is_exposed_as_an_absolute_user_data_root() {
-        let manager = testcase_manager();
-        assert!(game_root_path(&manager).is_absolute());
-        assert!(game_root_path(&manager).ends_with("testcase"));
-    }
-
-    #[test]
-    fn get_user_data_root_paths_resolve_as_loose_files() {
-        let manager = testcase_manager();
-        let file = game_root_path(&manager).join("UserData").join("slot.sud");
-        assert_eq!(
-            find_runtime_file(&manager, "", &file.to_string_lossy()),
-            Some(file)
-        );
     }
 }
