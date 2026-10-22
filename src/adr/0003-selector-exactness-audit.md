@@ -293,6 +293,17 @@ drawing is not yet the target's; do these as one renderer pass):
   every draw, while sub_435640 adds it only with its ruby argument set.
 * 91:55 links: a sprite masked by another sprite (Sprite+0x160) is stored
   but not drawn as a mask.
+* 91:18..1E: checks, texts and argument order are the target's; the
+  kernels are not. 91:18/19 (sub_416B60 / sub_4179B0) are rotate-zoom
+  blits: p1/p2 destination and p4/p5 source positions in 16.16, p6 the
+  angle in 16.16 degrees (multiples of 360 with unit scale and whole
+  positions take the plain blit sub_416890 -> sub_40B560), p7/p8 the
+  16.16 scales, p9 the alpha, p10 the source-alpha switch; the app treats
+  them as an integer rectangle copy. 91:1A sub_418B50, 91:1B
+  sub_418F30, 91:1C sub_402C60 (destination recreated at
+  (w*p2>>16, h*p3>>16) in the source format), 91:1D sub_419CF0 types
+  0..5, 91:1E sub_4163C0 (32-bit source) / sub_415E30 (8-bit source)
+  over the overlap where target (x, y) reads source (x+p2, y+p3).
 
 Deferred to ADR 0004 in 0x90: C4/C5 (external image import/export files).
 
