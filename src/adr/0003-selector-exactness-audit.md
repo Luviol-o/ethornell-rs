@@ -360,8 +360,33 @@ Unicorn; ~600 vectors, kinds 1..9 documented in the script). Notes:
 * 90:0C: windows (0xB000000x) draw their own buffer only after 90:0C(1, t)
   (dword_565B54 starts at 0); senmomo calls 90:0C(1, 0) at boot.
 
-Left in the kernel pass: 90:CE format 1 (sub_4A1930, the CompressedBG v2
-DCT encoder: float YCbCr tables sub_49BBB0, quality tables sub_49BE00,
-strips through the worker pool sub_49D730/sub_49D320, Huffman sub_4A0ED0..).
-Then ADR 0004 (file layer), then the VM value model (needs the user's
-decision, see above).
+90:CE format 1 done the same day: `crates/ethornell-image/src/cbg2_encode.rs`
+ports sub_49C200 and its workers literally (x87 at 53-bit precision: every
+stack variable an f32, temporaries f64), kind 10 vectors. The emulation runs
+sub_49BBB0 / sub_49BE00 / sub_4A1E70 / sub_49C200 itself (sub_4A1930's SEH
+frame is skipped; FS points at a fake TEB through a GDT for the inner SEH
+prologues), with a one-thread worker pool so sub_446910 runs the strips
+inline, and C++ throws (RaiseException) ending the call. Target behaviour
+kept on purpose:
+
+* The encoder decodes its own output and fails (status 3 -> -2,
+  "エンコードに失敗しました") on a mismatch. sub_4A1290's alpha search reaches
+  x = width - column on the row above, which for padded widths <= 31 is the
+  pixel itself: such copies decode to nothing, so narrow 32-bit images with
+  uneven alpha are rejected. The check decodes into a fresh buffer; the
+  port zero-fills it (the target's heap block is uninitialised).
+* For 24-bit images sub_49C200 writes one strip offset per strip, while the
+  engine's decoder (sub_49D7B0) always reads strips + 1, counted from the
+  weight tables. The CBG v2 decoder in `cbg.rs` now addresses strips the
+  same way (it used to count from the end of the table and dropped strip 0
+  of such images).
+
+Kernel pass finished: no selector is `todo` any more (688 verified, 53
+deferred). The `PARTIAL_IMPLEMENTATION_OPCODES` labels in `native_call.rs`
+lag behind this checklist (many verified selectors are still labelled
+Partial); the CSV is authoritative.
+
+Next: ADR 0004 (file layer: 80:3A, 80:F0..FC, 81:28..3E, 81:F2/F7, 90:C4/C5,
+92:1F), then the VM value model (80:20/21/40/41/44/60/70/71, 81:44/6A/6B,
+92:14/15/F1), which still needs the user's decision on rewriting the VM core
+to raw 32-bit cells and segment<<26 addresses.
