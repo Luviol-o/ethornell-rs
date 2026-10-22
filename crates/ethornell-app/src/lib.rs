@@ -15256,9 +15256,32 @@ mod input_tests {
         }
         assert_eq!(pixel(8, 10)[3], 0);
 
+        // The script then copies B into a cleared bitmap of its size with
+        // 91:1D type 0 (sub_40AF50, a plain copy: the halo stays white)
+        // and blends that over the text.
+        let copy = 1432;
+        api.store_runtime_bitmap(
+            copy,
+            DecodedImage {
+                width: 21,
+                height: 21,
+                rgba: vec![0; 21 * 21 * 4],
+            },
+            2,
+        );
+        let mut stack = vec![
+            Value::Int(copy),
+            Value::Int(halo),
+            Value::Int(0),
+            Value::Int(0xFF_FFFF),
+            Value::Int(0),
+        ];
+        call_graph(&mut api, 0x91, 0x1d, &mut stack).unwrap();
+        let copied = api.graph_bitmap_image(copy).unwrap();
+        assert_eq!(copied.rgba, image.rgba);
         let mut composed = glyph;
         assert!(crate::bitmap_blend::blit_alpha_over_parameter(
-            &mut composed, 2, &image, 2, -8, -8, 64
+            &mut composed, 2, &copied, 2, -8, -8, 64
         ));
         let at = |x: usize, y: usize| composed.rgba[(y * 5 + x) * 4..][..4].to_vec();
         assert_eq!(at(2, 2), [0, 0, 0, 255]);

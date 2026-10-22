@@ -18099,7 +18099,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_PROCESS_BITMAP_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_4816F0 calls sub_4199D0 and selects one of six target pixel-processing operations with a native alpha parameter.",
+        notes: "sub_4816F0 calls sub_4199D0 and selects one of six target pixel-processing operations with a native alpha parameter. Type 0 is sub_40AF50, the plain copy of blit mode 0x80, which uses neither parameter.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_APPLY_GRAYSCALE_MASK,
