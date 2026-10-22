@@ -2967,6 +2967,7 @@ impl RuntimeTraceApi {
                 if !released {
                     return Some(Err(ethornell_vm::VmError::Runtime("無効なスプライトハンドルが指定されました".to_string())));
                 }
+                self.display_releases += 1;
                 tracing::debug!(handle, "GraphReleaseSpriteObject");
                 ethornell_vm::Value::None
             }
