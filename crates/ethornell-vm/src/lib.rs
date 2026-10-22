@@ -26,6 +26,7 @@ pub mod native_input;
 pub mod native_motion;
 pub mod native_ownership;
 pub mod native_selection;
+mod native_strings;
 pub mod native_thread;
 mod procedure_class_map;
 mod profile;
@@ -6603,6 +6604,29 @@ impl Vm {
             args.push(self.pop_value()?);
         }
         args.reverse();
+        // The handlers' `char *` arguments (sub_48EA40) reach the host as
+        // text whatever produced the pointer.
+        let encoding = if matches!(group, 0x90..=0x92) {
+            self.graph_text_encoding.unwrap_or(encoding_rs::SHIFT_JIS)
+        } else {
+            encoding_rs::SHIFT_JIS
+        };
+        for &index in native_strings::string_arguments(group, id) {
+            let Some(value) = args.get(index) else {
+                continue;
+            };
+            let pointer = match value {
+                Value::Ptr(pointer) => *pointer,
+                Value::Int(pointer) => *pointer as u32,
+                _ => continue,
+            };
+            if pointer == 0 {
+                continue;
+            }
+            if let Ok(text) = self.value_as_string_with_encoding(Value::Ptr(pointer), encoding) {
+                args[index] = Value::Str(text);
+            }
+        }
         Ok(args)
     }
     pub fn set_native_abi_profile(&mut self,profile:NativeAbiProfile) {
