@@ -759,6 +759,9 @@ struct RuntimeTraceApi {
     graph91_multilayer_background: native_graph_sys91::Graph91MultiLayerBackgroundState,
     /// Target System91:55 Sprite-to-Sprite relation registry.
     graph91_sprite_relations: BTreeMap<i32, i32>,
+    /// Sprite+0x154 raised by a 91:55 link (sub_4290F0) rather than by a
+    /// 90:55 grayscale bitmap.
+    graph91_sprite_link_masks: BTreeSet<i32>,
     /// Target System91:60-69 CDspObjEffector registry: 8 tagged slots.
     graph91_effectors: BTreeMap<i32, native_graph_sys91::Graph91EffectorState>,
     /// Target System91:70-7F CDspObjLandscape registry: 4 tagged slots.
@@ -1189,6 +1192,7 @@ impl RuntimeTraceApi {
             graph91_multilayer_background:
                 native_graph_sys91::Graph91MultiLayerBackgroundState::default(),
             graph91_sprite_relations: BTreeMap::new(),
+            graph91_sprite_link_masks: BTreeSet::new(),
             graph91_effectors: BTreeMap::new(),
             graph91_landscapes: BTreeMap::new(),
             queued_system_events: VecDeque::new(),
@@ -3458,6 +3462,7 @@ impl RuntimeTraceApi {
         removed |= self.graph91_landscapes.remove(&object).is_some();
         self.graph91_sprite_relations
             .retain(|sprite, linked| *sprite != object && *linked != object);
+        self.graph91_sprite_link_masks.remove(&object);
         removed |= self.graph_input_objects.remove(&object).is_some();
         removed |= self.graph_object_properties.remove(&object).is_some();
         removed |= self.graph_mode5_render_states.remove(&object).is_some();
@@ -11316,6 +11321,20 @@ mod input_tests {
         let mut self_link = vec![Value::Int(first), Value::Int(first)];
         let status = call_graph(&mut api, 0x91, 0x55, &mut self_link).unwrap();
         assert_eq!(status, Value::Int(11));
+
+        // sub_429070: relinking an already linked sprite reports 13, a
+        // second sprite claiming the same linked sprite reports 14.
+        let mut relink = vec![Value::Int(first), Value::Int(second)];
+        assert_eq!(call_graph(&mut api, 0x91, 0x55, &mut relink).unwrap(), Value::Int(13));
+        let mut claim = vec![Value::Int(second), Value::Int(first)];
+        assert_eq!(call_graph(&mut api, 0x91, 0x55, &mut claim).unwrap(), Value::Int(0));
+        // The refused relink already ran sub_428320(-1), so +0x154 is low
+        // and the first sprite can no longer be unlinked.
+        let mut unlink = vec![Value::Int(first), Value::Int(0)];
+        assert_eq!(call_graph(&mut api, 0x91, 0x55, &mut unlink).unwrap(), Value::Int(13));
+        let mut unlink = vec![Value::Int(second), Value::Int(0)];
+        assert_eq!(call_graph(&mut api, 0x91, 0x55, &mut unlink).unwrap(), Value::Int(0));
+        assert_eq!(api.graph91_sprite_relations.get(&second), None);
     }
 
     #[test]
@@ -23409,10 +23428,7 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                 }
                 if source_bitmap != -1 && self.graph_bitmap_image(source_bitmap).is_none() {
                     return Err(ethornell_vm::VmError::Runtime(format!(
-                        "指定されたビットマップのうち、いずれかは登録されていません{}", {
-                            let _ = (decoration_error_context, frame_error_context);
-                            ""
-                        }
+                        "指定されたビットマップのうち、いずれかは登録されていません\n\nDecoration [ {decoration_error_context} ] , Frame [ {frame_error_context} ] , Back [ {source_bitmap} ]"
                     )));
                 }
                 let retained = if source_bitmap == -1 {
@@ -23942,9 +23958,9 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                         && inside(y, surface_height)
                         && inside(bottom, surface_height);
                     if !valid {
-                        return Err(ethornell_vm::VmError::Runtime(
-                            "ウィンドウの有効範囲として指定された値は無効です".into(),
-                        ));
+                        return Err(ethornell_vm::VmError::Runtime(format!(
+                            "ウィンドウの有効範囲として指定された値は無効です\n\n原点座標 [ {x} , {y} ] , 横幅 [ {width} ] , 縦幅 [ {height} ]"
+                        )));
                     }
                     if valid {
                         if let Some(surface) = self.graph_surfaces.get_mut(&window) {

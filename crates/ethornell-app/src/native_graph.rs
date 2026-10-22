@@ -3071,6 +3071,13 @@ impl RuntimeTraceApi {
                         GRAPH90_CLASS_SPRITE,
                     )
                 {
+                    // 1.622 sub_428320: -1 only lowers the mask flag; a bitmap
+                    // first tries sub_429070(sprite, 0) to drop a 91:55 link.
+                    if *bitmap == -1 {
+                        self.graph91_clear_sprite_mask(*handle);
+                    } else {
+                        let _ = self.graph91_unlink_sprite(*handle);
+                    }
                     let properties = self.graph_object_properties.entry(*handle).or_default();
                     // Target sub_43ED20 -> sub_427F80 stores an independent
                     // auxiliary bitmap at Sprite+0x13C and generation at
@@ -3602,8 +3609,8 @@ impl RuntimeTraceApi {
                             )
                         } else if reason.contains("vector") || reason.contains("auxiliary") {
                             format!(
-                                "指定されたビットマップ [ {} ] はベクトル＆ディスタンスマップではない、",
-                                args[4]
+                                "指定されたビットマップ [ {} ] はベクトル＆ディスタンスマップではない、\n\n或いはビットマップ [ {} ] とサイズが一致していません",
+                                args[4], args[3]
                             )
                         } else {
                             format!("指定された波紋 [ {} ] は登録されていません", args[6])

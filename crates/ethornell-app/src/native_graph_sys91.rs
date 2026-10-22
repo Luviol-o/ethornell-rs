@@ -1037,23 +1037,40 @@ impl RuntimeTraceApi {
                 };
                 ethornell_vm::Value::Int(status)
             }
-            0x60 => ethornell_vm::Value::Int(self.graph91_create_effector()),
+            // sub_483010 / sub_483040 / sub_483070.
+            0x60 => match self.graph91_create_effector() {
+                0 => {
+                    return Some(Err(ethornell_vm::VmError::Runtime(
+                        "これ以上、エフェクターオブジェクトを生成する事は出来ません".into(),
+                    )));
+                }
+                handle => ethornell_vm::Value::Int(handle),
+            },
             0x61 => {
-                if let Some(handle) = Self::graph91_source_ints(stack, 1).first().copied() {
-                    self.graph91_release_effector(handle);
+                let handle = Self::graph91_source_ints(stack, 1).first().copied().unwrap_or(0);
+                if !self.graph91_release_effector(handle) {
+                    return Some(Err(ethornell_vm::VmError::Runtime(
+                        "無効なエフェクターハンドルが指定されました".into(),
+                    )));
                 }
                 ethornell_vm::Value::None
             }
             0x64 => {
                 let args = Self::graph91_source_ints(stack, 2);
-                if let [handle, enabled] = args.as_slice() {
-                    let enabled = *enabled != 0;
-                    if let Some(state) = self.graph91_effectors.get_mut(handle) {
-                        state.enabled = enabled;
-                        self.graph_object_enabled.insert(*handle, enabled);
-                        self.display_tree.set_enabled(*handle, enabled);
-                    }
-                }
+                let [handle, enabled] = args[..] else {
+                    return Some(Err(ethornell_vm::VmError::Runtime(
+                        "無効なエフェクターハンドルが指定されました".into(),
+                    )));
+                };
+                let enabled = enabled != 0;
+                let Some(state) = self.graph91_effectors.get_mut(&handle) else {
+                    return Some(Err(ethornell_vm::VmError::Runtime(
+                        "無効なエフェクターハンドルが指定されました".into(),
+                    )));
+                };
+                state.enabled = enabled;
+                self.graph_object_enabled.insert(handle, enabled);
+                self.display_tree.set_enabled(handle, enabled);
                 ethornell_vm::Value::None
             }
             0x65..=0x69=>{
@@ -2216,6 +2233,8 @@ impl RuntimeTraceApi {
             .unwrap_or(0)
     }
 
+    /// sub_43F160 -> sub_429070. Linking first runs sub_428320(-1), so the
+    /// grayscale mask is dropped even when the link is then refused.
     pub(super) fn graph91_set_sprite_relation(&mut self, sprite: i32, linked: i32) -> i32 {
         if !self.graph90_is_sprite_handle(sprite) {
             return 255;
@@ -2223,11 +2242,42 @@ impl RuntimeTraceApi {
         if linked == sprite || (linked != 0 && !self.graph90_is_sprite_handle(linked)) {
             return 11;
         }
-        if linked == 0 {
-            self.graph91_sprite_relations.remove(&sprite);
-        } else {
+        if linked != 0 {
+            self.graph91_clear_sprite_mask(sprite);
+            if self.graph91_sprite_relations.contains_key(&sprite) {
+                return 13;
+            }
+            if self.graph91_sprite_relations.values().any(|&other| other == linked) {
+                return 14;
+            }
             self.graph91_sprite_relations.insert(sprite, linked);
+            self.graph91_sprite_link_masks.insert(sprite);
+            return 0;
         }
+        self.graph91_unlink_sprite(sprite)
+    }
+
+    /// sub_428320(-1): Sprite+0x154 = 0, +0x158 = -1; +0x160 stays.
+    pub(super) fn graph91_clear_sprite_mask(&mut self, sprite: i32) {
+        if let Some(properties) = self.graph_object_properties.get_mut(&sprite) {
+            properties.aux_resource = None;
+        }
+        self.graph91_sprite_link_masks.remove(&sprite);
+    }
+
+    /// sub_429070(sprite, 0): needs +0x154 and +0x160; 0x8000000C maps to
+    /// status 13. The linked sprite's +0x164 always mirrors the relation.
+    pub(super) fn graph91_unlink_sprite(&mut self, sprite: i32) -> i32 {
+        let masked = self.graph91_sprite_link_masks.contains(&sprite)
+            || self
+                .graph_object_properties
+                .get(&sprite)
+                .is_some_and(|properties| properties.aux_resource.is_some());
+        if !masked || !self.graph91_sprite_relations.contains_key(&sprite) {
+            return 13;
+        }
+        self.graph91_sprite_relations.remove(&sprite);
+        self.graph91_clear_sprite_mask(sprite);
         0
     }
 

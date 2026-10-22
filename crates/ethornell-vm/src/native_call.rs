@@ -17310,7 +17310,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_SPRITE_RELATION_PARAMETERS,
         returns: "i32 status",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "0x004824D0 resolves one required and one optional CDspObjSprite then calls sub_428CD0; zero clears the relation.",
+        notes: "sub_482FD0 -> sub_43F160 -> sub_429070: sprite=p0, linked=p1; 255 missing sprite, 11 self/missing link, 13 already linked or unlink without +0x154/+0x160, 14 linked sprite already claimed; linking first runs sub_428320(-1).",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_CREATE_EFFECTOR,
@@ -17318,7 +17318,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: NO_PARAMETERS,
         returns: "0x91000000 tagged handle or 0",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_43F290 allocates one of eight CDspObjEffector slots constructed by sub_41FCA0 with CDspObj sort_class=6 and a per-registry monotonic construction index at CDspObj+0x20; the index is independent of the reusable tagged slot.",
+        notes: "sub_483010 -> sub_43FBB0: 8 slots, exhaustion is a script error.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_RELEASE_EFFECTOR,
@@ -17326,7 +17326,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_EFFECTOR_HANDLE_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_43F390 releases a validated 0x91000000-tagged CDspObjEffector.",
+        notes: "sub_483040 -> sub_43F750: unknown effector is a script error.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_SET_EFFECTOR_ENABLED,
@@ -17334,7 +17334,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_EFFECTOR_ENABLED_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_43F730 forwards the native enable gate to the effector object.",
+        notes: "sub_483070 -> sub_43FAF0: enable flag; unknown effector is a script error.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_CONFIGURE_DUAL_VECTOR_EFFECTOR,
@@ -17342,7 +17342,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_DUAL_VECTOR_EFFECTOR_PARAMETERS,
         returns: "void; target reports map validation errors",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "4830B0 ->420430 ->4201B0: transform display prefix through one/two live format4 maps with captured generations.",
+        notes: "sub_4830B0 effector configure: priority/alpha validators first, then bitmap/vector map errors with full multi-line texts.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_CONFIGURE_GRADIENT_EFFECTOR,
@@ -17350,7 +17350,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_GRADIENT_EFFECTOR_PARAMETERS,
         returns: "void; target rejects gradient types outside 0..=1",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "483300 ->420570 ->413D90: horizontal blur of captured display prefix, with black-pad or edge-clamp mode.",
+        notes: "effector configure (4 args): validators first, target texts.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_CONFIGURE_RIPPLE_EFFECTOR,
@@ -17358,7 +17358,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_RIPPLE_EFFECTOR_PARAMETERS,
         returns: "void; target validates map, maximum distance and ripple registration",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "4833C0 ->4205C0: screen-sized format6 plus copied wave window; alpha setter rescales amplitude and property100 selects window offset. Draw414300.",
+        notes: "effector V&D map configure: validators, full multi-line texts.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_CONFIGURE_TRANSFORM_EFFECTOR,
@@ -17366,7 +17366,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_TRANSFORM_EFFECTOR_PARAMETERS,
         returns: "void; target rejects zero scales",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "483660 ->420730: inverse affine transform of captured prefix. Alpha/fixed setters evaluate coefficients; assigning coefficients alone preserves cached derived fields.",
+        notes: "effector configure (9 args): validators, target texts.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_CONFIGURE_SURFACE_EFFECTOR,
@@ -17374,7 +17374,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_SURFACE_EFFECTOR_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "483790 ->4207F0: clear retained bitmap; each draw blends it over current prefix and saves result for the next draw.",
+        notes: "effector configure (3 args): validators, target texts.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_CREATE_LANDSCAPE,
@@ -20145,6 +20145,12 @@ const PORTABLE_EQUIVALENT_OPCODES: &[NativeOpcode] = &[
     opcodes::GRAPH91_SET_MULTILAYER_LAYER_AUXILIARY_PAIR,
     opcodes::GRAPH91_SET_MULTILAYER_LAYER_SOURCE_VELOCITY,
     opcodes::GRAPH91_SET_MULTILAYER_LAYER_TRANSFORM_VELOCITY,
+    opcodes::GRAPH91_SET_SPRITE_RELATION,
+    opcodes::GRAPH91_CONFIGURE_DUAL_VECTOR_EFFECTOR,
+    opcodes::GRAPH91_CONFIGURE_GRADIENT_EFFECTOR,
+    opcodes::GRAPH91_CONFIGURE_RIPPLE_EFFECTOR,
+    opcodes::GRAPH91_CONFIGURE_TRANSFORM_EFFECTOR,
+    opcodes::GRAPH91_CONFIGURE_SURFACE_EFFECTOR,
 ];
 
 const PARTIAL_IMPLEMENTATION_OPCODES: &[NativeOpcode] = &[
@@ -20221,12 +20227,6 @@ const PARTIAL_IMPLEMENTATION_OPCODES: &[NativeOpcode] = &[
     opcodes::GRAPH91_MEASURE_TEXT,
     opcodes::GRAPH91_DRAW_TEXT,
     opcodes::GRAPH91_DRAW_TEXT_WITH_STYLE_MODE,
-    opcodes::GRAPH91_SET_SPRITE_RELATION,
-    opcodes::GRAPH91_CONFIGURE_DUAL_VECTOR_EFFECTOR,
-    opcodes::GRAPH91_CONFIGURE_GRADIENT_EFFECTOR,
-    opcodes::GRAPH91_CONFIGURE_RIPPLE_EFFECTOR,
-    opcodes::GRAPH91_CONFIGURE_TRANSFORM_EFFECTOR,
-    opcodes::GRAPH91_CONFIGURE_SURFACE_EFFECTOR,
     opcodes::GRAPH91_HIT_TEST_LANDSCAPE,
     opcodes::GRAPH91_CONFIGURE_LANDSCAPE_OBJECT,
     opcodes::GRAPH91_SET_LANDSCAPE_CELL_SILHOUETTE,

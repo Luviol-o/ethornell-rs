@@ -15,16 +15,19 @@ impl RuntimeTraceApi {
         id: u16,
         a: &[i32],
     ) -> ethornell_vm::VmResult<()> {
-        let fail = |reason: &str| ethornell_vm::VmError::Runtime(format!("91:{id:02X}: {reason}"));
+        // sub_4830B0..sub_483790: priority and transparency checks first,
+        // then the configure helper's codes (255 unknown effector, 1/2 map
+        // missing, 3/4 not a vector map, 5 gradation type, 6 distance,
+        // 7 ripple slot, 9 scale).
+        let err = |message: String| ethornell_vm::VmError::Runtime(message);
         let object = a[0];
-        if !self.graph91_effectors.contains_key(&object) {
-            return Err(fail("invalid effector object"));
-        }
         let (w, h) = snapshot::runtime_frame_size(self);
         let priority = *a.last().unwrap();
         let alpha = a[a.len() - 2];
-        if priority as u32 >= 65536 || alpha as u32 > 256 {
-            return Err(fail("invalid priority or alpha"));
+        target_checks::priority(priority)?;
+        target_checks::effect_level(alpha)?;
+        if !self.graph91_effectors.contains_key(&object) {
+            return Err(err("無効なエフェクターハンドルが指定されました".into()));
         }
         let mode = i32::from(id - 0x65);
         let maps = match id {
@@ -33,10 +36,10 @@ impl RuntimeTraceApi {
             _ => [-1, -1],
         };
         if id == 0x66 && a[1] as u32 > 1 {
-            return Err(fail("blur edge mode must be zero or one"));
+            return Err(err(format!("指定されたグラデーションタイプ [ {} ] は無効です", a[1])));
         }
         if id == 0x68 && (a[4] == 0 || a[5] == 0) {
-            return Err(fail("transform scale is zero"));
+            return Err(err(format!("無効な伸縮倍率 [ {} , {} ] が指定されました", a[4], a[5])));
         }
         let mut bindings = Vec::new();
         for (index, bitmap) in maps.into_iter().enumerate() {
@@ -46,34 +49,43 @@ impl RuntimeTraceApi {
             if bitmap == -1 && !matches!(id, 0x65 | 0x67) {
                 continue;
             }
-            let info = self
-                .query_bitmap_info(bitmap)
-                .ok_or_else(|| fail("missing vector bitmap"))?;
+            let missing = || {
+                err(match (id, index) {
+                    (0x67, _) => format!(
+                        "ベクトル＆ディスタンスマップとして指定されたビットマップ [ {bitmap} ] は無効です"
+                    ),
+                    (_, 0) => format!("第一ベクトルマップとして指定されたビットマップ [ {bitmap} ] は無効です"),
+                    _ => format!("第二ベクトルマップとして指定されたビットマップ [ {bitmap} ] は無効です"),
+                })
+            };
+            let info = self.query_bitmap_info(bitmap).ok_or_else(missing)?;
             let format = if id == 0x67 { 6 } else { 4 };
             if info.format != format
                 || info.width < w
                 || info.height < h
                 || (id == 0x67 && (info.width != w || info.height != h))
             {
-                return Err(fail(
-                    "vector format/extent differs from native requirements",
-                ));
+                return Err(err(match (id, index) {
+                    (0x67, _) => format!(
+                        "指定されたビットマップ [ {bitmap} ] はベクトル＆ディスタンスマップではない、\n\n或いはスクリーンサイズと一致していません"
+                    ),
+                    (_, 0) => format!(
+                        "第一ベクトルマップとして指定されたビットマップ [ {bitmap} ] はベクトルマップではない、\n\n若しくはスクリーンサイズとピクセル数が一致していません"
+                    ),
+                    _ => format!(
+                        "第二ベクトルマップとして指定されたビットマップ [ {bitmap} ] はベクトルマップではない、\n\n若しくはスクリーンサイズとピクセル数が一致していません"
+                    ),
+                }));
             }
-            bindings.push((
-                bitmap,
-                self.graph_resources
-                    .get(&bitmap)
-                    .ok_or_else(|| fail("missing bitmap generation"))?
-                    .generation,
-            ));
+            bindings.push((bitmap, self.graph_resources.get(&bitmap).ok_or_else(missing)?.generation));
         }
         let waves = if id == 0x67 {
             if a[2] == 0 {
-                return Err(fail("wave sample count is zero"));
+                return Err(err(format!("無効なディスタンスの最大値 [ {} ] が指定されました", a[2])));
             }
             self.effects
                 .vm_wave_samples(a[3], a[2], 0, alpha)
-                .ok_or_else(|| fail("wave table slot is missing or too short"))?
+                .ok_or_else(|| err(format!("指定された波紋 [ {} ] は登録されていません", a[3])))?
         } else {
             Vec::new()
         };

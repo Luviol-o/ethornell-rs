@@ -99,7 +99,12 @@ impl RuntimeTraceApi {
             }
             0x79 => {
                 let map = self.native_maps.entry(object).or_default();
-                let invalid = || err("無効なマップ表示座標が指定されました".into());
+                let invalid = || {
+                    err(format!(
+                        "無効なマップ表示座標が指定されました\n\nマップ座標 [ {} , {} ] , チップ座標 [ {} , {} ]",
+                        a[1], a[2], a[3], a[4]
+                    ))
+                };
                 let Some([cols, rows, cw, ch]) = map.grid else {
                     return Err(invalid());
                 };
