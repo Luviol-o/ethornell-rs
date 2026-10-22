@@ -2801,6 +2801,7 @@ impl RuntimeTraceApi {
                         "Graph90:51 #{handle} is not a sprite object"
                     ))));
                 }
+                self.display_releases += 1;
                 tracing::debug!(handle, "GraphReleaseSpriteObject");
                 ethornell_vm::Value::None
             }
