@@ -15777,7 +15777,10 @@ mod input_tests {
 
         call_graph(&mut api, 0x92, 0x91, &mut args).unwrap();
 
-        assert_eq!(api.text_nodes[&window].z, 117);
+        // The text joins the window's page, drawn by the message node.
+        let page = api.text_runtime.target_node.unwrap();
+        assert_eq!(api.text_nodes[&page].target_surface, Some(window));
+        assert_eq!(api.text_nodes[&page].z, 117);
     }
 
     #[test]
