@@ -472,14 +472,15 @@ impl HostRuntime {
             self.clear_input();
             return Ok(());
         }
-        if self.closed || self.paused != 0 || !self.runtime.api.host.pending.is_empty() {
-            return Ok(());
-        }
+        // The drawn pointer follows the stick even while input is held back.
         #[cfg(feature = "console")]
         if kind == 1 {
             if let Some(renderer) = self.renderer.as_mut() {
                 renderer.set_cursor(x, y);
             }
+        }
+        if self.closed || self.paused != 0 || !self.runtime.api.host.pending.is_empty() {
+            return Ok(());
         }
         let Some(renderer) = self.renderer.as_ref() else {
             return Ok(());

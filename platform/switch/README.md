@@ -27,7 +27,8 @@ to `sdmc:/switch/ethornell/game/`, and a Japanese/CJK TrueType font to
 startup/runtime errors go to `player.log`. Applet memory may be insufficient
 for large games: use a full-memory homebrew launch.
 
-The left stick moves the pointer; A clicks, B sends Escape, X Space, Y Enter,
+The left stick moves the pointer (a light tilt for buttons, full tilt
+crosses the screen in under a second); A clicks, B sends Escape, X Space, Y Enter,
 ZR Control, and L/R scroll. The D-pad sends arrow keys. Touch holds/releases
 the same left button as A. Plus+Minus requests the game's normal close path.
 Native confirmation prompts appear over the game and accept A/B. Structured

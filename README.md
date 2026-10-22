@@ -39,12 +39,12 @@ Without arguments (a double-click), `ethornell` asks for the game folder;
 `ethornell /path/to/sun_flower` plays it directly.
 
 Builds for Windows (x86_64), Linux (x86_64 and AArch64), FreeBSD (x86_64),
-macOS (a universal `Ethornell.app`), Android (APK), iOS (unsigned IPA) and the
-web (a static page) are published on
+macOS (a universal `Ethornell.app`), Android (APK), iOS (unsigned IPA), the
+web (a static page), Nintendo Switch (NRO) and PS Vita (VPK) are published on
 [GitHub Releases](https://github.com/xmoezzz/ethornell-rs/releases).
 The `pre-release` entry follows `main`; `v*` tags publish versioned releases.
 See [`platform/`](platform/README.md) for building and using each platform,
-including the Android and iOS apps.
+including the Android and iOS apps and the console ports.
 
 The window uses the game's icon from `icon.png`, an `.ico` file, or the icon
 resources embedded in its Windows executable, in that order.

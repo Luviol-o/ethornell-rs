@@ -183,6 +183,7 @@ mod vita {
         }
         let mut previous = 0u32;
         let mut pointer = [480f32, 272f32];
+        let _ = ethornell_console_input(engine, 1, pointer[0], pointer[1], 0, 0.);
         let mut touched = false;
         let start = Instant::now();
         let mut last = start;
@@ -228,13 +229,19 @@ mod vita {
                     request = 0;
                 }
             } else {
-                let stick = |v: u8| {
-                    let n = (v as f32 - 128.) / 127.;
-                    if n.abs() < 0.18 { 0. } else { n }
-                };
-                pointer[0] = (pointer[0] + stick(pad.lx) * 650. * elapsed).clamp(0., 959.);
-                pointer[1] = (pointer[1] + stick(pad.ly) * 650. * elapsed).clamp(0., 543.);
-                let _ = ethornell_console_input(engine, 1, pointer[0], pointer[1], 0, 0.);
+                let axis = |v: u8| ((v as f32 - 128.) / 127.).clamp(-1., 1.);
+                let (mut dx, mut dy) = (0f32, 0f32);
+                unsafe {
+                    ethornell_console_stick(axis(pad.lx), axis(pad.ly), elapsed, 960., &mut dx, &mut dy);
+                }
+                let moved = [
+                    (pointer[0] + dx).clamp(0., 959.),
+                    (pointer[1] + dy).clamp(0., 543.),
+                ];
+                if moved != pointer {
+                    pointer = moved;
+                    let _ = ethornell_console_input(engine, 1, pointer[0], pointer[1], 0, 0.);
+                }
                 let mut touch: SceTouchData = unsafe { std::mem::zeroed() };
                 unsafe {
                     sceTouchPeek(SCE_TOUCH_PORT_FRONT, &mut touch, 1);

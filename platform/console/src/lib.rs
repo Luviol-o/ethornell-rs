@@ -136,6 +136,39 @@ pub extern "C" fn ethornell_console_input(
             .map_err(|e| e.to_string())
     })
 }
+/// Pointer motion for a stick at (`x`, `y`), each -1..1 with y down, held
+/// for `seconds` on a screen `width` pixels wide. Past a round dead zone the
+/// tilt is rescaled from zero, so motion starts smoothly, and curved: a small
+/// tilt moves a few pixels at a time for buttons, full tilt crosses the
+/// screen in under a second.
+fn stick_motion(x: f32, y: f32, seconds: f32, width: f32) -> [f32; 2] {
+    const DEAD_ZONE: f32 = 0.15;
+    let tilt = x.hypot(y);
+    if !(tilt > DEAD_ZONE) || !(seconds > 0.) {
+        return [0., 0.];
+    }
+    let t = ((tilt - DEAD_ZONE) / (1. - DEAD_ZONE)).min(1.);
+    let speed = width * 1.1 * (0.2 * t + 0.8 * t * t * t);
+    let step = speed * seconds.min(0.1) / tilt;
+    [x * step, y * step]
+}
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ethornell_console_stick(
+    x: f32,
+    y: f32,
+    seconds: f32,
+    width: f32,
+    dx: *mut f32,
+    dy: *mut f32,
+) {
+    let [mx, my] = stick_motion(x, y, seconds, width);
+    if !dx.is_null() && !dy.is_null() {
+        unsafe {
+            dx.write(mx);
+            dy.write(my);
+        }
+    }
+}
 #[unsafe(no_mangle)]
 pub extern "C" fn ethornell_console_pause(ptr: *mut c_void, paused: bool) -> i32 {
     with(ptr, |s| {
@@ -242,4 +275,20 @@ pub unsafe extern "C" fn ethornell_console_diagnostics(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ethornell_console_last_error(text: *mut c_char, size: usize) {
     ERROR.with(|e| unsafe { copy_text(text, size, &e.borrow()) });
+}
+#[cfg(test)]
+mod tests {
+    use super::stick_motion;
+    #[test]
+    fn stick_motion_starts_at_zero_past_the_dead_zone_and_curves() {
+        assert_eq!(stick_motion(0.14, 0., 1. / 60., 960.), [0., 0.]);
+        assert!(stick_motion(0.16, 0., 1. / 60., 960.)[0] < 0.05);
+        let slow = stick_motion(0.4, 0., 1. / 60., 960.)[0];
+        let fast = stick_motion(1., 0., 1. / 60., 960.)[0];
+        assert!(slow > 0. && slow < 2.5, "{slow}");
+        assert!((fast - 960. * 1.1 / 60.).abs() < 0.01, "{fast}");
+        let [dx, dy] = stick_motion(-0.7, 0.7, 1. / 60., 960.);
+        assert!(dx < 0. && (dx + dy).abs() < 1e-4);
+        assert_eq!(stick_motion(f32::NAN, 0., 1. / 60., 960.), [0., 0.]);
+    }
 }

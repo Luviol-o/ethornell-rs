@@ -27,6 +27,10 @@ void *ethornell_console_create(const char *game, const char *saves,
 int32_t ethornell_console_step(void *engine, uint64_t monotonic_ns);
 int32_t ethornell_console_input(void *engine, uint32_t kind, float x, float y,
                                 int32_t code, float value);
+/* Pointer motion for the stick (x, y in -1..1, y down) held for `seconds` on
+   a `width`-pixel screen: dead zone, then a curve for slow aim and fast travel. */
+void ethornell_console_stick(float x, float y, float seconds, float width,
+                             float *dx, float *dy);
 int32_t ethornell_console_pause(void *engine, bool paused);
 int32_t ethornell_console_close(void *engine);
 void ethornell_console_destroy(void *engine);

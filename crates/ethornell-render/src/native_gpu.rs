@@ -61,12 +61,86 @@ pub struct Renderer<'w> {
     commands: Vec<RenderCommand>,
     notice: Option<String>,
     cursor: Option<[f32; 2]>,
-    cursor_texture: Option<TextureHandle>,
+    /// The arrow, rasterized for a surface this many pixels tall.
+    cursor_texture: Option<(u32, TextureHandle)>,
     notice_texture: Option<TextureHandle>,
     surface: [u32; 2],
     virtual_size: [f32; 2],
     scale: PresentationScale,
     _lifetime: PhantomData<&'w ()>,
+}
+/// The pointer's height on a surface `surface_height` pixels tall: ~23 px
+/// on a Vita, ~30 on a handheld Switch.
+fn cursor_height(surface_height: u32) -> u32 {
+    (surface_height as f32 * 0.042).round().max(16.) as u32
+}
+/// A white arrow with a dark outline, tip at the top-left pixel, antialiased
+/// by 4x4 supersampling.
+fn cursor_image(height: u32) -> DecodedImage {
+    const ARROW: [[f32; 2]; 7] = [
+        [0., 0.],
+        [0., 0.78],
+        [0.18, 0.62],
+        [0.30, 0.95],
+        [0.47, 0.88],
+        [0.35, 0.58],
+        [0.58, 0.58],
+    ];
+    let h = height as f32;
+    let width = (h * 0.6).ceil() as u32;
+    let points = ARROW.map(|[x, y]| [x * (h - 1.) + 0.5, y * (h - 1.) + 0.5]);
+    let outline = (h / 24.).max(1.);
+    let inside = |px: f32, py: f32| {
+        let mut inside = false;
+        for i in 0..points.len() {
+            let [ax, ay] = points[i];
+            let [bx, by] = points[(i + 1) % points.len()];
+            if (ay > py) != (by > py) && px < ax + (py - ay) * (bx - ax) / (by - ay) {
+                inside = !inside;
+            }
+        }
+        inside
+    };
+    let edge_distance = |px: f32, py: f32| {
+        (0..points.len())
+            .map(|i| {
+                let [ax, ay] = points[i];
+                let [bx, by] = points[(i + 1) % points.len()];
+                let (ex, ey) = (bx - ax, by - ay);
+                let t = (((px - ax) * ex + (py - ay) * ey) / (ex * ex + ey * ey)).clamp(0., 1.);
+                (px - ax - t * ex).hypot(py - ay - t * ey)
+            })
+            .fold(f32::INFINITY, f32::min)
+    };
+    let mut rgba = vec![0u8; (width * height * 4) as usize];
+    for y in 0..height {
+        for x in 0..width {
+            let (mut white, mut covered) = (0u32, 0u32);
+            for sy in 0..4 {
+                for sx in 0..4 {
+                    let px = x as f32 + (sx as f32 + 0.5) / 4.;
+                    let py = y as f32 + (sy as f32 + 0.5) / 4.;
+                    if inside(px, py) {
+                        covered += 1;
+                        if edge_distance(px, py) > outline {
+                            white += 1;
+                        }
+                    }
+                }
+            }
+            if covered > 0 {
+                let i = ((y * width + x) * 4) as usize;
+                let shade = (white * 255 / covered) as u8;
+                let alpha = (covered * 255 / 16) as u8;
+                rgba[i..i + 4].copy_from_slice(&[shade, shade, shade, alpha]);
+            }
+        }
+    }
+    DecodedImage {
+        width,
+        height,
+        rgba,
+    }
 }
 fn check(code: i32, operation: &str) -> Result<()> {
     if code == 0 {
@@ -288,25 +362,12 @@ impl Renderer<'_> {
         }
         if self.notice.is_none() {
             if let Some([x, y]) = self.cursor {
+                let size = cursor_height(self.surface[1]);
                 let t = match self.cursor_texture.clone() {
-                    Some(t) => t,
-                    None => {
-                        let mut rgba = vec![0u8; 12 * 18 * 4];
-                        for y in 0..18 {
-                            for x in 0..12 {
-                                if x <= y / 2 && y < 16 {
-                                    let i = (y * 12 + x) * 4;
-                                    let color = if x == 0 || x == y / 2 { 0 } else { 255 };
-                                    rgba[i..i + 4].copy_from_slice(&[color, color, color, 255]);
-                                }
-                            }
-                        }
-                        let t = self.insert_rgba(&DecodedImage {
-                            width: 12,
-                            height: 18,
-                            rgba,
-                        })?;
-                        self.cursor_texture = Some(t.clone());
+                    Some((height, t)) if height == size => t,
+                    _ => {
+                        let t = self.insert_rgba(&cursor_image(size))?;
+                        self.cursor_texture = Some((size, t.clone()));
                         t
                     }
                 };
@@ -315,8 +376,8 @@ impl Renderer<'_> {
                     texture: t.id,
                     x: (x - ox) / sx,
                     y: (y - oy) / sy,
-                    width: 12. / sx,
-                    height: 18. / sy,
+                    width: t.width as f32 / sx,
+                    height: t.height as f32 / sy,
                     src_x: 0.,
                     src_y: 0.,
                     src_width: 1.,
@@ -326,7 +387,7 @@ impl Renderer<'_> {
                     blend_mode: 1,
                     rotation_degrees: 0.,
                     destination_quad: None,
-                    linear_sampling: false,
+                    linear_sampling: true,
                     clip: None,
                     z: i32::MAX,
                 });
@@ -518,6 +579,18 @@ impl Drop for Renderer<'_> {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
+    #[test]
+    fn the_cursor_is_an_outlined_arrow_sized_to_the_surface() {
+        assert_eq!(cursor_height(544), 23);
+        assert_eq!(cursor_height(720), 30);
+        let image = cursor_image(23);
+        assert_eq!((image.width, image.height), (14, 23));
+        let pixel = |x: u32, y: u32| &image.rgba[((y * image.width + x) * 4) as usize..][..4];
+        // Tip at the top-left, dark outline, white body, nothing to the right.
+        assert!(pixel(0, 1)[3] > 0 && pixel(0, 1)[0] < 60);
+        assert!(pixel(3, 8)[3] == 255 && pixel(3, 8)[0] == 255);
+        assert_eq!(pixel(13, 2)[3], 0);
+    }
     static NEXT: AtomicU64 = AtomicU64::new(1);
     unsafe extern "C" fn create(_: u32, _: u32, _: *const u8) -> u64 {
         NEXT.fetch_add(1, Ordering::Relaxed)

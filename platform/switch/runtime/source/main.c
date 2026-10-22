@@ -199,6 +199,7 @@ int main(void) {
   AppletHookCookie cookie;
   appletHook(&cookie, hook, engine);
   float x = 640, y = 360;
+  ethornell_console_input(engine, 1, x, y, 0, 0);
   bool previous_left = false;
   bool quit = false;
   uint64_t request = 0;
@@ -227,11 +228,11 @@ int main(void) {
       }
     } else {
       HidAnalogStickState stick = padGetStickPos(&pad, 0);
-      float sx = stick.x / 32767.0f, sy = stick.y / 32767.0f;
-      if (sx > 0.18f || sx < -0.18f)
-        x += sx * 800 * elapsed;
-      if (sy > 0.18f || sy < -0.18f)
-        y -= sy * 800 * elapsed;
+      float dx = 0, dy = 0, old_x = x, old_y = y;
+      ethornell_console_stick(stick.x / 32767.0f, -stick.y / 32767.0f,
+                              elapsed, 1280, &dx, &dy);
+      x += dx;
+      y += dy;
       HidTouchScreenState touch = {0};
       bool touching = hidGetTouchScreenStates(&touch, 1) > 0 && touch.count > 0;
       if (touching) {
@@ -246,7 +247,8 @@ int main(void) {
         y = 0;
       if (y > 719)
         y = 719;
-      ethornell_console_input(engine, 1, x, y, 0, 0);
+      if (x != old_x || y != old_y)
+        ethornell_console_input(engine, 1, x, y, 0, 0);
       bool left = touching || (held & HidNpadButton_A);
       if (left != previous_left)
         ethornell_console_input(engine, left ? 2 : 3, x, y, 1, 0);

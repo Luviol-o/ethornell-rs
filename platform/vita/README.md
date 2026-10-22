@@ -19,7 +19,8 @@ Install using VitaShell. Copy the original game into
 `ux0:data/ethornell/font.ttf`. Saves are separate at `ux0:data/ethornell/saves/`;
 diagnostics are in `player.log`.
 
-Left stick moves the pointer; Cross clicks, Circle sends Escape, Square
+Left stick moves the pointer: a light tilt for buttons, full tilt crosses
+the screen in under a second. Cross clicks, Circle sends Escape, Square
 Space, Triangle Enter, L Control, and the D-pad arrow keys. Front touch
 holds/releases the same left button as Cross. Start+Select requests the
 game's normal close path. Confirmations appear over the game and accept
