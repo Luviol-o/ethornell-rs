@@ -74,12 +74,12 @@ def alloc(n):
     return at
 
 
-def bitmap(width, height, pixels, fmt):
+def bitmap(width, height, pixels, fmt, bpp=4):
     """A 24-byte descriptor: pixels, stride, width, height, format, bpp."""
-    data = alloc(max(1, width * height * 4) + 64)
+    data = alloc(max(1, width * height * bpp) + 64)
     mu.mem_write(data, bytes(pixels))
     desc = alloc(24)
-    mu.mem_write(desc, struct.pack("<6I", data, width * 4, width, height, fmt, 4))
+    mu.mem_write(desc, struct.pack("<6I", data, width * bpp, width, height, fmt, bpp))
     return desc, data
 
 
@@ -199,3 +199,42 @@ for n, (kind, dfmt, sfmt, colour, alpha) in enumerate(process_cases):
     emit(f"process_{n:03}", 4, sw, sh, dw, dh, (colour, alpha, kind << 16 | dfmt << 8 | sfmt),
          src, dst_before, after)
 print("process done", len(process_cases))
+
+# kind 5: sub_403190 (91:1E), eax = p3, ecx = target handle, stack =
+# (source handle, p2). The handle table behind dword_566764 holds 72-byte
+# entries: +0 in use, +4 the descriptor, +32 -1 (not a cached bitmap).
+# p2 = target format << 8 | mask format; 8-bit bitmaps are 1 byte a pixel.
+def handle_table(descs):
+    table = alloc(16 + 72 * len(descs))
+    entries = table + 16
+    mu.mem_write(table, struct.pack("<4I", 0, 0, entries, len(descs)))
+    for n, desc in enumerate(descs):
+        entry = struct.pack("<I", 1) + bytes(mu.mem_read(desc, 24)) + struct.pack("<3i", 0, -1, 0)
+        mu.mem_write(entries + 72 * n, entry)
+    mu.mem_write(0x566764, struct.pack("<I", table))
+
+
+mask_cases = []
+for tfmt, mfmt in ((2, 2), (2, 3), (3, 3), (1, 2), (1, 3), (3, 2)):
+    for _ in range(8):
+        mask_cases.append((tfmt, mfmt))
+for n, (tfmt, mfmt) in enumerate(mask_cases):
+    heap_top = global_heap
+    tw, th, mw, mh = (rng.randrange(1, 14) for _ in range(4))
+    dx, dy = rng.randrange(-tw + 1, mw), rng.randrange(-th + 1, mh)
+    if n % 8 == 7:
+        dx, dy = rng.randrange(-mw - 2, tw + 2), rng.randrange(-mh - 2, th + 2)
+    if n % 8 == 0:
+        dx = dy = 0
+    tb, mb = (1 if f == 3 else 4 for f in (tfmt, mfmt))
+    mask = bytearray(rng.randrange(256) for _ in range(mw * mh * mb))
+    for i in range(0, len(mask), 5):
+        mask[i] = 0 if i % 2 else 255
+    before = rand_pixels(tw * th) if tb == 4 else bytearray(rng.randrange(256) for _ in range(tw * th))
+    t_desc, t_data = bitmap(tw, th, before, tfmt, tb)
+    m_desc, _ = bitmap(mw, mh, mask, mfmt, mb)
+    handle_table([t_desc, m_desc])
+    call(0x403190, [1, dx], {UC_X86_REG_EAX: dy, UC_X86_REG_ECX: 0})
+    after = mu.mem_read(t_data, tw * th * tb)
+    emit(f"mask_{n:03}", 5, mw, mh, tw, th, (dx, dy, tfmt << 8 | mfmt), mask, before, after)
+print("masks done", len(mask_cases))

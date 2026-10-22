@@ -481,12 +481,7 @@ impl RuntimeTraceApi {
                 }
                 // Target pixel (x, y) reads source (x + p2, y + p3).
                 if let [target, grayscale_source, source_x, source_y] = args.as_slice() {
-                    self.graph91_apply_grayscale_mask(
-                        *target,
-                        *grayscale_source,
-                        source_x.wrapping_neg(),
-                        source_y.wrapping_neg(),
-                    );
+                    self.graph91_apply_grayscale_mask(*target, *grayscale_source, *source_x, *source_y);
                 }
                 ethornell_vm::Value::None
             }
@@ -2789,39 +2784,38 @@ impl RuntimeTraceApi {
         Ok((cell.column_index != -1).then_some(cell.derived_value as i32))
     }
 
-    fn graph91_apply_grayscale_mask(
-        &mut self,
-        target: i32,
-        grayscale_source: i32,
-        offset_x: i32,
-        offset_y: i32,
-    ) {
-        let Some(mut target_image) = self.graph_bitmap_image(target) else {
+    /// 91:1E -> sub_403190 (bitmap_kernels::grayscale_mask): target
+    /// (x, y) is masked by source (x + dx, y + dy).
+    fn graph91_apply_grayscale_mask(&mut self, target: i32, grayscale_source: i32, dx: i32, dy: i32) {
+        let (Some(target_image), Some(source_image)) =
+            (self.graph_bitmap_image(target), self.graph_bitmap_image(grayscale_source))
+        else {
             return;
         };
-        let Some(source_image) = self.graph_bitmap_image(grayscale_source) else {
-            return;
+        let target_format = self.bitmap_formats.get(&target).copied().unwrap_or(2);
+        let source_format = self.bitmap_formats.get(&grayscale_source).copied().unwrap_or(2);
+        let bitmap = |image: &DecodedImage, format| {
+            if format == 3 {
+                crate::bitmap_kernels::TargetBitmap::gray_from_image(image)
+            } else {
+                crate::bitmap_kernels::TargetBitmap::from_image(image)
+            }
         };
-        for sy in 0..source_image.height as i32 {
-            let ty = sy.saturating_add(offset_y);
-            if !(0..target_image.height as i32).contains(&ty) {
-                continue;
-            }
-            for sx in 0..source_image.width as i32 {
-                let tx = sx.saturating_add(offset_x);
-                if !(0..target_image.width as i32).contains(&tx) {
-                    continue;
-                }
-                let so = (sy as usize * source_image.width as usize + sx as usize) * 4;
-                let doff = (ty as usize * target_image.width as usize + tx as usize) * 4;
-                let gray = ((source_image.rgba[so] as u32
-                    + source_image.rgba[so + 1] as u32
-                    + source_image.rgba[so + 2] as u32)
-                    / 3) as u8;
-                target_image.rgba[doff + 3] = gray;
-            }
-        }
-        let format = self.bitmap_formats.get(&target).copied().unwrap_or(2);
-        self.graph91_store_bitmap(target, target_image, format);
+        let mask = bitmap(&source_image, source_format);
+        let mut output = bitmap(&target_image, target_format);
+        crate::bitmap_kernels::grayscale_mask(
+            &mut output,
+            target_format as u32,
+            &mask,
+            source_format as u32,
+            dx,
+            dy,
+        );
+        let image = if target_format == 3 {
+            output.gray_to_image()
+        } else {
+            output.to_image(target_format == 1)
+        };
+        self.graph91_store_bitmap(target, image, target_format);
     }
 }

@@ -17142,7 +17142,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_GRAYSCALE_MASK_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_4817F0 clips the shifted format-3 source and dispatches target format-specific mask processors sub_415B30 or sub_4155A0.",
+        notes: "sub_403190 clips target against the source moved by (-p2, -p3) and runs sub_415E30 with the target as input and output: format-2 source -> sub_4164F0 (alpha scaled by the source alpha, 255 kept), format-3 source -> sub_415EC0 (format-3 target) or sub_416020 (format-2 target alpha); other formats are ignored error codes. Ported literally (bitmap_kernels::grayscale_mask) and matched under Unicorn through sub_403190 itself (src/tools/emu_kernels.py).",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_CLONE_BITMAP,
@@ -20305,6 +20305,7 @@ const PORTABLE_EQUIVALENT_OPCODES: &[NativeOpcode] = &[
     opcodes::GRAPH91_CONCENTRATE_BITMAP,
     opcodes::GRAPH91_SCALE_TRUE_COLOR_BITMAP,
     opcodes::GRAPH91_PROCESS_BITMAP,
+    opcodes::GRAPH91_APPLY_GRAYSCALE_MASK,
 ];
 
 const PARTIAL_IMPLEMENTATION_OPCODES: &[NativeOpcode] = &[
@@ -20384,7 +20385,6 @@ const PARTIAL_IMPLEMENTATION_OPCODES: &[NativeOpcode] = &[
     opcodes::GRAPH92_LOAD_BURIKO_MOVIE_RESOURCE,
     opcodes::GRAPH91_COMPOSITE_BITMAP_RECT_ALPHA,
     opcodes::GRAPH91_COMPOSITE_BITMAP_RECT_CONVERTED,
-    opcodes::GRAPH91_APPLY_GRAYSCALE_MASK,
     opcodes::SOUND_SET_BGM_PRIMARY_VOLUME,
     opcodes::SOUND_SET_SE_PRIMARY_VOLUME,
     opcodes::SOUND_SET_BGM_SECONDARY_VOLUME,

@@ -29,6 +29,28 @@ impl TargetBitmap {
         }
     }
 
+    /// An 8-bit (format 3) bitmap from an app raster, whose four channels
+    /// all hold the grey level.
+    pub(crate) fn gray_from_image(image: &DecodedImage) -> Self {
+        Self {
+            pixels: image.rgba.iter().step_by(4).copied().collect(),
+            stride: image.width as usize,
+            width: image.width as usize,
+            height: image.height as usize,
+        }
+    }
+
+    /// An 8-bit bitmap back to an app raster.
+    pub(crate) fn gray_to_image(&self) -> DecodedImage {
+        let mut rgba = Vec::with_capacity(self.width * self.height * 4);
+        for y in 0..self.height {
+            for &level in &self.pixels[y * self.stride..y * self.stride + self.width] {
+                rgba.extend_from_slice(&[level; 4]);
+            }
+        }
+        DecodedImage { width: self.width as u32, height: self.height as u32, rgba }
+    }
+
     /// Back to an app raster; `opaque` forces alpha 255 (format 1 keeps no
     /// alpha).
     pub(crate) fn to_image(&self, opaque: bool) -> DecodedImage {
@@ -570,6 +592,61 @@ pub(crate) fn process(
     }
 }
 
+/// `sub_403190` (91:1E): `target` (x, y) is masked by `mask` (x + dx,
+/// y + dy) over the overlap. Formats: a 32-bit mask (format 2) scales a
+/// format-2 target's alpha (`sub_4164F0`); an 8-bit mask (format 3)
+/// scales a format-3 target (`sub_415EC0`) or a format-2 target's alpha
+/// (`sub_416020`). Other combinations return an error code the handler
+/// ignores. 8-bit bitmaps use one byte per pixel.
+pub(crate) fn grayscale_mask(
+    target: &mut TargetBitmap,
+    target_format: u32,
+    mask: &TargetBitmap,
+    mask_format: u32,
+    dx: i32,
+    dy: i32,
+) {
+    // sub_409180 / sub_409160 / sub_409100: signed 32-bit rectangles.
+    let left = 0i32.wrapping_sub(dx).max(0);
+    let top = 0i32.wrapping_sub(dy).max(0);
+    let right = (target.width as i32 - 1).min((mask.width as i32 - 1).wrapping_sub(dx));
+    let bottom = (target.height as i32 - 1).min((mask.height as i32 - 1).wrapping_sub(dy));
+    if left > right || top > bottom {
+        return;
+    }
+    let level = 256u32;
+    for y in top..=bottom {
+        let target_row = y as usize * target.stride;
+        let mask_row = y.wrapping_add(dy) as usize * mask.stride;
+        for x in left..=right {
+            let (tx, mx) = (x as usize, x.wrapping_add(dx) as usize);
+            match (mask_format, target_format) {
+                (2, 2) => {
+                    let m = u32::from(mask.pixels[mask_row + 4 * mx + 3]);
+                    let at = target_row + 4 * tx + 3;
+                    if m == 0 {
+                        target.pixels[at] = 0;
+                    } else if m * level != 65280 {
+                        target.pixels[at] = ((m * level * u32::from(target.pixels[at])) >> 16) as u8;
+                    }
+                }
+                (3, 3) => {
+                    let m = u32::from(mask.pixels[mask_row + mx]);
+                    let at = target_row + tx;
+                    let value = u32::from(target.pixels[at]);
+                    target.pixels[at] = if value != 0 && m != 0 { ((value * (m + 1)) >> 8) as u8 } else { 0 };
+                }
+                (3, 2) => {
+                    let m = u16::from(mask.pixels[mask_row + mx]);
+                    let at = target_row + 4 * tx + 3;
+                    target.pixels[at] = (m.wrapping_mul(u16::from(target.pixels[at])) >> 8) as u8;
+                }
+                _ => return,
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -606,14 +683,18 @@ mod tests {
                 at += n;
                 slice
             };
-            let source = TargetBitmap { pixels: take(sw * sh * 4), stride: sw * 4, width: sw, height: sh };
-            let before = take(dw * dh * 4);
-            let expected = take(dw * dh * 4);
-            let mut destination = TargetBitmap { pixels: before, stride: dw * 4, width: dw, height: dh };
+            // Kind 5 packs the formats in p2; format 3 is one byte a pixel.
+            let bpp = |format: u32| if kind == 5 && format == 3 { 1 } else { 4 };
+            let (sb, db) = (bpp(p2 & 0xFF), bpp(p2 >> 8 & 0xFF));
+            let source = TargetBitmap { pixels: take(sw * sh * sb), stride: sw * sb, width: sw, height: sh };
+            let before = take(dw * dh * db);
+            let expected = take(dw * dh * db);
+            let mut destination = TargetBitmap { pixels: before, stride: dw * db, width: dw, height: dh };
             match kind {
                 1 => concentrate(&mut destination, &source, p0, p1, p2),
                 2 => scale_nearest(&mut destination, &source, p0, p1),
                 3 => scale_filtered(&mut destination, &source, p2, p0, p1),
+                5 => grayscale_mask(&mut destination, p2 >> 8 & 0xFF, &source, p2 & 0xFF, p0 as i32, p1 as i32),
                 4 => process(&mut destination, p2 >> 8 & 0xFF, &source, p2 & 0xFF, p2 >> 16, p0, p1),
                 _ => panic!("unknown kernel {kind}"),
             }
