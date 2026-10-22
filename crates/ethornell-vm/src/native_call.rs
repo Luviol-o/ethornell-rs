@@ -16534,7 +16534,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_ENCODE_BITMAP_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_4056F0: checks and texts are the target's. Format 0 (sub_46A320, CompressedBG v1: average predictor, zero runs, Huffman, LCG-keyed count table, key = GetTickCount) is ported (ethornell_image::encode_cbg_v1) and byte-exact under Unicorn. Format 1 (sub_4A1930, the CompressedBG v2 DCT encoder) is not ported; a raw 16-byte BG header over BGRA stands in.",
+        notes: "sub_4056F0: checks and texts are the target's. Format 0 (sub_46A320, CompressedBG v1) and format 1 (sub_4A1930 -> sub_49C200, CompressedBG v2: float YCbCr, AAN float DCT with the quality tables of sub_49BE00, Huffman DC/AC per strip, LZ alpha, then the target's decode-and-compare checks) are ported (ethornell_image::encode_cbg_v1 / encode_cbg_v2) and byte-exact under Unicorn, including the encodings the checks reject (narrow 32-bit images whose alpha copies itself -> -2). Key = GetTickCount (the app's sound tick).",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_CREATE_KNOB_OBJECT,
@@ -20310,6 +20310,7 @@ const PORTABLE_EQUIVALENT_OPCODES: &[NativeOpcode] = &[
     opcodes::GRAPH91_COMPOSITE_BITMAP_RECT_CONVERTED,
     opcodes::GRAPH90_APPLY_TONE_CURVE_EFFECT,
     opcodes::GRAPH90_SET_DISPLAY_OPTIONS,
+    opcodes::GRAPH90_ENCODE_BITMAP_TO_BUFFER,
 ];
 
 const PARTIAL_IMPLEMENTATION_OPCODES: &[NativeOpcode] = &[
@@ -20332,7 +20333,6 @@ const PARTIAL_IMPLEMENTATION_OPCODES: &[NativeOpcode] = &[
     opcodes::GRAPH90_UPLOAD_MAP_TILE_DATA,
     opcodes::GRAPH90_IMPORT_EXTERNAL_IMAGE,
     opcodes::GRAPH90_SAVE_BITMAP_TO_IMAGE_FILE,
-    opcodes::GRAPH90_ENCODE_BITMAP_TO_BUFFER,
     opcodes::SYS81_CREATE_CHILD_THREAD,
     opcodes::SYS81_ENUMERATE_RESOURCES,
     opcodes::SYS81_QUEUE_RESOURCE_SEEK,

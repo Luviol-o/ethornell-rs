@@ -31,18 +31,41 @@ mu.mem_map(RET, 0x1000)
 
 heap_top = HEAP
 
+# A GDT whose entry 1 is a data segment over a fake TEB, loaded into FS:
+# the SEH prologues read and write fs:[0].
+GDT, TEB = 0x60000000, 0x61000000
+mu.mem_map(GDT, 0x1000)
+mu.mem_map(TEB, 0x1000)
+
+
+def descriptor(base, limit, access, flags):
+    return struct.pack("<HHBBBB", limit & 0xFFFF, base & 0xFFFF, (base >> 16) & 0xFF, access,
+                       ((limit >> 16) & 0xF) | (flags << 4), (base >> 24) & 0xFF)
+
+
+mu.mem_write(GDT + 8, descriptor(0, 0xFFFFF, 0x92, 0xC))
+mu.mem_write(GDT + 16, descriptor(TEB, 0xFFF, 0x92, 0x4))
+mu.mem_write(TEB, struct.pack("<I", 0xFFFFFFFF))
+mu.reg_write(UC_X86_REG_GDTR, (0, GDT, 0xFF, 0))
+for segment in (UC_X86_REG_DS, UC_X86_REG_ES, UC_X86_REG_SS):
+    mu.reg_write(segment, 1 << 3)
+mu.reg_write(UC_X86_REG_FS, 2 << 3)
+
 # Windows imports the kernels call are stubbed: each IAT slot points at a
 # hooked address in STUBS.
 STUBS = 0x50000000
-mu.mem_map(STUBS, 0x1000)
+mu.mem_map(STUBS, 0x2000)
 stubs = {}
+
+
+stub_slots = {}
 
 
 def stub(name, argc, impl):
     for entry in pe.DIRECTORY_ENTRY_IMPORT:
         for imp in entry.imports:
             if imp.name and imp.name.decode() == name:
-                at = STUBS + 16 * len(stubs)
+                at = stub_slots.setdefault(imp.address, STUBS + 4 * len(stub_slots))
                 mu.mem_write(at, b"\xC3")
                 mu.mem_write(imp.address, struct.pack("<I", at))
                 stubs[at] = (argc, impl)
@@ -53,7 +76,13 @@ def on_stub(uc, address, size, user):
         argc, impl = stubs[address]
         sp = uc.reg_read(UC_X86_REG_ESP)
         ret, *args = struct.unpack("<%dI" % (argc + 1), uc.mem_read(sp, 4 * (argc + 1)))
-        uc.reg_write(UC_X86_REG_EAX, impl(*args) & 0xFFFFFFFF)
+        try:
+            value = impl(*args)
+        except RuntimeError as error:
+            words = struct.unpack("<256I", uc.mem_read(sp, 1024))
+            code = [hex(w) for w in words if 0x401000 <= w < 0x4D0000]
+            raise RuntimeError("%s (called from %X; stack %s)" % (error, ret, " ".join(code[:16])))
+        uc.reg_write(UC_X86_REG_EAX, value & 0xFFFFFFFF)
         uc.reg_write(UC_X86_REG_ESP, sp + 4 * (argc + 1))
         uc.reg_write(UC_X86_REG_EIP, ret)
 
@@ -63,7 +92,29 @@ def set_rect(rect, left, top, right, bottom):
     return 1
 
 
+# Any other import traps with its name.
+def unknown_import(name):
+    def trap(*args):
+        raise RuntimeError("unstubbed import " + name)
+    return trap
+
+
+for entry in pe.DIRECTORY_ENTRY_IMPORT:
+    for imp in entry.imports:
+        if imp.name:
+            stub(imp.name.decode(), 0, unknown_import(imp.name.decode()))
 stub("SetRect", 5, set_rect)
+# A C++ throw ends the call: the encoders catch their own throws and fail.
+thrown = [False]
+
+
+def raise_exception(*args):
+    thrown[0] = True
+    mu.emu_stop()
+    return 0
+
+
+stub("RaiseException", 4, raise_exception)
 tick = [0]
 stub("GetTickCount", 0, lambda: tick[0])
 mu.hook_add(UC_HOOK_CODE, on_stub, begin=STUBS, end=STUBS + 0xFFF)
@@ -88,11 +139,14 @@ def zeroed(n):
     return at
 
 
-for address in (0x4ABF7F, 0x4ABF18):  # operator new / new[]
+# operator new / new[], _malloc, _aligned_malloc (16-byte aligned anyway).
+for address in (0x4ABF7F, 0x4ABF18, 0x4AF088, 0x4ACB4D):
     internal[address] = zeroed
-for address in (0x4ABF23, 0x4ABF0D):  # operator delete[] / delete
+# operator delete[] / delete, _free, _aligned_free.
+for address in (0x4ABF23, 0x4ABF0D, 0x4AEF55, 0x4ACB33):
     internal[address] = lambda p: 0
-mu.hook_add(UC_HOOK_CODE, on_internal, begin=0x4ABF00, end=0x4ABF90)
+for address in internal:
+    mu.hook_add(UC_HOOK_CODE, on_internal, begin=address, end=address)
 
 
 def alloc(n):
@@ -121,7 +175,11 @@ def call(address, stack_args, regs):
     mu.reg_write(UC_X86_REG_ESP, sp)
     for reg, value in regs.items():
         mu.reg_write(reg, value & 0xFFFFFFFF)
-    mu.emu_start(address, RET)
+    try:
+        mu.emu_start(address, RET)
+    except UcError:
+        print("fault in %X at eip %X" % (address, mu.reg_read(UC_X86_REG_EIP)), file=sys.stderr)
+        raise
 
 
 rng = random.Random(1622)
@@ -277,7 +335,8 @@ print("masks done", len(mask_cases))
 # word is set to the Windows default (53-bit precision) first.
 # p0 = filter << 16 | destination format << 8 | source format, p1 = alpha,
 # p2 = 7 extra words: dx, dy, sx, sy, angle, x scale, y scale.
-FPU = alloc(16)
+# (In the stub page: the per-case heap is reused.)
+FPU = STUBS + 0x1800
 mu.mem_write(FPU, b"\xD9\x2D" + struct.pack("<I", FPU + 8) + b"\xC3" + b"\x00" + struct.pack("<H", 0x27F))
 
 
@@ -411,3 +470,74 @@ for n, bpp in enumerate(cbg_cases):
     encoded = mu.mem_read(out, length)
     emit(f"cbg_{n:03}", 9, len(data), 1, length, 1, (tick[0], 0, 0), data, bytes(length), encoded)
 print("cbg done", len(cbg_cases))
+
+# kind 10: sub_4A1930 (90:CE format 1, CompressedBG v2), replayed without
+# its SEH frame: sub_49BBB0 (encoder object, eax; ecx = worker pool
+# dword_56670C), sub_49BE00 (eax = quality, esi = object), sub_4A1E70
+# (cdecl (output, Y table = object + 32, C table = object + 96), ecx = the
+# 16-byte descriptor), then sub_49C200 (ecx = &size, edx = bitmap
+# descriptor, stack = (object, output + header)). The pool has one thread
+# (+4 = 1, +8 = 1), so sub_446910 runs the strips inline.
+# sw = input bytes (descriptor + pixels), dw = output bytes; p0 = key,
+# p1 = quality.
+POOL = STUBS + 0x1900
+mu.mem_write(POOL, bytes(256))
+mu.mem_write(POOL + 4, struct.pack("<2I", 1, 1))
+mu.mem_write(0x56670C, struct.pack("<I", POOL))
+v2_cases = []
+for bpp in (24, 32):
+    for quality in (0, 25, 49, 50, 75, 100):
+        v2_cases.append((bpp, quality, 0))
+for n in range(36):
+    v2_cases.append((rng.choice((24, 32)), rng.choice((0, 1, 10, 33, 49, 50, 51, 70, 90, 99, 100)), 1 + n % 4))
+for n, (bpp, quality, style) in enumerate(v2_cases):
+    heap_top = global_heap
+    w, h = rng.randrange(1, 40), rng.randrange(1, 30)
+    if style == 2:
+        w, h = rng.randrange(32, 90), rng.randrange(2, 50)
+    pixels = bytearray()
+    for y in range(h):
+        for x in range(w):
+            if style == 1:
+                colour = [rng.randrange(256) for c in range(3)]
+            elif style == 3:
+                colour = [200, 100, 50]
+            else:
+                colour = [((x * 9 + y * 5 + c * 40 + rng.randrange(8)) & 0xFF) for c in range(3)]
+            pixels += bytes(colour)
+            if bpp == 32:
+                if style == 3:
+                    pixels.append(255)
+                elif style == 4:
+                    pixels.append(255 if (x // 5 + y // 3) % 2 else 0)
+                else:
+                    pixels.append(rng.choice((0, 255, rng.randrange(256))))
+    header = struct.pack("<8H", w, h, bpp, 0, 1 if bpp == 24 else 2, 0, 0, 0)
+    data = header + bytes(pixels)
+    src = alloc(len(data) + 64)
+    mu.mem_write(src, data)
+    capacity = 4 * len(data) + 4096
+    out = alloc(capacity)
+    mu.mem_write(out, bytes(capacity))
+    obj = alloc(0x400)
+    mu.mem_write(obj, bytes(0x400))
+    call(FPU, [], {})
+    call(0x49BBB0, [], {UC_X86_REG_EAX: obj, UC_X86_REG_ECX: POOL})
+    call(0x49BE00, [], {UC_X86_REG_EAX: quality, UC_X86_REG_ESI: obj})
+    tick[0] = rng.randrange(1 << 32)
+    call(0x4A1E70, [out, obj + 32, obj + 96], {UC_X86_REG_ECX: src})
+    header_len = mu.reg_read(UC_X86_REG_EAX)
+    desc = alloc(24)
+    mu.mem_write(desc, struct.pack("<6I", src + 16, w * bpp // 8, w, h, 1 if bpp == 24 else 2, bpp // 8))
+    size = alloc(4)
+    mu.mem_write(size, struct.pack("<I", 2 * (bpp // 8) * ((h + 7) & ~7) * ((w + 7) & ~7)))
+    thrown[0] = False
+    call(0x49C200, [obj, out + header_len], {UC_X86_REG_ECX: size, UC_X86_REG_EDX: desc})
+    # p2 = 1: the encoder rejected its own output (status 3).
+    if thrown[0]:
+        emit(f"cbg2_{n:03}", 10, len(data), 1, 0, 1, (tick[0], quality, 1), data, b"", b"")
+        continue
+    length = header_len + struct.unpack("<I", mu.mem_read(size, 4))[0]
+    encoded = mu.mem_read(out, length)
+    emit(f"cbg2_{n:03}", 10, len(data), 1, length, 1, (tick[0], quality, 0), data, bytes(length), encoded)
+print("cbg2 done", len(v2_cases))

@@ -5,7 +5,9 @@ use std::io::Cursor;
 use std::path::Path;
 
 mod cbg;
+mod cbg2_encode;
 mod cbg_encode;
+pub use cbg2_encode::encode_cbg_v2;
 pub use cbg_encode::encode_cbg_v1;
 pub use cbg::decode_native_buffer as decode_cbg_native_buffer;
 

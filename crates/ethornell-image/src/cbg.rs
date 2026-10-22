@@ -203,13 +203,16 @@ impl<'a> CbgV2Decoder<'a> {
         let width = ((self.header.width as i32 + 7) & !7).max(8);
         let height = ((self.header.height as i32 + 7) & !7).max(8);
         let y_blocks = height / 8;
-        let input_base = (self.input.pos + ((y_blocks + 1) as usize * 4) - base_offset) as i32;
 
+        // sub_49D7B0 reads y_blocks + 1 offsets, counted from the start of
+        // the weight tables. The engine's own encoder (sub_49C200) writes
+        // only y_blocks of them for 24-bit images, so strips are addressed
+        // from that start rather than from the end of the table.
         let mut offsets = Vec::with_capacity((y_blocks + 1) as usize);
         for _ in 0..=y_blocks {
-            offsets.push(self.input.read_i32()? - input_base);
+            offsets.push(self.input.read_i32()?);
         }
-        let input = self.input.remaining().to_vec();
+        let input = self.input.data[base_offset..].to_vec();
         let pad_skip = ((width >> 3) + 7) >> 3;
         let mut output = vec![0u8; (width * height * 4) as usize];
         let block_decoder = BlockDecoder {

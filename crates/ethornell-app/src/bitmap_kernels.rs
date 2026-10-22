@@ -1089,7 +1089,7 @@ mod tests {
                 slice
             };
             // Kind 5 packs the formats in p2; format 3 is one byte a pixel.
-            let bpp = |format: u32| if kind == 5 && format == 3 || kind == 9 { 1 } else { 4 };
+            let bpp = |format: u32| if kind == 5 && format == 3 || matches!(kind, 9 | 10) { 1 } else { 4 };
             let (sb, db) = (bpp(p2 & 0xFF), bpp(p2 >> 8 & 0xFF));
             let source = TargetBitmap { pixels: take(sw * sh * sb), stride: sw * sb, width: sw, height: sh };
             let before = take(dw * dh * db);
@@ -1131,7 +1131,14 @@ mod tests {
                     let lut = crate::graph_color::RuntimeColorLut::from_control_points(points).unwrap();
                     tone_curve(&mut destination, &source, p0 & 0xFF, lut.lane_tables(), extra[6], extra[7], extra[8], extra[9]);
                 }
-                // The encoder's output replaces the zeroed "destination".
+                // The encoders' output replaces the zeroed "destination";
+                // an empty one stands for a rejected encoding (p2 = 1).
+                10 => {
+                    let header: [u8; 16] = source.pixels[..16].try_into().unwrap();
+                    let encoded = ethornell_image::encode_cbg_v2(&header, &source.pixels[16..], p1, p0);
+                    assert_eq!(encoded.is_none(), p2 == 1, "{}", path.display());
+                    destination.pixels = encoded.unwrap_or_default();
+                }
                 9 => {
                     let header: [u8; 16] = source.pixels[..16].try_into().unwrap();
                     destination.pixels = ethornell_image::encode_cbg_v1(&header, &source.pixels[16..], p0);

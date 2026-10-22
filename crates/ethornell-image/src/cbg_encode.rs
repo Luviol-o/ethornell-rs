@@ -3,7 +3,7 @@
 //! byte for byte (`src/tools/emu_kernels.py`, kind 9).
 
 /// `sub_4A1F40`: the LCG stepping the frequency-table key.
-fn next_key(key: &mut u32) -> u32 {
+pub(crate) fn next_key(key: &mut u32) -> u32 {
     let high = key.wrapping_mul(22_695_477) >> 16;
     *key = (high << 16).wrapping_add(u32::from(key.wrapping_mul(20_021) as u16)).wrapping_add(1);
     high & 0x7FFF
@@ -79,7 +79,6 @@ struct Node {
     active: bool,
     weight: u32,
     parent: i32,
-    left: i32,
     right: i32,
 }
 
@@ -87,10 +86,10 @@ struct Node {
 /// (two lowest active weights, first index on ties, merged into the next
 /// node until one holds the total) and each leaf's code, root first.
 fn huffman_codes(counts: &[u32; 256]) -> Vec<Vec<bool>> {
-    let mut nodes = vec![Node { active: false, weight: 0, parent: -1, left: -1, right: -1 }; 511];
+    let mut nodes = vec![Node { active: false, weight: 0, parent: -1, right: -1 }; 511];
     let mut total = 0u32;
     for (symbol, &count) in counts.iter().enumerate() {
-        nodes[symbol] = Node { active: count != 0, weight: count, parent: -1, left: symbol as i32, right: symbol as i32 };
+        nodes[symbol] = Node { active: count != 0, weight: count, parent: -1, right: symbol as i32 };
         total = total.wrapping_add(count);
     }
     if total == 0 {
@@ -115,7 +114,7 @@ fn huffman_codes(counts: &[u32; 256]) -> Vec<Vec<bool>> {
         }
         let weight = |pick: i32| if pick == -1 { 0 } else { nodes[pick as usize].weight };
         let sum = weight(picks[1]).wrapping_add(weight(picks[0]));
-        nodes[next] = Node { active: true, weight: sum, parent: -1, left: picks[0], right: picks[1] };
+        nodes[next] = Node { active: true, weight: sum, parent: -1, right: picks[1] };
         if sum == total {
             break;
         }
