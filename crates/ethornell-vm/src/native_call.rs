@@ -17156,7 +17156,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_CONFIGURE_CARET_FRAMES_PARAMETERS,
         returns: "void; target errors on an invalid bitmap entry",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target sub_47E1D0 -> sub_433300 clears the old global caret array, copies each bitmap into a 24-byte frame record, and accepts -1 as an empty frame. The portable VM now copies and validates the BP bitmap table; target caret-frame raster composition remains partial.",
+        notes: "Target sub_47E1D0 -> sub_433300 clears the old global caret array, copies each bitmap into a 24-byte frame record, and accepts -1 as an empty frame. The portable VM copies and validates the BP bitmap table; while a message waits at its end the host draws the frames as the message window's child sprite (sub_433F40, GraphApi::tick_native_message_caret).",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_SET_MESSAGE_CARET_FRAME_DELAY,
