@@ -390,3 +390,26 @@ Next: ADR 0004 (file layer: 80:3A, 80:F0..FC, 81:28..3E, 81:F2/F7, 90:C4/C5,
 92:1F), then the VM value model (80:20/21/40/41/44/60/70/71, 81:44/6A/6B,
 92:14/15/F1), which still needs the user's decision on rewriting the VM core
 to raw 32-bit cells and segment<<26 addresses.
+
+Reopened 2026-10-22 (found while documenting every selector from the 1.622
+handlers; status set back to todo):
+
+* 80:1B: two Rust paths (input.rs dispatch_input_opcode and lib.rs) with different error handling, neither with the 1.622 texts.
+* 90:0E: invalid-font-width message prints the italic argument; the target prints the width (47A281 push ebx).
+* 90:11: creation failure raises an English placeholder instead of 「無効なピクセルモード [ %d ] が指定されています」; negative sizes rejected by the port only.
+* 90:5B: the target applies the transparency check to argument 8; the port stores argument 7 as the alpha.
+* 90:9D: density compared signed (target unsigned: negatives fatal); offsets above 100 stored (target ignores them).
+* 90:9E: app pops (bitmap, count); the target takes (count, bitmap).
+* 90:A0: native_selection checks the window before count/initial/columns; 0 columns rejected (target divides by zero).
+* 90:A1: same check-order difference as 90:A0.
+* 90:A2: same check-order difference as 90:A0.
+* 90:A3: same check-order difference as 90:A0.
+* 90:B0: window checked before the focus mode (target after).
+* 90:B1: window checked before the focus mode (target after).
+* 90:C7: bitmap-number check runs after the cache lookup, so a fatal call with consume set removes the entry.
+* 91:46: -1 accepted (the target checks the bitmap number on every call: 「無効なビットマップ番号 [ -1 ]」).
+* 91:9C: returns a line count; the target returns the updated X position.
+* 91:9D: returns a line count; the target returns the updated X position.
+* B0:C3: argument order reversed (target: archive first, font name last).
+* C0:C0: spline handles start at 0 (target 0x80000000).
+* C0:F0: VM reads (archive, table_out, count_out, resource, base); target order is table_out, count_out, archive, resource, base.
