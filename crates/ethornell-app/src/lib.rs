@@ -14772,6 +14772,27 @@ mod input_tests {
     }
 
     #[test]
+    fn graph92_91_text_is_drawn_at_its_window_priority() {
+        // Wonderful Everyday draws a skipped line at once with Graph92:91
+        // into its message window (handle 0xB0000000, priority 117).
+        let manager =
+            ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let mut api = super::RuntimeTraceApi::new(manager);
+        let window = 0xB000_0000_u32 as i32;
+        let mut surface = RuntimeSurface::display(window, 1128.0, 200.0);
+        surface.z = 117;
+        api.graph_surfaces.insert(window, surface);
+        let mut args = [window, 0, 0, 1, 0, 1, 2, 1, 1, 0xffffff, 192]
+            .map(Value::Int)
+            .to_vec();
+        args[1] = Value::Str("A skipped line".into());
+
+        call_graph(&mut api, 0x92, 0x91, &mut args).unwrap();
+
+        assert_eq!(api.text_nodes[&window].z, 117);
+    }
+
+    #[test]
     fn graph92_91_draws_in_the_colour_and_style_it_is_given() {
         let manager =
             ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
@@ -24739,6 +24760,15 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                     let parsed = text::parse_and_wrap_styled_message(text, &state);
                     let x = state.x;
                     let y = state.y;
+                    // The window composes this text into its own surface, so
+                    // it is drawn at the window's priority, as a 92:90
+                    // message is. The handle is not a priority: 0xB0000000
+                    // put the text under the whole scene.
+                    let z = self
+                        .graph_surfaces
+                        .get(&target)
+                        .map(|surface| surface.z)
+                        .unwrap_or(target);
                     self.store_bitmap_text_run(
                         target,
                         RuntimeTextNode {
@@ -24753,7 +24783,7 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                             line_height: state.line_height,
                             formatted_layout: true,
                             color: state.color,
-                            z: target,
+                            z,
                             ruby_spans: parsed.ruby_spans,
                             style_spans: parsed.style_spans,
                         },
