@@ -74,6 +74,7 @@ mod tests {
             labels: Default::default(),
             warnings: vec![],
             module_size: 0,
+            code: Vec::new(),
         }
     }
 

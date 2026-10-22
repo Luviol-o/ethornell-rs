@@ -84,6 +84,11 @@ pub struct BpProgram {
     /// bytes the module occupies in a thread's code region, including data
     /// that follows the last instruction. Zero when unknown.
     pub module_size: u32,
+    /// The bytes the module occupies in a thread's code region (the image
+    /// without its BP header, as sub_4450B0 copies it); code offset 0 is the
+    /// first instruction.
+    #[serde(skip)]
+    pub code: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -934,6 +939,7 @@ pub fn parse_bp_program(script_name: Option<String>, buf: &[u8]) -> BpProgram {
         labels,
         warnings,
         module_size,
+        code: buf[range.start..range.end].to_vec(),
     }
 }
 

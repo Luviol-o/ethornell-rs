@@ -359,7 +359,8 @@ mod tests {
     #[test]
     fn guarded_fetch_returns_ret_even_after_the_loaded_file_boundary() {
         let mut vm = Vm::new();
-        let raw_base = 0x0820_0614u32;
+        // The scenario arena is a heap block the scripts allocate.
+        let raw_base = vm.alloc_heap(0x6_0000) + 0x614;
         let current_offset = 0x0001_0000u32;
         vm.memory[SCRIPT_CODE_BASE_SLOT as usize..SCRIPT_CODE_BASE_SLOT as usize + 4]
             .copy_from_slice(&raw_base.to_le_bytes());
@@ -382,8 +383,8 @@ mod tests {
     #[test]
     fn guarded_fetch_allows_code_in_another_bcs_in_the_same_arena() {
         let mut vm = Vm::new();
-        let raw_base = 0x0820_0614u32;
-        let target_base = 0x0824_6084u32;
+        let raw_base = vm.alloc_heap(0x6_0000) + 0x614;
+        let target_base = raw_base + 0x4_5A70;
         let target_offset = target_base.wrapping_sub(raw_base).saturating_add(0x7a78);
         vm.memory[SCRIPT_CODE_BASE_SLOT as usize..SCRIPT_CODE_BASE_SLOT as usize + 4]
             .copy_from_slice(&raw_base.to_le_bytes());

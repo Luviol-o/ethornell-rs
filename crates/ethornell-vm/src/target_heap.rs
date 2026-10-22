@@ -92,6 +92,22 @@ impl TargetHeap {
         Some(backing)
     }
 
+    /// The script address of backing offset `backing`, inside one of the
+    /// live blocks (`blocks`: backing offset -> size).
+    pub(crate) fn address_of(&self, backing: u32, blocks: &std::collections::BTreeMap<u32, u32>) -> Option<u32> {
+        let (&start, &size) = blocks.range(..=backing).next_back()?;
+        if backing >= start + size {
+            return None;
+        }
+        self.slots.iter().enumerate().find_map(|(class, slots)| {
+            let slot = slots.iter().position(|&entry| entry == start + 1)? as u32;
+            let (_, _, shift, base) = CLASSES[class];
+            let per_segment = 26 - shift;
+            let block = ((slot & ((1 << per_segment) - 1)) << shift) | ((base + (slot >> per_segment)) << 26);
+            Some(block + (backing - start))
+        })
+    }
+
     pub(crate) fn is_heap_address(ptr: u32) -> bool {
         (0x10..0x40).contains(&(ptr >> 26))
     }

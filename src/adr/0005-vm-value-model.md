@@ -92,7 +92,18 @@ per-game workarounds can be removed. The change touches most of
   `transfer_async_shared_state`. The invented "system program descriptor"
   window at 0x40000000 (no producer anywhere) is gone: in the target those
   addresses are the first heap blocks.
-* Still legacy: code pointers (`0x10000000 | offset`, mapped onto the global
+* Phase 1, code: `BpProgram::code` keeps the module bytes; each thread's
+  code region (segment 1, `CODE_SEGMENT`) sits in its local window after the
+  data region (`CODE_WINDOW_OFFSET` 1 MiB, data limited to it), filled by
+  `install_module_code`; push_string offsets give `0x04000000 | (base + off)`.
+  Segment 0 maps only below the local window; other segments are invalid.
+* Still legacy (superseded note): code pointers (`0x10000000 | offset`, mapped onto the global
   window), invalid addresses are a Rust `MemoryOutOfBounds` instead of the
   target's fatal text. Next: code segment 1 with the module bytes, then
   phase 2 (strings).
+* Next (resume here): invalid addresses still raise a Rust
+  `MemoryOutOfBounds` instead of the target's 「無効なポインタ [ $%.8X ] にアクセスしようとしました」;
+  then phase 2 (string literals as code pointers, generated string-parameter
+  table at the app boundary, `eq` on addresses), phase 3 (functions as code
+  addresses, drop `mem_values`), phase 4 (the twelve blocked selectors).
+  Also open: the 19 selectors reopened in ADR 0003 (documentation pass).

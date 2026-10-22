@@ -61,6 +61,13 @@ const LOCAL_MEMORY_BASE: u32 = 0x0080_0000;
 /// Segment 2 of sub_48E8C0: the thread's data region (frames). Opcode 0x04
 /// pushes `(base - offset) | FRAME_SEGMENT`.
 pub(crate) const FRAME_SEGMENT: u32 = 0x0800_0000;
+/// Segment 1: the thread's code region (BP modules appended, string
+/// literals and function addresses point into it).
+pub(crate) const CODE_SEGMENT: u32 = 0x0400_0000;
+/// Where the code region sits in the thread's local window (after the data
+/// region), and its largest size.
+const CODE_WINDOW_OFFSET: u32 = 0x0010_0000;
+const CODE_WINDOW_SIZE: u32 = HEAP_OFFSET_BASE - CODE_WINDOW_OFFSET;
 const HEAP_OFFSET_BASE: u32 = 0x0020_0000;
 const HEAP_MEMORY_BASE: usize = (LOCAL_MEMORY_BASE + HEAP_OFFSET_BASE) as usize;
 const INITIAL_MEMORY_SIZE: usize = 16 * 1024 * 1024;
@@ -2294,6 +2301,7 @@ fn placeholder_loaded_program(
         labels,
         warnings: vec![warning.into()],
         module_size: 0,
+        code: Vec::new(),
     }
 }
 
@@ -2628,6 +2636,7 @@ impl Vm {
         self.programs.push(program.clone());
         self.program_code_bases.clear();
         self.program_code_bases.push(0);
+        self.install_module_code(0, &program.code);
         self.program_active.clear();
         self.program_active.push(true);
         self.target_loaded_programs.clear();
@@ -3024,6 +3033,7 @@ impl Vm {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            code: Vec::new(),
         });
         self.current_program = self.programs.len() - 1;
         self.pc = 0;
@@ -3075,7 +3085,11 @@ impl Vm {
                 if let Some(BpOperand::String(text)) = instruction.operands.first() {
                     self.push_value(Value::Str(text.clone()));
                 } else if let Some(BpOperand::Offset(offset)) = instruction.operands.first() {
-                    self.push_value(Value::Ptr(0x1000_0000 | *offset));
+                    // Opcode 0x05: `(pc_base + off) | 0x04000000`.
+                    let program = &self.programs[program_index];
+                    let base = self.program_code_bases.get(program_index).copied().unwrap_or_default();
+                    let address = base.wrapping_add(offset.wrapping_sub(Self::program_parser_code_start(program)));
+                    self.push_value(Value::Ptr(CODE_SEGMENT | address));
                 }
             }
             BpOpcode::Known {
@@ -6868,8 +6882,23 @@ impl Vm {
             .unwrap_or((current_program, target_offset))
     }
 
+    /// sub_4450B0's memcpy: the module bytes at `base` of the thread's code
+    /// region (segment 1).
+    fn install_module_code(&mut self, base: u32, code: &[u8]) {
+        let start = (LOCAL_MEMORY_BASE + CODE_WINDOW_OFFSET) as usize + base as usize;
+        let end = (start + code.len()).min((LOCAL_MEMORY_BASE + CODE_WINDOW_OFFSET + CODE_WINDOW_SIZE) as usize);
+        if start >= end {
+            return;
+        }
+        if self.memory.len() < end {
+            self.memory.resize(end.next_power_of_two().max(INITIAL_MEMORY_SIZE).min(MAX_MEMORY_SIZE), 0);
+        }
+        self.memory[start..end].copy_from_slice(&code[..end - start]);
+    }
+
     fn append_target_loaded_program(&mut self, program: BpProgram) -> u32 {
         let code_base = self.active_code_used_end();
+        self.install_module_code(code_base, &program.code);
         let index = self.programs.len();
         if let Some(name) = program.script_name.clone() {
             self.program_cache.insert(name, index);
@@ -6935,6 +6964,7 @@ impl Vm {
         if let Some(name) = program.script_name.clone() {
             self.program_cache.insert(name, index);
         }
+        self.install_module_code(code_base, &program.code);
         self.programs.push(program);
         self.program_code_bases.push(code_base);
         self.program_active.push(true);
@@ -7152,8 +7182,11 @@ impl Vm {
                     .iter()
                     .find(|(_, existing)| existing.as_str() == text.as_str())
                 {
-                    let offset = addr.saturating_sub(LOCAL_MEMORY_BASE);
-                    return Ok((FRAME_SEGMENT | offset) as i32);
+                    // The record lives in a heap block: hand back its
+                    // script address.
+                    if let Some(ptr) = self.target_heap.address_of(addr - LOCAL_MEMORY_BASE, &self.heap_allocations) {
+                        return Ok(ptr as i32);
+                    }
                 }
                 let byte_len = encoding_rs::SHIFT_JIS
                     .encode(&text)
@@ -12106,7 +12139,17 @@ impl Vm {
     /// heap blocks; an unmapped address returns `u32::MAX` (out of range).
     pub(crate) fn memory_addr(&self, ptr: u32) -> u32 {
         if ptr >> 26 == 2 {
-            return LOCAL_MEMORY_BASE.saturating_add(ptr & 0x03FF_FFFF);
+            // The data region shares the local window with the code region.
+            let offset = ptr & 0x03FF_FFFF;
+            return if offset < CODE_WINDOW_OFFSET { LOCAL_MEMORY_BASE + offset } else { u32::MAX };
+        }
+        if ptr >> 26 == 1 {
+            let offset = ptr & 0x03FF_FFFF;
+            return if offset < CODE_WINDOW_SIZE {
+                LOCAL_MEMORY_BASE + CODE_WINDOW_OFFSET + offset
+            } else {
+                u32::MAX
+            };
         }
         if target_heap::TargetHeap::is_heap_address(ptr) {
             return match self.target_heap.translate(ptr) {
@@ -12114,20 +12157,19 @@ impl Vm {
                 None => u32::MAX,
             };
         }
-        match ptr >> 24 {
-            // Code pointers of string literals (phase 2 of ADR 0005).
-            0x00..=0x1F => ptr & ADDRESS_MASK,
-            _ => u32::MAX,
-        }
+        // Segment 0: the globals, below the local window.
+        if ptr < LOCAL_MEMORY_BASE { ptr } else { u32::MAX }
     }
 
     /// `memory_addr` for addresses that need no heap lookup (debug watch
     /// lists); heap addresses map to `u32::MAX`.
     fn static_memory_addr(ptr: u32) -> u32 {
-        if ptr >> 26 == 2 {
-            LOCAL_MEMORY_BASE.saturating_add(ptr & 0x03FF_FFFF)
-        } else if ptr >> 24 <= 0x1F {
-            ptr & ADDRESS_MASK
+        if ptr >> 26 == 2 && ptr & 0x03FF_FFFF < CODE_WINDOW_OFFSET {
+            LOCAL_MEMORY_BASE + (ptr & 0x03FF_FFFF)
+        } else if ptr >> 26 == 1 && ptr & 0x03FF_FFFF < CODE_WINDOW_SIZE {
+            LOCAL_MEMORY_BASE + CODE_WINDOW_OFFSET + (ptr & 0x03FF_FFFF)
+        } else if ptr < LOCAL_MEMORY_BASE {
+            ptr
         } else {
             u32::MAX
         }
@@ -14238,6 +14280,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            code: Vec::new(),
         };
         let mut api = SchedulingApi::default();
         let mut vm = Vm::new();
@@ -14384,6 +14427,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            code: Vec::new(),
         };
         let mut vm = Vm::new();
         let mut api = SchedulingApi::default();
@@ -14422,6 +14466,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            code: Vec::new(),
         };
         let options = VmRunOptions {
             max_steps: 100,
@@ -14460,6 +14505,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            code: Vec::new(),
         };
         let options = VmRunOptions {
             max_steps: 100,
@@ -14503,6 +14549,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            code: Vec::new(),
         };
         let options = VmRunOptions {
             max_steps: 100,
@@ -14549,6 +14596,7 @@ mod tests {
             labels: [(0x10, 0)].into_iter().collect(),
             warnings: Vec::new(),
             module_size: 0,
+            code: Vec::new(),
         };
         let mut vm = Vm::new();
         let mut api = SchedulingApi::default();
@@ -14609,6 +14657,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            code: Vec::new(),
         };
         let mut api = SchedulingApi::default();
         let mut vm = Vm::new();
@@ -15165,6 +15214,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            code: Vec::new(),
         };
         let mut api = SchedulingApi {
             window_valid_region: Some([11, 22, 333, 444]),
@@ -15204,6 +15254,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            code: Vec::new(),
         };
         let mut api = SchedulingApi::default();
         let mut vm = Vm::new();
@@ -15246,6 +15297,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            code: Vec::new(),
         };
         let mut api = SchedulingApi::default();
         let mut vm = Vm::new();
@@ -15313,6 +15365,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            code: Vec::new(),
         };
         let mut api = SchedulingApi::default();
         let mut vm = Vm::new();
@@ -15355,6 +15408,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            code: Vec::new(),
         };
         let mut api = SchedulingApi {
             bitmap_pixel: Some([0x11, 0x22, 0x33, 0x44]),
@@ -15516,6 +15570,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            code: Vec::new(),
         };
         let mut api = SchedulingApi {
             movie_position: Some(12_345),
@@ -15558,6 +15613,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            code: Vec::new(),
         };
         let mut api = SchedulingApi::default();
         let mut vm = Vm::new();
@@ -15604,6 +15660,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            code: Vec::new(),
         };
         let mut api = SchedulingApi {
             graph_input_object: Some(i32::from(object)),
@@ -15653,6 +15710,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            code: Vec::new(),
         };
         let mut api = SchedulingApi {
             graph_input_object: Some(i32::from(object)),
@@ -15712,6 +15770,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            code: Vec::new(),
         };
         let mut api = SchedulingApi::default();
         let mut vm = Vm::new();
@@ -15746,6 +15805,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            code: Vec::new(),
         };
         let mut api = SchedulingApi::default();
         let mut vm = Vm::new();
@@ -15917,6 +15977,7 @@ mod tests {
             labels: std::iter::once((0x10, 0)).collect(),
             warnings: Vec::new(),
             module_size: 0,
+            code: Vec::new(),
         };
         let main = BpProgram {
             script_name: Some("mediation-main".into()),
@@ -16004,6 +16065,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            code: Vec::new(),
         };
         let mut api = MediationApi { program: mediation };
         let mut vm = Vm::new();
@@ -16616,6 +16678,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            code: Vec::new(),
         };
         let mut api = SchedulingApi::default();
         let mut vm = Vm::new();
@@ -16657,6 +16720,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            code: Vec::new(),
         };
         let mut api = SchedulingApi {
             bgm_state: Some((0, 9)),
@@ -16720,6 +16784,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            code: Vec::new(),
         };
         let mut api = SchedulingApi::default();
         let mut vm = Vm::new();
@@ -16764,6 +16829,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            code: Vec::new(),
         };
         let mut api = SchedulingApi::default();
         let mut vm = Vm::new();
@@ -16817,6 +16883,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            code: Vec::new(),
         };
         let mut api = SchedulingApi::default();
         let mut vm = Vm::new();
@@ -16884,6 +16951,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            code: Vec::new(),
         };
         let options = VmRunOptions {
             max_steps: 100,
@@ -16932,6 +17000,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            code: Vec::new(),
         };
         let mut api = SchedulingApi::default();
         let mut vm = Vm::new();
@@ -17502,6 +17571,7 @@ mod tests {
             labels: Default::default(),
             warnings: Vec::new(),
             module_size: 0,
+            code: Vec::new(),
         };
         let mut vm = Vm::new();
         vm.start(&program);
@@ -17668,7 +17738,9 @@ mod tests {
     #[test]
     fn sys80_12_rejects_unterminated_descriptor_array() {
         let mut vm = Vm::new();
-        let descriptors = (MAX_MEMORY_SIZE - 8) as u32;
+        // The last two words of the global window: the terminator would lie
+        // past it.
+        let descriptors = LOCAL_MEMORY_BASE - 8;
         vm.write_int(descriptors, 2, 11).unwrap();
         vm.write_int(descriptors + 4, 2, 13).unwrap();
         vm.stack.push(Value::Ptr(descriptors));
@@ -17676,11 +17748,9 @@ mod tests {
         let error = vm
             .try_builtin_sys_with_api(&mut SchedulingApi::default(), 0x80, 0x12)
             .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("input descriptor array is not zero terminated")
-        );
+        // Reading past the window is an invalid pointer before the
+        // terminator check can run.
+        assert!(matches!(error, crate::VmError::MemoryOutOfBounds { .. }), "{error}");
     }
 
     #[test]
@@ -18530,7 +18600,7 @@ mod tests {
     #[test]
     fn sys80_cf_resolves_tagged_raw_input_and_returns_decoded_length() {
         let mut vm=Vm::new();
-        let source=0x1000_1000u32;
+        let source=crate::CODE_SEGMENT|0x1000;
         let destination=0x2000u32;
         let at = vm.memory_addr(source) as usize; vm.memory[at..at + 4].copy_from_slice(b"data");
         vm.stack.extend([Value::Ptr(destination),Value::Ptr(source),Value::Int(4)]);
