@@ -1670,7 +1670,10 @@ impl RuntimeTraceApi {
     }
 
     fn is_primary_framebuffer(&self, bitmap: i32) -> bool {
-        if bitmap == NATIVE_SCREEN_BITMAP || self.primary_bitmap == Some(bitmap) {
+        // Slot 3790 is not special to BGI 1.622: endsys._bp captures the
+        // screen into it (90:04/05) only when 90:16 reports it free, and the
+        // save thumbnail then reads it as format 1.
+        if self.primary_bitmap == Some(bitmap) {
             return true;
         }
         if self.primary_bitmap.is_some() {

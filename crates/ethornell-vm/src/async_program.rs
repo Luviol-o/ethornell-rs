@@ -488,9 +488,14 @@ impl Vm {
             scheduler_tasks.insert(cursor.min(scheduler_tasks.len()), task);
             self.async_tasks = scheduler_tasks;
             scheduler_hops += 1;
-            if report.stop_reason.is_fatal() {
+            if report.stop_reason.is_fatal()
+                || report.stop_reason == VmStopReason::InterpreterTerminated
+            {
                 // Keep the failing context and report its actual thread/PC to
                 // the root host. It is not a successfully completed coroutine.
+                // Sys80:6A (status 6) from any thread ends the whole
+                // interpreter: sub_48D860 returns it to WinMain, which exits
+                // (endsys._bp quits from a child thread).
                 self.refresh_thread_links();
                 return Some(report);
             }

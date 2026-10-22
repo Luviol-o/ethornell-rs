@@ -18530,6 +18530,37 @@ mod tests {
     }
 
     #[test]
+    fn terminate_interpreter_in_a_child_thread_ends_the_root() {
+        // endsys._bp quits with Sys80:6A from a child thread; status 6 ends
+        // the whole interpreter, not only that thread.
+        #[rustfmt::skip]
+        let code = vec![
+            0x02, 4, 0, 0, 0,          // operand slots
+            0x02, 0, 1, 0, 0,          // code bytes 0x100
+            0x02, 0, 1, 0, 0,          // data bytes 0x100
+            0x06, 0x0B, 0x00,          // 0x0F push_offset 0x1A (child entry)
+            0x81, 0x44,                // 0x12 Sys81:44
+            0x80, 0x5F,                // 0x14 Sys80:5F yield
+            0x06, 0xFE, 0xFF,          // 0x16 push_offset 0x14
+            0x14,                      // 0x19 jmp
+            0x80, 0x6A,                // 0x1A child: Sys80:6A
+            0x17,                      // ret
+        ];
+        let program = ethornell_script::parse_bp_program(Some("quit-root._bp".into()), &code);
+        let mut vm = Vm::new();
+        vm.start(&program);
+        let mut report = vm.run_loaded(&mut TraceApi, &VmRunOptions::default());
+        for _ in 0..4 {
+            if vm.halted {
+                break;
+            }
+            report = vm.run_loaded(&mut TraceApi, &VmRunOptions::default());
+        }
+        assert!(vm.halted, "{report:?}");
+        assert_eq!(report.stop_reason, VmStopReason::InterpreterTerminated, "{report:?}");
+    }
+
+    #[test]
     fn child_thread_runs_parent_code_in_a_block_of_the_parent_regions() {
         #[rustfmt::skip]
         let code = vec![
