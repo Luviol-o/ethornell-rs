@@ -16182,7 +16182,8 @@ mod input_tests {
             (118.0, 58.0, 1045.0, 129.0)
         );
         assert_eq!(state.font_size, 28.0);
-        assert!((state.line_height - 37.52).abs() < 0.001);
+        // 28 + 28 * 34 / 100 in integers (sub_42C4C0).
+        assert_eq!(state.line_height, 37.0);
         assert_eq!(api.surface_text_states[&window].font, 7);
         api.start_native_message("字幕".into(), Some(window));
         api.tick_text(1000);
