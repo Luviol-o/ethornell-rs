@@ -35090,7 +35090,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_CONFIGURE_CARET_FRAMES_PARAMETERS,
         returns: "void; target errors on an invalid bitmap entry",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_47ECD0 -> sub_4336D0: caret frames; a bitmap that is missing or incompatible is fatal.",
+        notes: "sub_47ECD0 -> sub_4336D0: caret frames; a bitmap that is missing or incompatible is fatal. The portable VM copies and validates the BP bitmap table; while a message waits at its end the host draws the frames as the message window's child sprite (the reference build's sub_433F40, GraphApi::tick_native_message_caret).",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_SET_MESSAGE_CARET_FRAME_DELAY,

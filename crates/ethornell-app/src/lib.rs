@@ -868,6 +868,8 @@ struct RuntimeTraceApi {
     scenario_bootstrapped: bool,
     native_message_active: bool,
     native_message_surface_target: Option<i32>,
+    /// The end-of-text caret of the message waiting at its end (`sub_433F40`).
+    message_caret: Option<text::MessageCaret>,
     pending_scenario_bootstrap: Option<(String, String, Vec<u8>)>,
     scenario_playback: Option<ScenarioPlayback>,
     scenario_input_latched: bool,
@@ -1268,6 +1270,7 @@ impl RuntimeTraceApi {
             scenario_bootstrapped: false,
             native_message_active: false,
             native_message_surface_target: None,
+            message_caret: None,
             pending_scenario_bootstrap: None,
             scenario_playback: None,
             scenario_input_latched: false,
@@ -7678,6 +7681,7 @@ impl RuntimeTraceApi {
         // display objects. Real graph layers remain authoritative.
         self.push_title_compatibility_items(&mut items);
         self.push_surface_draw_items(&mut items);
+        self.push_message_caret_draw_item(&mut items);
         let mut inactive_backgrounds = BTreeSet::new();
         let mut backf_secondaries = Vec::new();
         for (layer_id, layer) in &self.graph_layers {
@@ -10350,6 +10354,120 @@ mod input_tests {
                 .values()
                 .any(|control| control.owner_id == super::text::MESSAGE_CONTROL_OWNER_ID)
         );
+    }
+
+    #[test]
+    fn a_message_waiting_at_its_end_blinks_the_caret_after_its_text() {
+        // sub_433F40: frame 0 at the text cursor, the next frame every
+        // Graph90:99 delay, a -1 frame hides the sprite, hidden at the end.
+        let manager =
+            ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let mut api = super::RuntimeTraceApi::new(manager);
+        let window = api.alloc_window_surface(320, 96).unwrap();
+        api.set_graph_object_draw_enabled(window, true);
+        let state = api.surface_text_states.entry(window).or_default();
+        state.cursor_x = 12;
+        state.cursor_y = 7;
+        state.font_size = 20;
+        api.native_message_surface_target = Some(window);
+        let caret = 3000;
+        api.store_runtime_bitmap(
+            caret,
+            DecodedImage {
+                width: 10,
+                height: 20,
+                rgba: vec![255; 10 * 20 * 4],
+            },
+            2,
+        );
+        GraphApi::configure_message_caret_frames(&mut api, 0x1234, 2, &[caret, -1]).unwrap();
+        api.graph_defaults.caret_frame_delay_ms = 500;
+        let caret_at = |api: &super::RuntimeTraceApi| {
+            api.graph_draw_items()
+                .into_iter()
+                .filter(|item| item.key == format!("runtime:bitmap:{caret}"))
+                .map(|item| (item.x, item.y))
+                .collect::<Vec<_>>()
+        };
+
+        api.start_native_message("ab\ncd e".to_string(), Some(window));
+        GraphApi::reveal_native_message(&mut api);
+        assert!(caret_at(&api).is_empty());
+        let (window_x, window_y) = api.surface_world_position(window);
+        let node = api
+            .text_nodes
+            .values()
+            .find(|node| node.target_surface == Some(window))
+            .unwrap();
+        let layout = api.formatted_text_layout(node);
+        // Second line, after four half-width glyphs of 10 px.
+        let end = (
+            window_x + 12.0 + 40.0,
+            window_y + 7.0 + layout.body_y_offset + layout.line_height,
+        );
+        GraphApi::tick_native_message_caret(&mut api, 1000);
+        assert_eq!(caret_at(&api), [end]);
+        GraphApi::tick_native_message_caret(&mut api, 1499);
+        assert_eq!(caret_at(&api), [end]);
+        GraphApi::tick_native_message_caret(&mut api, 1500);
+        assert!(caret_at(&api).is_empty());
+        GraphApi::tick_native_message_caret(&mut api, 2000);
+        assert_eq!(caret_at(&api), [end]);
+        GraphApi::finish_native_message(&mut api);
+        assert!(caret_at(&api).is_empty());
+
+        // sub_42C680/sub_42C600: a caret that doesn't fit before the valid
+        // rectangle's right edge goes to the start of the next line.
+        api.graph_surfaces.get_mut(&window).unwrap().valid_right = 12 + 40 + 5 - 1;
+        api.start_native_message("ab\ncd e".to_string(), Some(window));
+        GraphApi::reveal_native_message(&mut api);
+        GraphApi::tick_native_message_caret(&mut api, 3000);
+        assert_eq!(
+            caret_at(&api),
+            [(window_x + 12.0, end.1 + layout.line_height)]
+        );
+    }
+
+    #[test]
+    fn the_caret_is_drawn_after_its_windows_own_item() {
+        // Every item sorts with its owner's native key, so the caret, owned
+        // by the message window, follows the window's buffer (and not the
+        // other way round).
+        let manager =
+            ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let mut api = super::RuntimeTraceApi::new(manager);
+        let window = api.alloc_window_surface(320, 96).unwrap();
+        api.set_graph_object_draw_enabled(window, true);
+        api.graph_config.window_buffer = (1, 0);
+        let (buffer, caret) = (3001, 3000);
+        for id in [buffer, caret] {
+            api.store_runtime_bitmap(
+                id,
+                DecodedImage {
+                    width: 10,
+                    height: 20,
+                    rgba: vec![255; 10 * 20 * 4],
+                },
+                2,
+            );
+        }
+        api.graph_surfaces.get_mut(&window).unwrap().resource_id = Some(buffer);
+        api.surface_text_states.entry(window).or_default().font_size = 20;
+        api.native_message_surface_target = Some(window);
+        GraphApi::configure_message_caret_frames(&mut api, 0x1234, 2, &[caret, -1]).unwrap();
+        api.graph_defaults.caret_frame_delay_ms = 500;
+        api.start_native_message("ab".to_string(), Some(window));
+        GraphApi::reveal_native_message(&mut api);
+        GraphApi::tick_native_message_caret(&mut api, 1000);
+
+        let items = api.graph_draw_items();
+        let at = |id: i32| {
+            items
+                .iter()
+                .position(|item| item.key == format!("runtime:bitmap:{id}"))
+        };
+        assert!(at(caret).is_some() && at(buffer).is_some());
+        assert!(at(buffer) < at(caret));
     }
 
     #[test]
@@ -22744,6 +22862,11 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
 
     fn finish_native_message(&mut self) {
         self.native_message_active = false;
+        self.message_caret = None;
+    }
+
+    fn tick_native_message_caret(&mut self, now_tick: u32) {
+        self.tick_message_caret(now_tick);
     }
 
     fn register_graph_color_lut(&mut self, id: i32, points: [[i32; 2]; 3]) -> bool {
