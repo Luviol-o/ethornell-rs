@@ -1464,6 +1464,16 @@ impl RuntimeTraceApi {
         let bitmap = update.bitmap;
         let width = update.image.width;
         let height = update.image.height;
+        // A 92:F2 slot was created at the picture size when the graph
+        // connected; sub_45C260 copies each sample into that same descriptor.
+        // Keep its resource (and generation) so projected sprites bound to it
+        // stay valid until moviemngr._bp refreshes them (90:53).
+        if self.graph_resources.contains_key(&bitmap)
+            && self.bitmap_dimensions.get(&bitmap) == Some(&(width, height))
+            && self.replace_graph_bitmap_pixels(bitmap, update.image.clone())
+        {
+            return;
+        }
         let key = format!("runtime:movie:{bitmap}");
         self.store_graph_image(key.clone(), update.image);
         self.graph_resources
@@ -6004,6 +6014,11 @@ impl RuntimeTraceApi {
         self.tick_native_effect_state(elapsed_ms);
         let movie_elapsed_ms = elapsed_ms.min(i32::MAX as u64) as i32;
         for update in self.graph_effects.tick_movies(movie_elapsed_ms) {
+            // sub_45C260 -> sub_408AA0 -> sub_497060(0x10000, slot, 0):
+            // every delivered sample is a native event; sysmsg._bp posts it
+            // to moviemngr._bp, which counts frames at record +52 and
+            // refreshes the sprite showing the slot.
+            self.queued_system_events.push_back([0x10000, update.bitmap, 0]);
             self.store_movie_frame(update);
         }
         self.sync_movie_audio();
@@ -26257,6 +26272,12 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                             .set_movie_options(bitmap, looping, volume);
                         if options == 0 {
                             self.graph_process_handles.insert(bitmap);
+                            // sub_45C1C0 -> sub_407D90: connecting the graph
+                            // creates the slot at the picture size, format 1,
+                            // cleared, so the script can bind it at once.
+                            if let Some((width, height)) = self.graph_effects.movie_size(bitmap) {
+                                self.recreate_native_bitmap(bitmap, width, height, 1);
+                            }
                         }
                         options
                     } else {
