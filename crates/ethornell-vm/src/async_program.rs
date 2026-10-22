@@ -394,6 +394,7 @@ impl Vm {
                 self.root_procedure_active
             };
             let report = task.vm.run_loaded(api, &options);
+            self.pass_yields += task.vm.pass_yields;
             if options.collect_diagnostics || report.stop_reason.is_fatal() {
                 self.async_reports.push(report.clone());
             }

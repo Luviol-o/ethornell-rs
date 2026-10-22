@@ -435,6 +435,7 @@ impl RuntimeTraceApi {
                     let object = self.alloc_object();
                     self.graph_input_objects
                         .insert(object, RuntimeGraphInputObject::new_extended(window));
+                    self.display_changes += 1;
                     object
                 } else {
                     0

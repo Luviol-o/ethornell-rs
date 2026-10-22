@@ -602,6 +602,9 @@ struct RuntimeTraceApi {
     surface_text_buffers: BTreeMap<i32, String>,
     /// Message text each window holds since its last clear (`text::MessagePage`).
     message_pages: BTreeMap<i32, text::MessagePage>,
+    /// Display objects created or released so far: icon processors,
+    /// windows, sprites and groups (see `RuntimeEngine::run_frame`).
+    display_changes: u64,
     /// Target CDspObjKnob registry: 32 slots, handles 0xF0000000 | slot.
     graph_knob_states: BTreeMap<i32, GraphKnobState>,
     /// Knob→target is a control pointer, not a CDspObj member/parent edge.
@@ -973,6 +976,7 @@ impl RuntimeTraceApi {
             surface_text_states: BTreeMap::new(),
             surface_text_buffers: BTreeMap::new(),
             message_pages: BTreeMap::new(),
+            display_changes: 0,
             graph_knob_states: BTreeMap::new(),
             graph_knob_watches: VecDeque::new(),
             graph_knob_input_mode: 0,
@@ -8397,7 +8401,13 @@ struct RuntimeFrameReport {
     last_report: Option<ethornell_vm::VmRunReport>,
     total_steps: usize,
     scheduler_passes: usize,
+    /// Threads that ended their slice with Sys80:5F in the last pass.
+    yields: usize,
 }
+
+/// Scheduler passes a frame may add for threads that yielded: about the
+/// iterations the target's main loop runs in one 60 Hz frame period.
+const MAX_EXTRA_SCHEDULER_PASSES_PER_FRAME: usize = 15;
 
 #[derive(Clone)]
 struct CachedGraphTexture {
@@ -8482,7 +8492,11 @@ impl RuntimeEngine {
         elapsed_ms: u64,
     ) -> RuntimeFrameReport {
         self.begin_native_pass(elapsed_ms);
+        self.run_scheduler_pass()
+    }
 
+    /// One `sub_48CD70` pass over the thread list at the current time.
+    fn run_scheduler_pass(&mut self) -> RuntimeFrameReport {
         // `sub_48CD70` handles native status 3 by selecting the requested
         // CThread immediately in the same scheduler pass. Re-enter `run_loaded`
         // without advancing native time so a root-thread SwitchThread does not
@@ -8491,6 +8505,7 @@ impl RuntimeEngine {
         let mut report = self.tick_vm();
         let mut total_steps = report.steps;
         let mut scheduler_passes = 1usize;
+        let mut yields = self.vm.yields_in_last_pass();
         const MAX_ROOT_SWITCH_HOPS_PER_TICK: usize = 256;
         while report.stop_reason == ethornell_vm::VmStopReason::SwitchedThread
             && scheduler_passes < MAX_ROOT_SWITCH_HOPS_PER_TICK
@@ -8498,6 +8513,7 @@ impl RuntimeEngine {
             report = self.tick_vm();
             total_steps = total_steps.saturating_add(report.steps);
             scheduler_passes = scheduler_passes.saturating_add(1);
+            yields += self.vm.yields_in_last_pass();
         }
         if scheduler_passes == MAX_ROOT_SWITCH_HOPS_PER_TICK
             && report.stop_reason == ethornell_vm::VmStopReason::SwitchedThread
@@ -8520,6 +8536,7 @@ impl RuntimeEngine {
             last_report: Some(report),
             total_steps,
             scheduler_passes,
+            yields,
         }
     }
 
@@ -8538,12 +8555,44 @@ impl RuntimeEngine {
                 last_report: self.last_report.clone(),
                 total_steps: 0,
                 scheduler_passes: 0,
+                yields: 0,
             };
         }
 
-        let report = self.run_native_pass(pacing, elapsed_ms);
+        let mut changes = self.api.display_changes;
+        let mut report = self.run_native_pass(pacing, elapsed_ms);
         // Input edges are visible for one cooperative main-loop pass.
         self.api.finish_native_tick_input();
+        // The target's main loop (sub_48C990) runs a sub_48CD70
+        // scheduler pass per iteration and waits only about a millisecond
+        // between iterations (sub_493AE0 -> sub_4527C0), while a frame is
+        // presented at most once per frame period, when a redraw was
+        // requested (sub_461BA0). A thread that yields with Sys80:5F therefore
+        // runs again long before the screen shows what it left between two
+        // steps: Wonderful Everyday's message button bar releases its icon
+        // processor, yields and builds the next one, and the original never
+        // shows the bar empty; its system menu rebuilds its buttons, yields
+        // and releases them with the menu when it closes, and the original
+        // never shows them again. A pass costs too much to run as many as the
+        // target does, and threads that poll yield on every pass, so a frame
+        // runs another pass at its time only while the last one created or
+        // released a display object and a thread yielded: what such a thread
+        // does next is on screen with the frame, as in the target.
+        let mut extra_passes = 0;
+        while report.yields > 0
+            && self.api.display_changes != changes
+            && extra_passes < MAX_EXTRA_SCHEDULER_PASSES_PER_FRAME
+        {
+            changes = self.api.display_changes;
+            let pass = self.run_scheduler_pass();
+            report.total_steps = report.total_steps.saturating_add(pass.total_steps);
+            report.scheduler_passes = report
+                .scheduler_passes
+                .saturating_add(pass.scheduler_passes);
+            report.yields = pass.yields;
+            report.last_report = pass.last_report;
+            extra_passes += 1;
+        }
         self.api.sync_display_tree_from_runtime();
         self.api.refresh_aux_masked_sprites();
         report
@@ -9064,6 +9113,132 @@ mod input_tests {
             detect_game_id_from_bootstrap(&program).as_deref(),
             Some("AmairoChocolate")
         );
+    }
+
+    #[test]
+    fn a_thread_that_yields_after_a_release_runs_again_before_the_frame_is_shown() {
+        // Release, Sys80:5F, rebuild: the shape of Wonderful Everyday's
+        // button bar between two lines. The rebuild belongs to the same
+        // frame; a thread that only polls and yields does not get more passes.
+        let instruction = |offset: u64, name: &'static str, raw: Vec<u8>, operands| BpInstruction {
+            offset,
+            opcode: BpOpcode::Known { code: raw[0], name },
+            opcode_hex: format!("0x{:02X}", raw[0]),
+            opcode_name: name.into(),
+            operands,
+            known_call: None,
+            raw,
+            warning: None,
+        };
+        let run = |release: bool| {
+            let manager =
+                ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
+            let mut api = super::RuntimeTraceApi::new(manager);
+            let window = api.alloc_window_surface(320, 96).unwrap();
+            let mut instructions = Vec::new();
+            if release {
+                instructions.push(instruction(
+                    0x10,
+                    "push_dword",
+                    [vec![0x02], (window as u32).to_le_bytes().to_vec()].concat(),
+                    vec![BpOperand::U32(window as u32)],
+                ));
+                instructions.push(instruction(0x15, "grp1", vec![0x90, 0x81], Vec::new()));
+            }
+            instructions.push(instruction(0x17, "sys1", vec![0x80, 0x5F], Vec::new()));
+            instructions.push(instruction(
+                0x19,
+                "push_byte",
+                vec![0x00, 2],
+                vec![BpOperand::U8(2)],
+            ));
+            let program = BpProgram {
+                script_name: Some("yield-within-a-frame".into()),
+                functions: Vec::new(),
+                strings: Vec::new(),
+                instructions,
+                labels: std::collections::HashMap::new(),
+                warnings: Vec::new(),
+                module_size: 0,
+            };
+            let mut vm = ethornell_vm::Vm::new();
+            vm.start(&program);
+            let mut runtime = super::RuntimeEngine {
+                vm,
+                api,
+                options: ethornell_vm::VmRunOptions::default(),
+                last_report: None,
+            };
+            let report = runtime.run_frame(super::RuntimeFramePacing, 16, 16);
+            assert_eq!(runtime.api.engine_time_ms, 16);
+            (
+                report.scheduler_passes,
+                report.last_report.unwrap().stop_reason,
+            )
+        };
+
+        assert_eq!(run(true), (2, ethornell_vm::VmStopReason::Completed));
+        assert_eq!(run(false), (1, ethornell_vm::VmStopReason::Yielded));
+    }
+
+    #[test]
+    fn a_thread_that_yields_after_building_a_display_object_runs_again_before_the_frame_is_shown() {
+        // Build, Sys80:5F, release: the shape of Wonderful Everyday's system
+        // menu closing for the return to the title (it builds its icon
+        // processor again, yields, then releases it with its window). The
+        // release belongs to the same frame, so the rebuilt buttons are never
+        // on screen.
+        let instruction = |offset: u64, name: &'static str, raw: Vec<u8>, operands| BpInstruction {
+            offset,
+            opcode: BpOpcode::Known { code: raw[0], name },
+            opcode_hex: format!("0x{:02X}", raw[0]),
+            opcode_name: name.into(),
+            operands,
+            known_call: None,
+            raw,
+            warning: None,
+        };
+        let manager =
+            ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let mut api = super::RuntimeTraceApi::new(manager);
+        let window = api.alloc_window_surface(388, 800).unwrap();
+        let program = BpProgram {
+            script_name: Some("build-yield-release".into()),
+            functions: Vec::new(),
+            strings: Vec::new(),
+            instructions: vec![
+                instruction(
+                    0x10,
+                    "push_dword",
+                    [vec![0x02], (window as u32).to_le_bytes().to_vec()].concat(),
+                    vec![BpOperand::U32(window as u32)],
+                ),
+                instruction(0x15, "grp2", vec![0x91, 0xB8], Vec::new()),
+                instruction(0x17, "sys1", vec![0x80, 0x5F], Vec::new()),
+                instruction(0x19, "grp1", vec![0x90, 0xB9], Vec::new()),
+                instruction(0x1B, "push_byte", vec![0x00, 2], vec![BpOperand::U8(2)]),
+            ],
+            labels: std::collections::HashMap::new(),
+            warnings: Vec::new(),
+            module_size: 0,
+        };
+        let mut vm = ethornell_vm::Vm::new();
+        vm.start(&program);
+        let mut runtime = super::RuntimeEngine {
+            vm,
+            api,
+            options: ethornell_vm::VmRunOptions::default(),
+            last_report: None,
+        };
+        let report = runtime.run_frame(super::RuntimeFramePacing, 16, 16);
+
+        assert_eq!(runtime.api.engine_time_ms, 16);
+        assert_eq!(report.scheduler_passes, 2);
+        assert_eq!(
+            report.last_report.unwrap().stop_reason,
+            ethornell_vm::VmStopReason::Completed
+        );
+        assert!(runtime.api.graph_input_objects.is_empty());
     }
 
     fn test_call_frame(
@@ -23081,6 +23256,9 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                     .then(|| self.alloc_window_surface(native_width, native_height))
                     .flatten()
                     .unwrap_or_default();
+                if handle != 0 {
+                    self.display_changes += 1;
+                }
                 tracing::info!(
                     handle,
                     width,
@@ -23124,6 +23302,7 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                 if !exists || !self.remove_graph_surface(window) {
                     return fail("is not a window object");
                 }
+                self.display_changes += 1;
                 tracing::debug!(window, "GraphReleaseWindowObject");
                 trace_graph!(self, "release window #{window}");
             }
@@ -23828,6 +24007,7 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                 let object = self.alloc_object();
                 self.graph_input_objects
                     .insert(object, RuntimeGraphInputObject::new(layer));
+                self.display_changes += 1;
                 tracing::debug!(layer, object, "GraphCreateIconInputProcessor");
                 trace_graph!(
                     self,
@@ -23841,6 +24021,7 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                 let removed = self.graph_input_objects.remove(&object_id);
                 if removed.is_some() {
                     self.remove_graph_input_control_layers(object_id);
+                    self.display_changes += 1;
                 }
                 tracing::info!(?object, "GraphReleaseIconInputProcessor");
                 return Ok(ethornell_vm::Value::Int(i32::from(removed.is_some())));
@@ -24268,6 +24449,7 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                             native.enabled = 1;
                             native.draw_enabled = 0;
                         }
+                        self.display_changes += 1;
                     })
                     .unwrap_or_default();
                 tracing::info!(handle, "GraphCreateGroupObject");
@@ -24288,6 +24470,7 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                     self.graph_object_draw_enabled.remove(&handle);
                     self.graph_object_properties.remove(&handle);
                     self.display_tree.remove(handle);
+                    self.display_changes += 1;
                 }
                 tracing::info!(
                     handle,

@@ -2172,6 +2172,9 @@ pub struct Vm {
     ready_host_response: Option<HostResponse>,
     fatal_async_report: Option<Box<VmRunReport>>,
     async_reports: Vec<VmRunReport>,
+    /// Threads that ended their slice with Sys80:5F in the most recent root
+    /// scheduler pass (the root and its children).
+    pass_yields: usize,
     graph_text_encoding: Option<&'static encoding_rs::Encoding>,
     pub stack: Vec<Value>,
     operand_slots: Vec<Value>,
@@ -2460,6 +2463,12 @@ impl Vm {
         vm
     }
 
+    /// How many threads ended their slice with Sys80:5F in the most recent
+    /// scheduler pass (`run_loaded`), children included.
+    pub fn yields_in_last_pass(&self) -> usize {
+        self.pass_yields
+    }
+
     pub fn advance_time_ms(&mut self, milliseconds: u64) {
         self.timing.advance(milliseconds);
     }
@@ -2541,6 +2550,7 @@ impl Vm {
         }
         self.collect_diagnostics = options.collect_diagnostics;
         self.async_reports.clear();
+        self.pass_yields = 0;
         // `stack` is public for embedders and tests. Reconcile it once at the
         // host slice boundary; instruction dispatch maintains the ring
         // incrementally after this point.
@@ -2765,6 +2775,9 @@ impl Vm {
         instruction_profile.report(self, steps);
         if stop_reason == VmStopReason::Completed && !self.pending_host_request_ids().is_empty() {
             stop_reason = VmStopReason::WaitingForHost;
+        }
+        if stop_reason == VmStopReason::Yielded {
+            self.pass_yields += 1;
         }
         VmRunReport {
             steps,
@@ -13851,8 +13864,10 @@ mod tests {
         assert_eq!(first.pc, 1);
         assert!(vm.stack.is_empty());
         assert_eq!(api.host_sys_calls, 0);
+        assert_eq!(vm.yields_in_last_pass(), 1);
 
         let second = vm.run_loaded(&mut api, &options);
+        assert_eq!(vm.yields_in_last_pass(), 0);
         assert_eq!(second.stop_reason, VmStopReason::Completed);
         assert_eq!(second.steps, 1);
         assert_eq!(vm.stack, [Value::Int(99)]);
