@@ -16526,7 +16526,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_APPLY_TONE_CURVE_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_405450 validates both bitmaps, tone-curve id, pixel/effect modes and color-film/monochrome mix levels before applying sub_40A2A0.",
+        notes: "sub_405450 -> sub_4193D0 ported (bitmap_kernels::tone_curve) and matched under Unicorn with the record built by sub_40A060: monochrome tint (luminance 29/150/77 x colour, mixed by p3), the three-table tone-curve lookup, colour film (multiply < 128, screen above) mixed by p7; format 2 keeps the source alpha and clears fully transparent pairs (sub_4198E0), format 1 sub_419550. p6 (8 or 38) is only validated. The worker-thread band split is not reproduced.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_ENCODE_BITMAP_TO_BUFFER,
@@ -20308,6 +20308,7 @@ const PORTABLE_EQUIVALENT_OPCODES: &[NativeOpcode] = &[
     opcodes::GRAPH91_APPLY_GRAYSCALE_MASK,
     opcodes::GRAPH91_COMPOSITE_BITMAP_RECT_ALPHA,
     opcodes::GRAPH91_COMPOSITE_BITMAP_RECT_CONVERTED,
+    opcodes::GRAPH90_APPLY_TONE_CURVE_EFFECT,
 ];
 
 const PARTIAL_IMPLEMENTATION_OPCODES: &[NativeOpcode] = &[
@@ -20331,7 +20332,6 @@ const PARTIAL_IMPLEMENTATION_OPCODES: &[NativeOpcode] = &[
     opcodes::GRAPH90_UPLOAD_MAP_TILE_DATA,
     opcodes::GRAPH90_IMPORT_EXTERNAL_IMAGE,
     opcodes::GRAPH90_SAVE_BITMAP_TO_IMAGE_FILE,
-    opcodes::GRAPH90_APPLY_TONE_CURVE_EFFECT,
     opcodes::GRAPH90_ENCODE_BITMAP_TO_BUFFER,
     opcodes::SYS81_CREATE_CHILD_THREAD,
     opcodes::SYS81_ENUMERATE_RESOURCES,

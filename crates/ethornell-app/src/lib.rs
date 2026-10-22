@@ -25123,17 +25123,26 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                 if amount_after as u32 > 0x100 {
                     return fatal(format!("無効なカラーフィルムの混合レベル [ {amount_after} ] が指定されました"));
                 }
+                // sub_407D90 recreates the destination in the source's size
+                // and format; sub_4193D0 then writes every pixel
+                // (bitmap_kernels::tone_curve).
                 let transformed = self
                     .graph_bitmap_image(source)
                     .zip(self.graph_color_luts.get(&lut_id))
                     .map(|(source, lut)| {
-                        lut.apply(
+                        let source = crate::bitmap_kernels::TargetBitmap::from_image(&source);
+                        let mut target = source.clone();
+                        crate::bitmap_kernels::tone_curve(
+                            &mut target,
                             &source,
-                            color_before,
-                            amount_before,
-                            color_after,
-                            amount_after,
-                        )
+                            info.format,
+                            lut.lane_tables(),
+                            color_before as u32,
+                            amount_before as u32,
+                            color_after as u32,
+                            amount_after as u32,
+                        );
+                        target.to_image(info.format == 1)
                     });
                 let applied = if let Some(image) = transformed {
                     let width = image.width;

@@ -66,6 +66,25 @@ def set_rect(rect, left, top, right, bottom):
 stub("SetRect", 5, set_rect)
 mu.hook_add(UC_HOOK_CODE, on_stub, begin=STUBS, end=STUBS + 0xFFF)
 
+# Statically linked CRT allocators are replaced by cdecl hooks.
+internal = {}
+
+
+def on_internal(uc, address, size, user):
+    if address in internal:
+        sp = uc.reg_read(UC_X86_REG_ESP)
+        ret, arg = struct.unpack("<2I", uc.mem_read(sp, 8))
+        uc.reg_write(UC_X86_REG_EAX, internal[address](arg) & 0xFFFFFFFF)
+        uc.reg_write(UC_X86_REG_ESP, sp + 4)
+        uc.reg_write(UC_X86_REG_EIP, ret)
+
+
+for address in (0x4ABF7F, 0x4ABF18):  # operator new / new[]
+    internal[address] = lambda n: alloc(n)
+for address in (0x4ABF23, 0x4ABF0D):  # operator delete[] / delete
+    internal[address] = lambda p: 0
+mu.hook_add(UC_HOOK_CODE, on_internal, begin=0x4ABF00, end=0x4ABF90)
+
 
 def alloc(n):
     global heap_top
@@ -309,3 +328,41 @@ for n, (kind, address, sfmt, dfmt, filt, alpha, shape) in enumerate(rotate_cases
     emit_extra(f"rotate_{n:03}", kind, sw, sh, dw, dh, (filt << 16 | dfmt << 8 | sfmt, alpha, 7), params,
                src, dst_before, after)
 print("rotates done", len(rotate_cases))
+
+# kind 8: sub_4193D0 (90:CD), cdecl (destination, source, mono colour,
+# mono level, curve record, film colour, mode, film level, threaded=0).
+# The record comes from sub_40A060 (thiscall: ecx = three (x, y) control
+# points, stack = id) into the list at dword_566764 + 216.
+# p0 = format; extra = the six control values, mono colour, mono level,
+# film colour, film level.
+tone_cases = []
+for fmt in (1, 2):
+    for _ in range(24):
+        tone_cases.append(fmt)
+for n, fmt in enumerate(tone_cases):
+    heap_top = global_heap
+    w, h = rng.randrange(1, 14), rng.randrange(1, 10)
+    points = [v for _ in range(3) for v in (rng.randrange(1, 255), rng.randrange(256))]
+    mono_colour, film_colour = rng.randrange(1 << 32), rng.randrange(1 << 32)
+    mono_level, film_level = rng.choice((0, 256, rng.randrange(257))), rng.choice((0, 256, rng.randrange(257)))
+    manager = alloc(256)
+    mu.mem_write(manager, bytes(256))
+    mu.mem_write(0x566764, struct.pack("<I", manager))
+    control = alloc(24)
+    mu.mem_write(control, struct.pack("<6i", *points))
+    call(FPU, [], {})
+    call(0x40A060, [7], {UC_X86_REG_ECX: control})
+    record = struct.unpack("<I", mu.mem_read(manager + 216, 4))[0]
+    src = rand_pixels(w * h)
+    for i in range(0, len(src), 4 * 4):
+        src[i + 3] = 0
+    if n % 3 == 0 and w >= 2:
+        src[3] = src[7] = 0
+    dst_before = rand_pixels(w * h)
+    src_desc, _ = bitmap(w, h, src, fmt)
+    dst_desc, dst_data = bitmap(w, h, dst_before, fmt)
+    call(0x4193D0, [dst_desc, src_desc, mono_colour, mono_level, record, film_colour, 8, film_level, 0], {})
+    after = mu.mem_read(dst_data, w * h * 4)
+    emit_extra(f"tone_{n:03}", 8, w, h, w, h, (fmt, 0, 10),
+               points + [mono_colour, mono_level, film_colour, film_level], src, dst_before, after)
+print("tones done", len(tone_cases))

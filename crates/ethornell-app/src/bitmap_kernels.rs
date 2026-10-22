@@ -958,6 +958,61 @@ pub(crate) fn rotate_copy(
     });
 }
 
+/// `sub_4193D0` (90:CD, single-threaded) on equal 32-bit formats over the
+/// overlap: monochrome tint (luminance 29/150/77 times `mono_colour`,
+/// mixed by `mono_level`), the tone-curve lookup (`tables` by BGRA lane,
+/// ORed into one pixel), then the colour film (multiply below 128, screen
+/// above, against `film_colour`) mixed by `film_level`. Format 2 keeps the
+/// source alpha, and a pair of fully transparent pixels (or an odd last
+/// one) becomes 0 (`sub_4198E0`); format 1 runs `sub_419550`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn tone_curve(
+    destination: &mut TargetBitmap,
+    source: &TargetBitmap,
+    format: u32,
+    tables: &[[u8; 256]; 3],
+    mono_colour: u32,
+    mono_level: u32,
+    film_colour: u32,
+    film_level: u32,
+) {
+    let mono = mono_colour.to_le_bytes().map(u32::from);
+    let film = film_colour.to_le_bytes().map(i32::from);
+    let mono_weight = |lane: usize| if lane == 3 { 128 } else { (mono_level as u16 >> 1) as i32 };
+    let film_weight = |lane: usize| if lane == 3 { 128 } else { (film_level as u16 >> 1) as i32 };
+    let mix = |x: i32, target: i32, weight: i32| x + (((target - x) * weight) as i16 as i32 >> 7);
+    let kernel = |pixel: [u8; 4]| -> [u8; 4] {
+        let x = pixel.map(i32::from);
+        let luminance = (29 * x[0] + 150 * x[1] + 77 * x[2]) as u32 & 0xFFFF;
+        let toned: [i32; 4] =
+            std::array::from_fn(|lane| mix(x[lane], ((luminance * mono[lane]) >> 16) as i32, mono_weight(lane)));
+        let index = |lane: usize| (toned[lane] as u16 as usize).min(255);
+        let mapped = [tables[0][index(0)], tables[1][index(1)], tables[2][index(2)], 0].map(i32::from);
+        std::array::from_fn(|lane| {
+            let v = mapped[lane];
+            let high = if v > if lane == 3 { 255 } else { 127 } { 0xFF } else { 0 };
+            let filmed = ((((v ^ high) * (film[lane] ^ high)) as u16 >> 7) as i32) ^ high;
+            mix(v, filmed, film_weight(lane)).clamp(0, 255) as u8
+        })
+    };
+    let (width, height) = overlap(destination, source);
+    for y in 0..height {
+        let (source_row, destination_row) = (y * source.stride, y * destination.stride);
+        for x in (0..width).step_by(2) {
+            let pair = x + 1 < width;
+            let pixels = [x, x + 1].map(|column| read_pixel(source, source_row + 4 * column));
+            let clear = format == 2 && pixels[0][3] == 0 && (!pair || pixels[1][3] == 0);
+            for (index, pixel) in pixels.into_iter().enumerate().take(1 + pair as usize) {
+                let mut value = if clear { [0; 4] } else { kernel(pixel) };
+                if format == 2 && !clear {
+                    value[3] = pixel[3];
+                }
+                write_pixel(destination, destination_row + 4 * (x + index), u32::from_le_bytes(value));
+            }
+        }
+    }
+}
+
 /// `sub_40B560`: the source rectangle at (left, top) of the destination's
 /// size blitted over the whole destination with transparency `alpha`
 /// (bitmap_blend's mode-1 ports; their kernels are channel-wise, so the
@@ -1025,8 +1080,8 @@ mod tests {
                 unreachable!()
             };
             let (sw, sh, dw, dh) = (sw as usize, sh as usize, dw as usize, dh as usize);
-            // Kinds 6 and 7 carry p2 more words after the header.
-            let extra = if kind == 6 || kind == 7 { words(&data[32..], p2 as usize) } else { Vec::new() };
+            // Kinds 6..=8 carry p2 more words after the header.
+            let extra = if matches!(kind, 6..=8) { words(&data[32..], p2 as usize) } else { Vec::new() };
             let mut at = 32 + 4 * extra.len();
             let mut take = |n: usize| {
                 let slice = data[at..at + n].to_vec();
@@ -1068,6 +1123,14 @@ mod tests {
                     p1,
                     p0 >> 16 != 0,
                 ),
+                8 => {
+                    let mut points = [[0i32; 2]; 3];
+                    for (index, point) in points.iter_mut().enumerate() {
+                        *point = [extra[2 * index] as i32, extra[2 * index + 1] as i32];
+                    }
+                    let lut = crate::graph_color::RuntimeColorLut::from_control_points(points).unwrap();
+                    tone_curve(&mut destination, &source, p0 & 0xFF, lut.lane_tables(), extra[6], extra[7], extra[8], extra[9]);
+                }
                 5 => grayscale_mask(&mut destination, p2 >> 8 & 0xFF, &source, p2 & 0xFF, p0 as i32, p1 as i32),
                 4 => process(&mut destination, p2 >> 8 & 0xFF, &source, p2 & 0xFF, p2 >> 16, p0, p1),
                 _ => panic!("unknown kernel {kind}"),

@@ -396,7 +396,7 @@ selector,handler,symbol,status
 90:C8,47FFF0,Graph90_C8_TransformBitmapGeneral,verified
 90:CA,4801C0,Graph90_CA_ScaleBitmapAspectFit,verified
 90:CC,480260,Graph90_CC_RegisterToneCurve,verified
-90:CD,480300,Graph90_CD_ApplyToneCurveEffect,todo
+90:CD,480300,Graph90_CD_ApplyToneCurveEffect,verified
 90:CE,4804A0,Graph90_CE_EncodeBitmapToBuffer,todo
 90:D0,480620,Graph90_D0_CreateKnobObject,verified
 90:D1,4806A0,Graph90_D1_ReleaseKnobObject,verified
