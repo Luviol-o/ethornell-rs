@@ -7855,6 +7855,12 @@ impl RuntimeTraceApi {
                     .display_order_serial(surface.id, None)
                     .saturating_add(1)
                     .saturating_add(layer.z.max(0) as u64);
+                // They sort with the window's native key (sub_42B520 draws
+                // its buffer, then its children), or the window's own item,
+                // which carries that key, covers them.
+                if let Some(key) = self.graph90_native_sort_key(surface.id) {
+                    order_serial = (u64::from(key & 65535) << 32) | (order_serial & 0xffff_ffff);
+                }
             }
             items.push(RuntimeGraphDrawItem {
                 owner_object: layer.owner_object.or(Some(*layer_id)),
