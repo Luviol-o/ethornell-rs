@@ -79,6 +79,86 @@ jobs:
           path: dist/ethornell-freebsd-x86_64.tar.gz
           if-no-files-found: error
 
+  vita_image:
+    name: PS Vita build image
+    uses: ./.github/workflows/vita-image.yml
+    permissions:
+      contents: read
+      packages: write
+
+  vita:
+    name: PS Vita (VPK)
+    needs: vita_image
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      packages: read
+    # VitaSDK, libvita2d, the pinned nightly and cargo-vita
+    # (platform/vita/docker/Dockerfile).
+    container:
+      image: ${{ needs.vita_image.outputs.image }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: platform/vita/player
+      - name: Build VPK
+        run: |
+          set -euo pipefail
+          cd platform/vita/player
+          cargo vita build vpk -- --release
+          mkdir -p ../../../dist
+          cp target/armv7-sony-vita-newlibeabihf/release/ethornell_vita.vpk ../../../dist/ethornell-psvita.vpk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ethornell-psvita
+          path: dist/ethornell-psvita.vpk
+          if-no-files-found: error
+
+  switch_image:
+    name: Switch build image
+    uses: ./.github/workflows/switch-image.yml
+    permissions:
+      contents: read
+      packages: write
+
+  switch:
+    name: Nintendo Switch (NRO)
+    needs: switch_image
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      packages: read
+    # devkitA64, libnx, deko3d, uam and the pinned nightly
+    # (platform/switch/docker/Dockerfile).
+    container:
+      image: ${{ needs.switch_image.outputs.image }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build NRO
+        run: |
+          set -euo pipefail
+          make -C platform/switch/runtime
+          mkdir -p dist
+          cp platform/switch/runtime/ethornell_switch.nro dist/ethornell-switch.nro
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ethornell-switch
+          path: dist/ethornell-switch.nro
+          if-no-files-found: error
+
   macos:
     name: macOS (universal app)
     runs-on: macos-15
@@ -201,7 +281,7 @@ jobs:
     name: Publish rolling prerelease
     # Only main replaces the public pre-release; other branches just build.
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: [linux, freebsd, macos, windows, android, ios, web]
+    needs: [linux, freebsd, macos, windows, android, ios, web, vita, switch]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -225,7 +305,9 @@ jobs:
                  dist/ethornell-windows-x86_64.zip
                  dist/ethornell-android.apk
                  dist/ethornell-ios-unsigned.ipa
-                 dist/ethornell-web.zip)
+                 dist/ethornell-web.zip
+                 dist/ethornell-psvita.vpk
+                 dist/ethornell-switch.nro)
           for file in "${files[@]}"; do test -f "$file"; done
 
           if gh release view pre-release >/dev/null 2>&1; then
@@ -241,7 +323,7 @@ jobs:
   release:
     name: Publish versioned release
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    needs: [linux, freebsd, macos, windows, android, ios, web]
+    needs: [linux, freebsd, macos, windows, android, ios, web, vita, switch]
     runs-on: ubuntu-latest
     permissions:
       contents: write
