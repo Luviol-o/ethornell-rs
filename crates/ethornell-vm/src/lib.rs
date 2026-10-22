@@ -1314,6 +1314,13 @@ pub trait GraphApi {
         0
     }
 
+    /// The message waits at the end of its text: `sub_433E40` runs
+    /// `sub_433F40`, which cycles the Graph90:98 caret frames every Graph90:99
+    /// delay as a child sprite of the message window. Called on every tick of
+    /// that wait with the engine clock; `finish_native_message` hides the
+    /// caret again (`sub_42BAB0(window, 0, 0)`).
+    fn tick_native_message_caret(&mut self, _now_tick: u32) {}
+
     fn register_graph_color_lut(&mut self, _id: i32, _points: [[i32; 2]; 3]) -> bool {
         false
     }
@@ -6386,6 +6393,11 @@ impl Vm {
                     }
                 }
 
+                // sub_433E40 reaches sub_433F40 (the caret) only once the
+                // start delay is over and the text processor has ended.
+                if !api.native_message_is_animating() {
+                    api.tick_native_message_caret(now_tick);
+                }
                 self.thread.replace_current_procedure(InstalledCProcedure {
                     source_opcode: installed.source_opcode,
                     object: CProcedure::DspMsg(procedure),
@@ -13670,6 +13682,7 @@ mod tests {
         message_auto_advance: Option<Option<i32>>,
         message_reveals: usize,
         message_finishes: usize,
+        message_caret_ticks: Vec<u32>,
         window_message_serial: i32,
         window_messages: std::collections::VecDeque<(i32, i32, i32, i32)>,
         system92_text_output_pair: [i32; 2],
@@ -13873,6 +13886,10 @@ mod tests {
 
         fn finish_native_message(&mut self) {
             self.message_finishes += 1;
+        }
+
+        fn tick_native_message_caret(&mut self, now_tick: u32) {
+            self.message_caret_ticks.push(now_tick);
         }
 
         fn register_graph_color_lut(&mut self, id: i32, points: [[i32; 2]; 3]) -> bool {
@@ -17421,6 +17438,77 @@ mod tests {
         vm.advance_time_ms(30);
         assert_eq!(vm.poll_current_procedure(&mut api, false), None);
         assert_eq!(api.message_finishes, 1);
+    }
+
+    #[test]
+    fn the_caret_runs_only_while_a_message_waits_at_its_end() {
+        // sub_433E40 calls sub_433F40 (the caret) after the start delay
+        // and once the text processor has ended; a typed message (+0x38 ==
+        // 0) is finalized before that.
+        let message = |end_wait_policy: i32| {
+            super::native_thread::InstalledCProcedure::dsp_msg(
+                super::MAIN_THREAD_ID,
+                NativeOpcode {
+                    group: 0x90,
+                    id: 0x90,
+                },
+                0,
+                super::NativeMessageProcedureConfig {
+                    class: super::NativeMessageProcedureClass::DspMsg,
+                    initial_delay_enabled: true,
+                    initial_delay_ms: 100,
+                    reveal_duration_ms: 0,
+                    reveal_steps: 0,
+                    reveal_step_delay_ms: 0,
+                    settle_steps: 0,
+                    settle_step_delay_ms: 0,
+                    auto_advance_delay_ms: None,
+                    input_scope: 2,
+                    completion_control: 0,
+                    end_wait_policy,
+                    allow_high_bit_input: true,
+                    allow_auxiliary_input: true,
+                    auxiliary_input_mask: 0,
+                    input_forces_completion: false,
+                },
+            )
+        };
+
+        let mut vm = Vm::new();
+        vm.install_cprocedure(message(0), false);
+        let mut api = SchedulingApi::default();
+        assert_eq!(vm.poll_current_procedure(&mut api, false), None);
+        assert!(api.message_caret_ticks.is_empty());
+
+        let mut vm = Vm::new();
+        vm.install_cprocedure(message(1), false);
+        let mut api = SchedulingApi {
+            message_animating: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            vm.poll_current_procedure(&mut api, false),
+            Some(VmStopReason::WaitingForInputOrTime)
+        );
+        api.message_animating = false;
+        vm.advance_time_ms(50);
+        assert_eq!(
+            vm.poll_current_procedure(&mut api, false),
+            Some(VmStopReason::WaitingForInputOrTime)
+        );
+        assert!(api.message_caret_ticks.is_empty());
+        vm.advance_time_ms(50);
+        assert_eq!(
+            vm.poll_current_procedure(&mut api, false),
+            Some(VmStopReason::WaitingForInputOrTime)
+        );
+        vm.advance_time_ms(500);
+        assert_eq!(
+            vm.poll_current_procedure(&mut api, false),
+            Some(VmStopReason::WaitingForInputOrTime)
+        );
+        assert_eq!(api.message_caret_ticks, [100, 600]);
+        assert_eq!(api.message_finishes, 0);
     }
 
     #[test]
