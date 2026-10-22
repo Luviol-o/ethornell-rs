@@ -15,6 +15,22 @@ pub(crate) fn se_channel(value: i32) -> VmResult<()> {
     Ok(())
 }
 
+/// sub_498510: pan <= 0x80 (unsigned).
+pub(crate) fn pan(value: i32) -> VmResult<()> {
+    if value as u32 > 0x80 {
+        return fail(format!("無効なパンポット（定位） [ {value} ] が指定されました"));
+    }
+    Ok(())
+}
+
+/// sub_498560: volume <= 0x80 (unsigned).
+pub(crate) fn volume(value: i32) -> VmResult<()> {
+    if value as u32 > 0x80 {
+        return fail(format!("無効なボリューム（音量） [ {value} ] が指定されました"));
+    }
+    Ok(())
+}
+
 /// sub_4985B0: BGM channel < 0x10.
 pub(crate) fn bgm_channel(value: i32) -> VmResult<()> {
     if value as u32 >= 0x10 {

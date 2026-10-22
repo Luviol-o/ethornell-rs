@@ -18015,7 +18015,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: SOUND_BGM_FILE_LOAD_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_4870B0 -> sub_493C00 loads one resident BGM buffer without starting playback.",
+        notes: "sub_487BB0 -> sub_4946F0: volume, BGM channel, then missing (12) and non-BW (14) files are fatal with target texts.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SOUND_LOAD_BGM_ARCHIVE,
@@ -18023,7 +18023,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: SOUND_BGM_ARCHIVE_LOAD_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_487180 -> sub_493DB0 loads one archive-backed resident BGM buffer and applies initial volume/pan; A0:14 starts it.",
+        notes: "sub_487C80 -> sub_4948A0: pan, volume, channel, then 12/14 with \"[ archive : file ]\".",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SOUND_LOAD_BGM_PAIR,
@@ -18031,7 +18031,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: SOUND_BGM_PAIR_LOAD_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_487280 -> sub_4940D0 loads an intro/loop stream pair without starting playback.",
+        notes: "sub_487D80 -> sub_494BC0: pan, volume, channel, then 12/14 with \"[ archive : intro / loop ]\".",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SOUND_CONTROL_BGM,
@@ -18039,7 +18039,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: SOUND_BGM_CONTROL_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_4873C0: channel >= 16 is fatal; an unloaded channel is ignored; otherwise the stream pauses on 0 and starts/resumes on non-zero (vtable+12).",
+        notes: "sub_487EC0 -> sub_4A3CC0(channel, value == 0).",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SOUND_QUERY_BGM_STATE,
@@ -18047,7 +18047,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: SOUND_BGM_QUERY_PARAMETERS,
         returns: "status",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_487400 writes one buffer state/position DWORD through the second source argument; VM mediation owns the pointer write.",
+        notes: "sub_487F00 -> sub_494DA0: channel validator; status pushed.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SOUND_SET_BGM_VOLUME,
@@ -18055,7 +18055,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: SOUND_BGM_FADE_VOLUME_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "BGI 1.622 sub_487F50 -> sub_4A3650 (older sub_487450): volume >128 or channel >=16 is fatal (unsigned); ignore unloaded channels. Schedule an independent play-volume envelope from the last polled value, with signed wrapping GetTickCount deltas and truncation toward zero (sub_4A2DF0). The host polls it alongside the fade envelope before composing gain. Duration zero/negative completes on the next poll. Backend attenuation-to-gain mapping and poll cadence remain portable approximations.",
+        notes: "sub_487F50 -> sub_4A3D50: volume then channel; linear ramp.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SOUND_SET_BGM_PAN,
@@ -18063,7 +18063,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: SOUND_CHANNEL_PAN_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_4874A0 maps native pan 0..128 around center 64.",
+        notes: "sub_487FA0 -> sub_4A3F00: pan then channel.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SOUND_FADE_BGM_TO_FULL,
@@ -18071,7 +18071,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: SOUND_CHANNEL_DURATION_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "BGI 1.622 sub_487FE0 -> sub_4A3560: unsigned channel >=16 is fatal; ignore unloaded channels. Schedule the independent fade envelope from its last polled sample toward 128 without modifying the play-volume envelope; zero/negative duration completes on next poll. Portable gain mapping and frame-based poll cadence remain approximations.",
+        notes: "sub_487FE0 -> sub_4A3BA0: channel; fade to full.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SOUND_FADE_BGM_TO_SILENCE,
@@ -18079,7 +18079,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: SOUND_CHANNEL_DURATION_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "BGI 1.622 sub_488020 -> sub_4A3500: unsigned channel >=16 is fatal; ignore unloaded channels. Schedule the independent fade envelope from its last polled sample toward zero without stopping or releasing the stream; zero/negative duration completes on next poll. Portable gain mapping and frame-based poll cadence remain approximations.",
+        notes: "sub_488020 -> sub_4A3B10: channel; fade to silence.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SOUND_SET_BGM_SECONDARY_VOLUME,
@@ -18095,7 +18095,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: SOUND_SE_LOAD_PARAMETERS,
         returns: "deferred load status",
         scheduling: NativeSchedulingEffect::WaitProcedure,
-        notes: "sub_4875A0 constructs CProcLoadSound for one archive-backed resident SE slot.",
+        notes: "sub_4880A0 -> CProcLoadSound(channel, archive, file, 0, 1.0, 1.0): SE channel, non-BW data fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SOUND_LOAD_SE_SCALED,
@@ -18103,7 +18103,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: SOUND_SE_LOAD_SCALED_PARAMETERS,
         returns: "deferred load status",
         scheduling: NativeSchedulingEffect::WaitProcedure,
-        notes: "sub_487650 constructs CProcLoadSound with decoder gain and an opaque native start parameter.",
+        notes: "sub_488150: as 20 with start parameter and 16.16 gain.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SOUND_RELEASE_SE,
@@ -18111,7 +18111,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: SOUND_CHANNEL_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "BGI 1.622 sub_488240 -> sub_494E70 -> sub_4A3280 (older handler sub_487740): unsigned channel >=64 is fatal; clear the copied 64-byte wave header and release the resident SE buffer. Later A0:2F returns zero until another buffer is loaded; stopping alone (A0:25) retains the header.",
+        notes: "sub_488240 -> sub_494E70: SE channel; release.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SOUND_LOAD_SE_DOUBLE_RATE,
@@ -18119,7 +18119,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: SOUND_SE_LOAD_SCALED_PARAMETERS,
         returns: "deferred load status",
         scheduling: NativeSchedulingEffect::WaitProcedure,
-        notes: "sub_487770 constructs CProcLoadSound with fixed 2.0 playback-rate scaling.",
+        notes: "sub_488270: as 21 with rate 2.0.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SOUND_PLAY_SE,
@@ -18127,7 +18127,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: SOUND_SE_PLAY_PARAMETERS,
         returns: "playback position/status",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "BGI 1.622 sub_488360 -> sub_4A4050 (older sub_487860): pan >128, volume >128 or channel >=64 is fatal (unsigned). Unloaded pushes zero; every loaded play cancels the SE fade, restores its envelope to 128, stops/restarts the wave even when already active, and returns copied-header length in milliseconds (sub_494ED0). A0:25 keeps that header and A0:22 clears it.",
+        notes: "sub_488360: pan, volume, SE channel; length pushed when sub_494E90 gives 0 or 20, else 0.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SOUND_STOP_SE,
@@ -18135,7 +18135,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: SOUND_CHANNEL_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "BGI 1.622 sub_4883F0 -> sub_494EB0 -> sub_4A3A80 -> sub_4A34D0 (older handler sub_4878F0): unsigned channel >=64 is fatal, an unloaded channel is a no-op, otherwise stop playback while preserving the resident wave/header, gain banks and any active fade envelope. A0:24 always restarts this buffer and cancels its previous fade.",
+        notes: "sub_4883F0 -> sub_494EB0: SE channel; stop.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SOUND_FADE_SE_TO_SILENCE,
@@ -18143,7 +18143,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: SOUND_CHANNEL_DURATION_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "BGI 1.622 sub_488420 -> sub_494EC0 -> sub_4A35C0: unsigned channel >=64 is fatal; ignore unloaded channels. Schedule the independent SE fade toward zero from the last polled sample; repeated fades retarget that sample, A0:25 preserves the envelope, and A0:24 cancels it and restores 128. Fading to zero does not stop/release the buffer. Portable gain mapping and frame-based poll cadence remain approximations.",
+        notes: "sub_488420 -> sub_494EC0: SE channel; fade.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SOUND_LOAD_SE_CUSTOM_RATE,
@@ -18151,7 +18151,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: SOUND_SE_LOAD_CUSTOM_PARAMETERS,
         returns: "deferred load status",
         scheduling: NativeSchedulingEffect::WaitProcedure,
-        notes: "sub_487960 constructs CProcLoadSound with explicit decoder gain, playback rate, and opaque native start parameter.",
+        notes: "sub_488460: as 21 with 16.16 gain and rate.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SOUND_REGISTER_SE_MEMORY,
@@ -18159,7 +18159,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: SOUND_SE_REGISTER_PARAMETERS,
         returns: "deferred registration status",
         scheduling: NativeSchedulingEffect::WaitProcedure,
-        notes: "sub_487A70 -> sub_452530 constructs DCProcRgstrSound for memory-backed sound registration.",
+        notes: "sub_488570 -> sub_452980: SE channel; memory registration procedure.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SOUND_SET_SE_SECONDARY_VOLUME,
@@ -18175,7 +18175,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: SOUND_POSITION_QUERY_PARAMETERS,
         returns: "position/status",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_487BA0: channel >= 64 is fatal; pushes the loaded SE's length in ms (sub_4943E0 reads the BURIKO wave header copied at load, not a play cursor).",
+        notes: "sub_4886A0 -> sub_494ED0: SE channel; length.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SOUND_OPEN_CD_AUDIO,
@@ -18183,7 +18183,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: NO_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_487BE0 -> sub_48D640 opens the MCI CD-audio device and selects TMSF; portable runtime opens a real virtual CD-DA track set from loose or packed audio assets.",
+        notes: "sub_4886E0 -> sub_48E130: MCI CD open (host item).",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SOUND_CLOSE_CD_AUDIO,
@@ -18191,7 +18191,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: NO_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_487BF0 -> sub_48D7C0 closes the CD-audio device; portable runtime stops the dedicated channel and releases its discovered track set.",
+        notes: "sub_4886F0 -> sub_48E2B0: MCI close (host item).",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SOUND_PLAY_CD_TRACK,
@@ -18199,7 +18199,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: SOUND_CD_PLAY_PARAMETERS,
         returns: "status",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_487C00 -> sub_48D850 sends MCI_PLAY from track to track+1 with optional notify; portable runtime plays the matching one-based virtual CD-DA asset on a dedicated channel.",
+        notes: "sub_488700 -> sub_48E340: TMSF track to track+1, notify flag; success pushed (host item).",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SOUND_STOP_CD_AUDIO,
@@ -18207,7 +18207,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: NO_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_487C40 -> sub_48D8F0 stops an open CD-audio device; portable runtime stops the dedicated virtual CD-DA channel and transitions to target mode 3.",
+        notes: "sub_488740 -> sub_48E3E0: MCI stop (host item).",
     },
     NativeOpcodeSpec {
         opcode: opcodes::SOUND_QUERY_CD_MODE,
@@ -18223,7 +18223,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: SOUND_WAVE_PLAY_PARAMETERS,
         returns: "BOOL",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_487C80 calls PlaySoundA(path, hInstance, 0x22003); portable runtime maps this to a dedicated asynchronous sound channel.",
+        notes: "sub_488780 -> sub_494FC0: PlaySoundA(dir + file, 0x22003) result pushed (host item; loose file per ADR 0004).",
     },
     // SystemB0 target-confirmed user/window/input/font handlers.
     NativeOpcodeSpec {
@@ -20200,6 +20200,24 @@ const PORTABLE_EQUIVALENT_OPCODES: &[NativeOpcode] = &[
     opcodes::GRAPH92_SEEK_BITMAP_DIRECTSHOW_MOVIE,
     opcodes::GRAPH92_GET_BITMAP_DIRECTSHOW_MOVIE_POSITION,
     opcodes::GRAPH92_SET_BITMAP_DIRECTSHOW_MOVIE_VOLUME,
+    opcodes::SOUND_LOAD_BGM_FILE,
+    opcodes::SOUND_LOAD_BGM_ARCHIVE,
+    opcodes::SOUND_LOAD_BGM_PAIR,
+    opcodes::SOUND_QUERY_BGM_STATE,
+    opcodes::SOUND_SET_BGM_PAN,
+    opcodes::SOUND_FADE_BGM_TO_FULL,
+    opcodes::SOUND_FADE_BGM_TO_SILENCE,
+    opcodes::SOUND_LOAD_SE,
+    opcodes::SOUND_LOAD_SE_SCALED,
+    opcodes::SOUND_LOAD_SE_DOUBLE_RATE,
+    opcodes::SOUND_FADE_SE_TO_SILENCE,
+    opcodes::SOUND_LOAD_SE_CUSTOM_RATE,
+    opcodes::SOUND_REGISTER_SE_MEMORY,
+    opcodes::SOUND_OPEN_CD_AUDIO,
+    opcodes::SOUND_CLOSE_CD_AUDIO,
+    opcodes::SOUND_PLAY_CD_TRACK,
+    opcodes::SOUND_STOP_CD_AUDIO,
+    opcodes::SOUND_PLAY_WAVE_ASYNC,
 ];
 
 const PARTIAL_IMPLEMENTATION_OPCODES: &[NativeOpcode] = &[
@@ -20325,27 +20343,9 @@ const PARTIAL_IMPLEMENTATION_OPCODES: &[NativeOpcode] = &[
     opcodes::GRAPH91_APPLY_GRAYSCALE_MASK,
     opcodes::SOUND_SET_BGM_PRIMARY_VOLUME,
     opcodes::SOUND_SET_SE_PRIMARY_VOLUME,
-    opcodes::SOUND_LOAD_BGM_FILE,
-    opcodes::SOUND_LOAD_BGM_ARCHIVE,
-    opcodes::SOUND_LOAD_BGM_PAIR,
-    opcodes::SOUND_QUERY_BGM_STATE,
-    opcodes::SOUND_SET_BGM_PAN,
-    opcodes::SOUND_FADE_BGM_TO_FULL,
-    opcodes::SOUND_FADE_BGM_TO_SILENCE,
     opcodes::SOUND_SET_BGM_SECONDARY_VOLUME,
-    opcodes::SOUND_LOAD_SE,
-    opcodes::SOUND_LOAD_SE_SCALED,
-    opcodes::SOUND_LOAD_SE_DOUBLE_RATE,
-    opcodes::SOUND_FADE_SE_TO_SILENCE,
-    opcodes::SOUND_LOAD_SE_CUSTOM_RATE,
-    opcodes::SOUND_REGISTER_SE_MEMORY,
     opcodes::SOUND_SET_SE_SECONDARY_VOLUME,
-    opcodes::SOUND_OPEN_CD_AUDIO,
-    opcodes::SOUND_CLOSE_CD_AUDIO,
-    opcodes::SOUND_PLAY_CD_TRACK,
-    opcodes::SOUND_STOP_CD_AUDIO,
     opcodes::SOUND_QUERY_CD_MODE,
-    opcodes::SOUND_PLAY_WAVE_ASYNC,
     opcodes::USER_DRAW_BITMAP_TO_WINDOW,
     opcodes::USER_CENTER_MAIN_WINDOW,
     opcodes::USER_SET_MAIN_WINDOW_POSITION,

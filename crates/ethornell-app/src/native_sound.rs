@@ -80,6 +80,13 @@ impl RuntimeTraceApi {
                 let volume = pop_int_value(stack).unwrap_or(128);
                 let file = pop_string_value(stack).unwrap_or_default();
                 let channel = pop_int_value(stack).unwrap_or_default();
+                // sub_487BB0: volume, channel, then sub_4946F0's 12/14.
+                if let Err(error) = target_checks::volume(volume)
+                    .and_then(|()| target_checks::bgm_channel(channel))
+                    .and_then(|()| self.native_bgm_asset_check(&[("", &file)], &file))
+                {
+                    return Some(Err(error));
+                }
                 let loaded = self.load_native_bgm_slot(channel, "", &file, false);
                 self.set_native_bgm_play_volume(channel, volume);
                 tracing::debug!(channel, file, volume, loaded, "SoundLoadNativeChannel");
@@ -93,6 +100,16 @@ impl RuntimeTraceApi {
                 let file = pop_string_value(stack).unwrap_or_default();
                 let archive = pop_string_value(stack).unwrap_or_default();
                 let channel = pop_int_value(stack).unwrap_or_default();
+                // sub_487C80: pan, volume, channel, then 12/14.
+                if let Err(error) = target_checks::pan(pan)
+                    .and_then(|()| target_checks::volume(volume))
+                    .and_then(|()| target_checks::bgm_channel(channel))
+                    .and_then(|()| {
+                        self.native_bgm_asset_check(&[(&archive, &file)], &format!("{archive} : {file}"))
+                    })
+                {
+                    return Some(Err(error));
+                }
                 let loaded = self.load_native_bgm_slot(channel, &archive, &file, true);
                 self.set_native_bgm_play_volume(channel, volume);
                 if let Some(slot) = self.bgm_slots.get_mut(&channel) {
@@ -112,6 +129,22 @@ impl RuntimeTraceApi {
                 let intro_file = pop_string_value(stack).unwrap_or_default();
                 let archive = pop_string_value(stack).unwrap_or_default();
                 let channel = pop_int_value(stack).unwrap_or_default();
+                // sub_487D80: pan, volume, channel, then 12/14 for either
+                // stream.
+                let label = format!("{archive} : {intro_file} / {loop_file}");
+                let loop_name = if loop_file.is_empty() { &intro_file } else { &loop_file };
+                if let Err(error) = target_checks::pan(pan)
+                    .and_then(|()| target_checks::volume(volume))
+                    .and_then(|()| target_checks::bgm_channel(channel))
+                    .and_then(|()| {
+                        self.native_bgm_asset_check(
+                            &[(&archive, &intro_file), (&archive, loop_name)],
+                            &label,
+                        )
+                    })
+                {
+                    return Some(Err(error));
+                }
                 let loaded = self.load_native_bgm_pair(
                     channel,
                     &archive,
@@ -253,6 +286,12 @@ impl RuntimeTraceApi {
                 let file = pop_string_value(stack).unwrap_or_default();
                 let archive = pop_string_value(stack).unwrap_or_default();
                 let channel = pop_int_value(stack).unwrap_or_default();
+                // sub_4984C0, then CProcLoadSound's BW and mono checks.
+                if let Err(error) = target_checks::se_channel(channel)
+                    .and_then(|()| self.native_se_asset_check(&archive, &file))
+                {
+                    return Some(Err(error));
+                }
                 let loaded =
                     self.load_native_sound_slot_from_archive(channel, &archive, &file, 1.0, 1.0, 0);
                 call.complete_procedure(
@@ -267,6 +306,12 @@ impl RuntimeTraceApi {
                 let file = pop_string_value(stack).unwrap_or_default();
                 let archive = pop_string_value(stack).unwrap_or_default();
                 let channel = pop_int_value(stack).unwrap_or_default();
+                // sub_4984C0, then CProcLoadSound's BW and mono checks.
+                if let Err(error) = target_checks::se_channel(channel)
+                    .and_then(|()| self.native_se_asset_check(&archive, &file))
+                {
+                    return Some(Err(error));
+                }
                 let loaded = self.load_native_sound_slot_from_archive(
                     channel,
                     &archive,
@@ -303,6 +348,12 @@ impl RuntimeTraceApi {
                 let file = pop_string_value(stack).unwrap_or_default();
                 let archive = pop_string_value(stack).unwrap_or_default();
                 let channel = pop_int_value(stack).unwrap_or_default();
+                // sub_4984C0, then CProcLoadSound's BW and mono checks.
+                if let Err(error) = target_checks::se_channel(channel)
+                    .and_then(|()| self.native_se_asset_check(&archive, &file))
+                {
+                    return Some(Err(error));
+                }
                 let loaded = self.load_native_sound_slot_from_archive(
                     channel,
                     &archive,
@@ -364,6 +415,12 @@ impl RuntimeTraceApi {
                 let file = pop_string_value(stack).unwrap_or_default();
                 let archive = pop_string_value(stack).unwrap_or_default();
                 let channel = pop_int_value(stack).unwrap_or_default();
+                // sub_4984C0, then CProcLoadSound's BW and mono checks.
+                if let Err(error) = target_checks::se_channel(channel)
+                    .and_then(|()| self.native_se_asset_check(&archive, &file))
+                {
+                    return Some(Err(error));
+                }
                 let loaded = self.load_native_sound_slot_from_archive(
                     channel,
                     &archive,
@@ -386,7 +443,10 @@ impl RuntimeTraceApi {
                 let descriptor = pop_int_value(stack).unwrap_or_default();
                 let source = stack.pop();
                 let channel = pop_int_value(stack).unwrap_or_default();
-                let valid = channel >= 0 && source.is_some();
+                if let Err(error) = target_checks::se_channel(channel) {
+                    return Some(Err(error));
+                }
+                let valid = source.is_some();
                 tracing::debug!(
                     channel,
                     descriptor,
@@ -679,6 +739,52 @@ impl RuntimeTraceApi {
         set_bgm_channel_active(&mut self.bgm_channel_active, channel, false);
         self.set_native_bgm_fade_volume(channel, 128);
         true
+    }
+
+    /// sub_4A4B00 / sub_4A40E0: a missing file throws 12 ("BWファイル ..
+    /// は存在しません"); data no decoder takes throws 14 ("BWファイルではない").
+    /// Ogg and RIFF payloads without a BW header stay accepted.
+    fn native_bgm_asset_check(
+        &self,
+        files: &[(&str, &str)],
+        label: &str,
+    ) -> ethornell_vm::VmResult<()> {
+        for &(archive, file) in files {
+            let Some(asset) = self.load_native_audio_asset(archive, file) else {
+                return Err(ethornell_vm::VmError::Runtime(format!(
+                    "指定されたBWファイル [ {label} ] は存在しません"
+                )));
+            };
+            if asset.bytes.len() < 0x40
+                && !matches!(
+                    ethornell_audio::probe_audio(&asset.bytes).kind,
+                    ethornell_audio::AudioKind::Ogg | ethornell_audio::AudioKind::RiffWave
+                )
+                || ethornell_audio::probe_audio(&asset.bytes).kind == ethornell_audio::AudioKind::Unknown
+            {
+                return Err(ethornell_vm::VmError::Runtime(format!(
+                    "指定されたファイル [ {label} ] はBWファイルではないようです"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// CProcLoadSound (sub_43A3C0): data that is not a BW wave is a script
+    /// error. A missing file is the load procedure's own failure.
+    fn native_se_asset_check(&self, archive: &str, file: &str) -> ethornell_vm::VmResult<()> {
+        let Some(asset) = self.load_native_audio_asset(archive, file) else {
+            return Ok(());
+        };
+        let info = ethornell_audio::probe_audio(&asset.bytes);
+        if info.kind == ethornell_audio::AudioKind::Unknown {
+            return Err(ethornell_vm::VmError::Runtime(format!(
+                "指定されたファイル [ {archive} : {file} ] はBWファイルではないようです"
+            )));
+        }
+        // The worker's "はモノラルではない" refusal (0x80000002) is not a
+        // plain channel-count test: stereo Ogg (type 3) SE play in 1.622.
+        Ok(())
     }
 
     fn load_native_audio_asset(&self, archive: &str, file: &str) -> Option<AudioAsset> {
