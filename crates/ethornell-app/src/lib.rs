@@ -15595,6 +15595,40 @@ mod input_tests {
     }
 
     #[test]
+    fn a_page_feed_clears_the_text_graph92_91_drew_on_the_window() {
+        let manager =
+            ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let mut api = super::RuntimeTraceApi::new(manager);
+        let window = message_window(&mut api);
+        let home = api.surface_text_states[&window];
+
+        // Wonderful Everyday draws a skipped line at once with Graph92:91.
+        // When skipping has stopped by the time the line is done,
+        // scrmsg._bp ends the page with Graph90:90(window, "\x0c") rather
+        // than Graph92:8E.
+        // (The window has its font from Graph91:88, which Graph92:91 checks.)
+        api.surface_text_states.entry(window).or_default().font_size = 26;
+        let mut args = [window, 0, 0, 1, 0, 1, 2, 1, 1, 0xffffff, 192]
+            .map(Value::Int)
+            .to_vec();
+        args[1] = Value::Str("A skipped line.".into());
+        call_graph(&mut api, 0x92, 0x91, &mut args).unwrap();
+        assert!(api.text_nodes.contains_key(&window));
+
+        // sub_433890 clears the window's text bitmap (sub_42B9B0), where
+        // Graph92:91 drew too, so the next line doesn't show over it.
+        api.start_native_message("\x0c".into(), Some(window));
+        assert!(!api.text_nodes.contains_key(&window));
+        assert!(!api.bitmap_text_runs.contains_key(&window));
+        assert_eq!(api.surface_text_buffers[&window], "");
+        assert_eq!(api.surface_text_states[&window].cursor_x, home.cursor_x);
+        api.start_native_message("The next line.".into(), Some(window));
+        api.tick_text(10_000);
+        assert_eq!(shown_message(&api), "The next line.");
+        assert!(!api.text_nodes.contains_key(&window));
+    }
+
+    #[test]
     fn graph_icon_batch_rebuilds_window_backing_in_record_order() {
         let manager =
             ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
@@ -26001,9 +26035,7 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                 // sub_486EB0 -> sub_441340: cursor reset, buffer clear.
                 let target = pop_int_value(stack).unwrap_or_default();
                 self.graph92_require_window(target)?;
-                self.reset_window_text_cursor(target);
-                self.clear_bitmap_text(target);
-                self.surface_text_buffers.insert(target, String::new());
+                self.clear_window_text(target);
                 if self.native_message_surface_target == Some(target) {
                     self.reset_native_message_text();
                 }
