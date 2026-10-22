@@ -29,7 +29,11 @@ fn host_physical_memory() -> Option<u64> {
         if pages<=0 || size<=0 {return None;}
         (pages as u64).checked_mul(size as u64)
     }
-    #[cfg(not(any(target_os="android", target_os="ios")))]
+    #[cfg(target_os="vita")]
+    {Some(512*1024*1024)}
+    #[cfg(target_os="horizon")]
+    {Some(4*1024*1024*1024)}
+    #[cfg(not(any(target_os="android",target_os="ios",target_os="vita",target_os="horizon")))]
     {Some(4*1024*1024*1024)} // host diagnostic profile, not device RAM evidence
 }
 
@@ -313,9 +317,9 @@ impl HostRuntime {
             "no host surface on this target".into(),
         ))
     }
-    /// The web host creates its renderer asynchronously (see
-    /// `Renderer::new_web`, with `HostRuntime::font`) and hands it over here.
-    #[cfg(target_arch = "wasm32")]
+    /// Attach a host-created renderer. Web creates it asynchronously; native
+    /// consoles supply their platform GPU callbacks and the session font.
+    #[cfg(any(target_arch="wasm32",feature="console",target_os="vita",target_os="horizon"))]
     pub fn attach_renderer(
         &mut self,
         renderer: Renderer<'static>,
@@ -331,6 +335,15 @@ impl HostRuntime {
         self.last_tick = None;
         self.tick_remainder_ns = 0;
         self.install_renderer(renderer, w, h, generation)
+    }
+    /// Console chrome is submitted as ordinary native GPU draw commands.
+    #[cfg(feature = "console")]
+    pub fn show_console_notice(&mut self, text: Option<String>) -> Result<()> {
+        if let Some(renderer) = self.renderer.as_mut() {
+            renderer.set_notice(text);
+            renderer.render()?;
+        }
+        Ok(())
     }
     /// The attached surface changed size (the web canvas follows the page).
     pub fn resize_surface(&mut self, w: u32, h: u32) -> Result<()> {
@@ -363,7 +376,7 @@ impl HostRuntime {
     pub fn font(&self) -> FontArc {
         self.font.clone()
     }
-    #[cfg(any(target_os = "android", target_os = "ios", target_arch = "wasm32"))]
+    #[cfg(any(target_os="android",target_os="ios",target_arch="wasm32",feature="console",target_os="vita",target_os="horizon"))]
     fn install_renderer(
         &mut self,
         mut renderer: Renderer<'static>,
@@ -443,6 +456,12 @@ impl HostRuntime {
         }
         if self.closed || self.paused != 0 || !self.runtime.api.host.pending.is_empty() {
             return Ok(());
+        }
+        #[cfg(feature = "console")]
+        if kind == 1 {
+            if let Some(renderer) = self.renderer.as_mut() {
+                renderer.set_cursor(x, y);
+            }
         }
         let Some(renderer) = self.renderer.as_ref() else {
             return Ok(());

@@ -57,3 +57,21 @@ impl Drop for PumpBackend {
         }
     }
 }
+
+/// Console audio devices accept signed 16-bit stereo. Conversion happens
+/// after the shared Kira mixer, once per device callback.
+pub fn render_i16(out: &mut [i16]) {
+    out.fill(0);
+    let Ok(mut slot) = RENDERER.lock() else {
+        return;
+    };
+    let Some(renderer) = slot.as_mut() else {
+        return;
+    };
+    renderer.on_start_processing();
+    for stereo in out.chunks_exact_mut(2) {
+        let frame = renderer.process();
+        stereo[0] = (frame.left.clamp(-1.0, 1.0) * 32767.) as i16;
+        stereo[1] = (frame.right.clamp(-1.0, 1.0) * 32767.) as i16;
+    }
+}

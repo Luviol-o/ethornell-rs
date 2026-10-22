@@ -29,6 +29,10 @@ mod graph_color;
 mod graph_config;
 mod graph_defaults;
 mod graph_effect;
+#[cfg(not(any(target_os="vita",target_os="horizon")))]
+mod graph_flash;
+#[cfg(any(target_os="vita",target_os="horizon"))]
+#[path="graph_flash_console.rs"]
 mod graph_flash;
 mod graph_group;
 mod graph_input;
@@ -20850,6 +20854,14 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
         if name.is_empty() {
             return Some(token);
         }
+        #[cfg(any(target_os="vita",target_os="horizon"))]
+        {
+            if self.native_system.mutex_names.contains_key(name){return None;}
+            self.native_system.mutex_names.insert(name.to_owned(),token);
+            return Some(token);
+        }
+        #[cfg(not(any(target_os="vita",target_os="horizon")))]
+        {
         let file_name: String = name.bytes().map(|byte| format!("{byte:02x}")).collect();
         let directory = std::env::temp_dir().join("ethornell-mutex");
         std::fs::create_dir_all(&directory).ok()?;
@@ -20869,9 +20881,12 @@ impl ethornell_vm::SysApi for RuntimeTraceApi {
         }
         self.named_mutexes.insert(token, file);
         Some(token)
+        }
     }
 
     fn release_named_mutex(&mut self, token: u64) {
+        #[cfg(any(target_os="vita",target_os="horizon"))]
+        self.native_system.mutex_names.retain(|_,value|*value!=token);
         self.named_mutexes.remove(&token);
     }
 

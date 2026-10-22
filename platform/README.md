@@ -13,10 +13,14 @@ through the same host-driven runtime compiled to WebAssembly
 | macOS | `macos/` | `Ethornell.app` (universal) | `macos/package.sh` |
 | Android | `android/` | APK | `android/build.sh` |
 | iOS | `ios/` | app / IPA | `ios/build.sh` |
+| Nintendo Switch | `switch/` | NRO | `switch/build.sh` |
+| PS Vita | `vita/` | VPK | `vita/build.sh` |
 | Web | `wasm/` | static page (zip) | `wasm/build.sh` |
 
-CI builds all six (`.github/workflows/release.yml`) and publishes them on
-the releases page.
+Desktop/mobile/web CI builds the original six (`.github/workflows/release.yml`) and publishes them on
+the releases page. Native console packages are built separately by
+`.github/workflows/consoles.yml`; see [Switch](switch/README.md) and
+[PS Vita](vita/README.md) for setup and controls.
 
 ## Desktop
 

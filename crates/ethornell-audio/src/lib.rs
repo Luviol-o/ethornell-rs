@@ -1,15 +1,15 @@
 use ethornell_core::{EthornellError, Result};
 use kira::dsp::Frame;
 use kira::manager::backend::Backend;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(any(target_arch="wasm32",target_os="vita",target_os="horizon")))]
 use kira::manager::backend::DefaultBackend;
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch="wasm32",target_os="vita",target_os="horizon"))]
 pub mod pump;
-/// The device backend: cpal natively, frames pulled by the page on the web.
-#[cfg(not(target_arch = "wasm32"))]
+/// Desktop/mobile use cpal; web and native consoles pull the shared mixer.
+#[cfg(not(any(target_arch="wasm32",target_os="vita",target_os="horizon")))]
 pub type PlatformBackend = DefaultBackend;
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch="wasm32",target_os="vita",target_os="horizon"))]
 pub type PlatformBackend = pump::PumpBackend;
 use kira::manager::{AudioManager, AudioManagerSettings};
 use kira::sound::{

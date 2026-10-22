@@ -3,6 +3,8 @@ use ethornell_vm::SysApi;
 
 #[derive(Default)]
 pub(super) struct NativeSystemState {
+    #[cfg(any(target_os="vita",target_os="horizon"))]
+    pub(super) mutex_names: BTreeMap<String,u64>,
     pub(super) main_loop_wait_override: i32,
     pub(super) drag_drop_enabled: bool,
     pub(super) fullscreen_hotkeys_enabled: bool,
@@ -272,7 +274,7 @@ fn read_win32_attribute_xattr(path: &Path) -> Option<u32> {
     (read == 4).then(|| u32::from_le_bytes(value))
 }
 
-#[cfg(all(unix, not(target_os = "macos")))]
+#[cfg(any(target_os="linux",target_os="android"))]
 fn read_win32_attribute_xattr(path: &Path) -> Option<u32> {
     let path = xattr_path(path)?;
     let mut value = [0u8; 4];
@@ -294,7 +296,7 @@ fn write_win32_attribute_xattr(path: &Path, attrs: u32) {
     }
 }
 
-#[cfg(all(unix, not(target_os = "macos")))]
+#[cfg(any(target_os="linux",target_os="android"))]
 fn write_win32_attribute_xattr(path: &Path, attrs: u32) {
     if let Some(path) = xattr_path(path) {
         let value = attrs.to_le_bytes();
@@ -305,12 +307,12 @@ fn write_win32_attribute_xattr(path: &Path, attrs: u32) {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(target_os="macos",target_os="linux",target_os="android")))]
 fn read_win32_attribute_xattr(_path: &Path) -> Option<u32> {
     None
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(target_os="macos",target_os="linux",target_os="android")))]
 fn write_win32_attribute_xattr(_path: &Path, _attrs: u32) {}
 
 /// CopyFileA(..., FALSE): overwrites the destination (unless it is read-only),
