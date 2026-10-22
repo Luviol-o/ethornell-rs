@@ -1089,7 +1089,7 @@ mod tests {
                 slice
             };
             // Kind 5 packs the formats in p2; format 3 is one byte a pixel.
-            let bpp = |format: u32| if kind == 5 && format == 3 { 1 } else { 4 };
+            let bpp = |format: u32| if kind == 5 && format == 3 || kind == 9 { 1 } else { 4 };
             let (sb, db) = (bpp(p2 & 0xFF), bpp(p2 >> 8 & 0xFF));
             let source = TargetBitmap { pixels: take(sw * sh * sb), stride: sw * sb, width: sw, height: sh };
             let before = take(dw * dh * db);
@@ -1130,6 +1130,11 @@ mod tests {
                     }
                     let lut = crate::graph_color::RuntimeColorLut::from_control_points(points).unwrap();
                     tone_curve(&mut destination, &source, p0 & 0xFF, lut.lane_tables(), extra[6], extra[7], extra[8], extra[9]);
+                }
+                // The encoder's output replaces the zeroed "destination".
+                9 => {
+                    let header: [u8; 16] = source.pixels[..16].try_into().unwrap();
+                    destination.pixels = ethornell_image::encode_cbg_v1(&header, &source.pixels[16..], p0);
                 }
                 5 => grayscale_mask(&mut destination, p2 >> 8 & 0xFF, &source, p2 & 0xFF, p0 as i32, p1 as i32),
                 4 => process(&mut destination, p2 >> 8 & 0xFF, &source, p2 & 0xFF, p2 >> 16, p0, p1),

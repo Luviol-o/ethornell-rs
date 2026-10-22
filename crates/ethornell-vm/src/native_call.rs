@@ -16534,7 +16534,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_ENCODE_BITMAP_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_4056F0 validates dimensions/format, encodes through one of two target codecs, writes byte count and optionally copies bytes to caller memory.",
+        notes: "sub_4056F0: checks and texts are the target's. Format 0 (sub_46A320, CompressedBG v1: average predictor, zero runs, Huffman, LCG-keyed count table, key = GetTickCount) is ported (ethornell_image::encode_cbg_v1) and byte-exact under Unicorn. Format 1 (sub_4A1930, the CompressedBG v2 DCT encoder) is not ported; a raw 16-byte BG header over BGRA stands in.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_CREATE_KNOB_OBJECT,

@@ -22876,12 +22876,30 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
             return Err(0x8000_0018u32 as i32);
         }
 
-        // The target's two encoders are proprietary. Preserve its 16-byte BG
-        // header and BGRA byte order as a deterministic portable payload while
-        // keeping this handler classified Partial rather than claiming codec
-        // equivalence.
         let width = u16::try_from(image.width).map_err(|_| -1)?;
         let height = u16::try_from(image.height).map_err(|_| -1)?;
+        let pixel_format = self.bitmap_formats.get(&bitmap).copied().unwrap_or(2);
+        if format == 0 {
+            // sub_4056F0: the 16-byte descriptor (width, height, 24 or 32
+            // bits, format) over packed BGR / BGRA rows (sub_4081F0), then
+            // sub_46A320 with the GetTickCount key.
+            let bits: u16 = if pixel_format == 1 { 24 } else { 32 };
+            let mut header = [0u8; 16];
+            header[0..2].copy_from_slice(&width.to_le_bytes());
+            header[2..4].copy_from_slice(&height.to_le_bytes());
+            header[4..6].copy_from_slice(&bits.to_le_bytes());
+            header[8..10].copy_from_slice(&(pixel_format as u16).to_le_bytes());
+            let mut pixels = Vec::with_capacity(image.rgba.len());
+            for pixel in image.rgba.as_chunks::<4>().0 {
+                pixels.extend_from_slice(&[pixel[2], pixel[1], pixel[0]]);
+                if bits == 32 {
+                    pixels.push(pixel[3]);
+                }
+            }
+            return Ok(ethornell_image::encode_cbg_v1(&header, &pixels, self.native_sound_tick));
+        }
+        // Format 1 (sub_4A1930, the CompressedBG v2 DCT encoder) is not
+        // ported yet: a 16-byte BG header over BGRA bytes stands in.
         let mut bytes = Vec::with_capacity(16 + image.rgba.len());
         bytes.extend_from_slice(&width.to_le_bytes());
         bytes.extend_from_slice(&height.to_le_bytes());

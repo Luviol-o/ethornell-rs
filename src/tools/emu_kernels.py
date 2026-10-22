@@ -64,6 +64,8 @@ def set_rect(rect, left, top, right, bottom):
 
 
 stub("SetRect", 5, set_rect)
+tick = [0]
+stub("GetTickCount", 0, lambda: tick[0])
 mu.hook_add(UC_HOOK_CODE, on_stub, begin=STUBS, end=STUBS + 0xFFF)
 
 # Statically linked CRT allocators are replaced by cdecl hooks.
@@ -79,8 +81,15 @@ def on_internal(uc, address, size, user):
         uc.reg_write(UC_X86_REG_EIP, ret)
 
 
+def zeroed(n):
+    # Zero-filled, so that sub_469B70's one-byte over-read sees 0.
+    at = alloc(n + 16)
+    mu.mem_write(at, bytes(n + 16))
+    return at
+
+
 for address in (0x4ABF7F, 0x4ABF18):  # operator new / new[]
-    internal[address] = lambda n: alloc(n)
+    internal[address] = zeroed
 for address in (0x4ABF23, 0x4ABF0D):  # operator delete[] / delete
     internal[address] = lambda p: 0
 mu.hook_add(UC_HOOK_CODE, on_internal, begin=0x4ABF00, end=0x4ABF90)
@@ -366,3 +375,39 @@ for n, fmt in enumerate(tone_cases):
     emit_extra(f"tone_{n:03}", 8, w, h, w, h, (fmt, 0, 10),
                points + [mono_colour, mono_level, film_colour, film_level], src, dst_before, after)
 print("tones done", len(tone_cases))
+
+# kind 9: sub_46A320 (90:CE format 0, CompressedBG v1), cdecl (output,
+# input = 16-byte descriptor + packed pixels), ecx = output length.
+# GetTickCount (the key) is stubbed. sw = input bytes, dw = output bytes,
+# both as one-byte rows; p0 = key.
+cbg_cases = []
+for bpp in (24, 32):
+    for _ in range(12):
+        cbg_cases.append(bpp)
+for n, bpp in enumerate(cbg_cases):
+    heap_top = global_heap
+    w, h = rng.randrange(1, 24), rng.randrange(1, 16)
+    pixels = bytearray()
+    style = n % 4
+    for i in range(w * h * (bpp // 8)):
+        if style == 0:
+            pixels.append(rng.randrange(256))
+        elif style == 1:
+            pixels.append(0 if rng.random() < 0.7 else rng.randrange(256))
+        elif style == 2:
+            pixels.append((i // (bpp // 8)) % 7 * 30)
+        else:
+            pixels.append(200)
+    header = struct.pack("<8H", w, h, bpp, 0, 1 if bpp == 24 else 2, 0, 0, 0)
+    data = header + bytes(pixels)
+    src = alloc(len(data) + 64)
+    mu.mem_write(src, data)
+    out = alloc(4 * len(data) + 64)
+    mu.mem_write(out, bytes(4 * len(data) + 64))
+    size = alloc(4)
+    tick[0] = rng.randrange(1 << 32)
+    call(0x46A320, [out, src], {UC_X86_REG_ECX: size})
+    length = struct.unpack("<I", mu.mem_read(size, 4))[0]
+    encoded = mu.mem_read(out, length)
+    emit(f"cbg_{n:03}", 9, len(data), 1, length, 1, (tick[0], 0, 0), data, bytes(length), encoded)
+print("cbg done", len(cbg_cases))
