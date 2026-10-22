@@ -17110,7 +17110,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_REPLACE_RGB_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_481400 calls sub_4188D0 and replaces every RGB triplet while preserving the corresponding source alpha byte.",
+        notes: "sub_418B50: destination = colour | source alpha over the overlap, both format 2 (checked against the decompile).",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_CONCENTRATE_BITMAP,
@@ -17118,7 +17118,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_CONCENTRATE_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_4814A0 calls sub_418CE0 after validating both 16.16 concentration factors and the brightness attenuation.",
+        notes: "sub_418F60 ported literally (bitmap_kernels::concentrate) and matched under Unicorn (src/tools/emu_kernels.py); both bitmaps format 1, x factor p3, y factor p2.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_SCALE_TRUE_COLOR_BITMAP,
@@ -20302,6 +20302,7 @@ const PORTABLE_EQUIVALENT_OPCODES: &[NativeOpcode] = &[
     opcodes::USER2_SET_RAIN_DIRECTION,
     opcodes::USER2_SET_RAIN_LENGTH,
     opcodes::USER2_SET_RAIN_STEP,
+    opcodes::GRAPH91_CONCENTRATE_BITMAP,
 ];
 
 const PARTIAL_IMPLEMENTATION_OPCODES: &[NativeOpcode] = &[
@@ -20381,7 +20382,6 @@ const PARTIAL_IMPLEMENTATION_OPCODES: &[NativeOpcode] = &[
     opcodes::GRAPH92_LOAD_BURIKO_MOVIE_RESOURCE,
     opcodes::GRAPH91_COMPOSITE_BITMAP_RECT_ALPHA,
     opcodes::GRAPH91_COMPOSITE_BITMAP_RECT_CONVERTED,
-    opcodes::GRAPH91_CONCENTRATE_BITMAP,
     opcodes::GRAPH91_SCALE_TRUE_COLOR_BITMAP,
     opcodes::GRAPH91_PROCESS_BITMAP,
     opcodes::GRAPH91_APPLY_GRAYSCALE_MASK,

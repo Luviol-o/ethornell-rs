@@ -2380,49 +2380,37 @@ impl RuntimeTraceApi {
         self.graph91_store_bitmap(destination, destination_image, 2);
     }
 
+    /// 91:1B -> sub_403070 -> sub_418F30: both bitmaps must be format 1,
+    /// otherwise nothing happens; sub_418F60 (bitmap_kernels::concentrate)
+    /// takes the x factor from p3 and the y factor from p2.
     fn graph91_concentrate_bitmap(
         &mut self,
         destination: i32,
         source: i32,
-        concentration_x: i32,
         concentration_y: i32,
+        concentration_x: i32,
         attenuation: i32,
     ) {
-        if !(0..=0x1_0000).contains(&concentration_x)
-            || !(0..=0x1_0000).contains(&concentration_y)
-            || !(0..=256).contains(&attenuation)
+        if self.bitmap_formats.get(&destination) != Some(&1)
+            || self.bitmap_formats.get(&source) != Some(&1)
         {
             return;
         }
-        let Some(source_image) = self.graph_bitmap_image(source) else {
+        let (Some(source_image), Some(destination_image)) =
+            (self.graph_bitmap_image(source), self.graph_bitmap_image(destination))
+        else {
             return;
         };
-        let Some(mut destination_image) = self.graph_bitmap_image(destination) else {
-            return;
-        };
-        let width = destination_image.width.min(source_image.width);
-        let height = destination_image.height.min(source_image.height);
-        for y in 0..height {
-            for x in 0..width {
-                let sx = ((x as u64 * concentration_x as u64) >> 16)
-                    .min(source_image.width.saturating_sub(1) as u64)
-                    as u32;
-                let sy = ((y as u64 * concentration_y as u64) >> 16)
-                    .min(source_image.height.saturating_sub(1) as u64)
-                    as u32;
-                let so = (sy as usize * source_image.width as usize + sx as usize) * 4;
-                let doff = (y as usize * destination_image.width as usize + x as usize) * 4;
-                for channel in 0..4 {
-                    let src = source_image.rgba[so + channel] as u32;
-                    let dst = destination_image.rgba[doff + channel] as u32;
-                    destination_image.rgba[doff + channel] = (dst
-                        .saturating_add(src.saturating_mul((256 - attenuation) as u32) / 256))
-                    .min(255) as u8;
-                }
-            }
-        }
-        let format = self.bitmap_formats.get(&destination).copied().unwrap_or(2);
-        self.graph91_store_bitmap(destination, destination_image, format);
+        let source = crate::bitmap_kernels::TargetBitmap::from_image(&source_image);
+        let mut target = crate::bitmap_kernels::TargetBitmap::from_image(&destination_image);
+        crate::bitmap_kernels::concentrate(
+            &mut target,
+            &source,
+            attenuation as u32,
+            concentration_x as u32,
+            concentration_y as u32,
+        );
+        self.graph91_store_bitmap(destination, target.to_image(true), 1);
     }
 
     fn graph91_scale_bitmap(

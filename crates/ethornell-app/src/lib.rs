@@ -12,6 +12,7 @@ mod animation;
 mod audio_runtime;
 mod auto_input;
 mod bitmap_blend;
+mod bitmap_kernels;
 mod character_image;
 mod debug_trace;
 mod display_tree;
