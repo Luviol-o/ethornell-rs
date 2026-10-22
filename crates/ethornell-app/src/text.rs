@@ -1028,6 +1028,10 @@ impl RuntimeTraceApi {
             parse_message_markup_with(text, &mut self.graph_defaults.ruby_registry, link_color);
         let (page_chars, markup) = match self.message_pages.get(&window) {
             Some(page) => {
+                // window_text_state measured the room from the cursor; the
+                // page is laid out from its origin.
+                state.width += state.x - page.origin_x;
+                state.height += state.y - page.origin_y;
                 state.x = page.origin_x;
                 state.y = page.origin_y;
                 (
