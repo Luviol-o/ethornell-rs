@@ -3084,7 +3084,28 @@ impl Vm {
                 ..
             } => {
                 if let Some(BpOperand::String(text)) = instruction.operands.first() {
-                    self.push_value(Value::Str(text.clone()));
+                    // Opcode 0x05 pushes the literal's code address,
+                    // `(pc_base + off) | 0x04000000`; the bytes are in the
+                    // thread's code region (`install_module_code`).
+                    let program = &self.programs[program_index];
+                    let relative = instruction
+                        .raw
+                        .get(1..3)
+                        .map(|bytes| i16::from_le_bytes([bytes[0], bytes[1]]) as i32);
+                    let start = Self::program_parser_code_start(program);
+                    let literal = relative
+                        .map(|relative| (instruction.offset as i64 + i64::from(relative)) as u32)
+                        .filter(|&target| {
+                            target
+                                .checked_sub(start)
+                                .is_some_and(|offset| (offset as usize) < program.code.len())
+                        });
+                    if let Some(target) = literal {
+                        let base = self.program_code_bases.get(program_index).copied().unwrap_or_default();
+                        self.push_value(Value::Ptr(CODE_SEGMENT | base.wrapping_add(target - start)));
+                    } else {
+                        self.push_value(Value::Str(text.clone()));
+                    }
                 } else if let Some(BpOperand::Offset(offset)) = instruction.operands.first() {
                     // Opcode 0x05: `(pc_base + off) | 0x04000000`.
                     let program = &self.programs[program_index];
@@ -6611,11 +6632,17 @@ impl Vm {
         } else {
             encoding_rs::SHIFT_JIS
         };
-        for &index in native_strings::string_arguments(group, id) {
-            let Some(value) = args.get(index) else {
+        let strings = native_strings::string_arguments(group, id);
+        let pointers = native_strings::pointer_arguments(group, id);
+        for index in 0..args.len() {
+            // Literals are code pointers (segment 1): any one the handler
+            // does not take as a raw pointer is text for the host.
+            let literal = matches!(args[index], Value::Ptr(pointer) if pointer >> 26 == 1)
+                && !pointers.contains(&index);
+            if !strings.contains(&index) && !literal {
                 continue;
-            };
-            let pointer = match value {
+            }
+            let pointer = match &args[index] {
                 Value::Ptr(pointer) => *pointer,
                 Value::Int(pointer) => *pointer as u32,
                 _ => continue,
