@@ -1155,9 +1155,10 @@ impl RuntimeTraceApi {
     /// the cursor is left after it (`sub_42C700`), as a message's glyphs
     /// are. So it joins the window's page: a message or another draw after
     /// it continues after it, and Graph92:8E or a page feed clears it with
-    /// the rest of the page.
-    pub(crate) fn draw_window_text_at_once(&mut self, window: i32, text: &str) {
-        let (state, parsed, _) = self.continue_message_page(window, text);
+    /// the rest of the page. Returns the text drawn, as laid out on the page.
+    pub(crate) fn draw_window_text_at_once(&mut self, window: i32, text: &str) -> String {
+        let (state, parsed, committed_chars) = self.continue_message_page(window, text);
+        let drawn = parsed.text.chars().skip(committed_chars).collect();
         let page_chars = parsed.text.chars().count();
         self.native_message_surface_target = Some(window);
         let target = self.place_message_text_node(Some(window), &state);
@@ -1167,6 +1168,7 @@ impl RuntimeTraceApi {
         self.apply_text_to_node(target, text);
         self.apply_visible_ruby_to_node(target);
         self.apply_visible_styles_to_node(target);
+        drawn
     }
 
     pub(crate) fn start_native_message(
