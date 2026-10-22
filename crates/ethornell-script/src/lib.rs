@@ -624,6 +624,7 @@ pub fn candidate_call_name(group: u8, id: u16) -> Option<&'static str> {
         (0x92, 0x18) => Some("GraphConvertBitmapToAlphaDescriptor"),
         (0x92, 0x19) => Some("GraphInvertAlphaBitmap"),
         (0x92, 0x1a) => Some("GraphComposeBitmapAlphaAtOffset"),
+        (0x92, 0x1b) => Some("GraphOutlineBitmapHalo"),
         (0x92, 0x1c) => Some("GraphDrawBitmapTextMeasure"),
         (0x92, 0x1d) => Some("GraphDrawWrappedBitmapText"),
         (0x92, 0x1e) => Some("GraphDrawBitmapText"),
