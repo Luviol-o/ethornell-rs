@@ -1044,6 +1044,8 @@ impl RuntimeTraceApi {
         // control-only string. In particular, a lone 0x0A is a zero-delay
         // layout control, not a synthetic one-glyph message.
         self.user_controls.remove(&MESSAGE_INPUT_OBJECT_ID);
+        // The caret belongs to the previous message's wait.
+        self.message_caret = None;
         let target = self.ensure_message_text_node();
         if let Some(node) = self.text_nodes.get_mut(&target) {
             node.owner_object = target_surface;
