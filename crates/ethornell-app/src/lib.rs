@@ -9907,6 +9907,14 @@ mod input_tests {
         // sub_42C680/sub_42C600: a caret that doesn't fit before the valid
         // rectangle's right edge goes to the start of the next line.
         api.graph_surfaces.get_mut(&window).unwrap().valid_right = 12 + 40 + 5 - 1;
+        // From the same cursor: a message continues its window's text.
+        call_graph(
+            &mut api,
+            0x91,
+            0x8c,
+            &mut vec![Value::Int(window), Value::Int(12), Value::Int(7)],
+        )
+        .unwrap();
         api.start_native_message("ab\ncd e".to_string(), Some(window));
         GraphApi::reveal_native_message(&mut api);
         GraphApi::tick_native_message_caret(&mut api, 3000);
