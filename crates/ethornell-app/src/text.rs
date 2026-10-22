@@ -937,8 +937,11 @@ impl RuntimeTraceApi {
             if cursor.font_size > 0 {
                 state.font_size = cursor.font_size as f32;
             }
-            state.line_height =
-                (state.font_size * (100 + surface.line_spacing_percent) as f32 / 100.0).max(1.0);
+            // sub_42C4C0: height + height * spacing / 100 in integers.
+            state.line_height = crate::text_layout::line_pitch(
+                state.font_size,
+                surface.line_spacing_percent,
+            );
         }
         if let Some(style) = target_surface
             .and_then(|id| self.surface_text_states.get(&id))
