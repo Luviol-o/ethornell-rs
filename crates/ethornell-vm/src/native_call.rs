@@ -15502,7 +15502,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH90_SET_DISPLAY_OPTIONS_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "Target stores two display settings and invalidates sixteen display-object records.",
+        notes: "sub_47A120 -> sub_440930: p0 enables CDspObjWindow's own-buffer blit (dword_565B54, .bss 0), p1 (sub_498920, <= 256) is the global transparency dword_565B58; the sixteen windows are invalidated. sub_42B520 draws the window buffer only while enabled, at 256 - ((256 - p1) * (256 - own) >> 8).",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH90_SET_RASTER_FORMAT_MODE,
@@ -20309,6 +20309,7 @@ const PORTABLE_EQUIVALENT_OPCODES: &[NativeOpcode] = &[
     opcodes::GRAPH91_COMPOSITE_BITMAP_RECT_ALPHA,
     opcodes::GRAPH91_COMPOSITE_BITMAP_RECT_CONVERTED,
     opcodes::GRAPH90_APPLY_TONE_CURVE_EFFECT,
+    opcodes::GRAPH90_SET_DISPLAY_OPTIONS,
 ];
 
 const PARTIAL_IMPLEMENTATION_OPCODES: &[NativeOpcode] = &[
@@ -20328,7 +20329,6 @@ const PARTIAL_IMPLEMENTATION_OPCODES: &[NativeOpcode] = &[
     opcodes::SYS_DELETE_INSTALLED_REGISTRY_KEY,
     opcodes::SYS_REGISTER_FILE_ASSOCIATION,
     opcodes::SYS_WRITE_WINDOWS_DIRECTORY,
-    opcodes::GRAPH90_SET_DISPLAY_OPTIONS,
     opcodes::GRAPH90_UPLOAD_MAP_TILE_DATA,
     opcodes::GRAPH90_IMPORT_EXTERNAL_IMAGE,
     opcodes::GRAPH90_SAVE_BITMAP_TO_IMAGE_FILE,

@@ -8095,6 +8095,22 @@ impl RuntimeTraceApi {
             let blend_mode = properties
                 .map(|properties| properties.blend_mode)
                 .unwrap_or(128);
+            let mut opacity = self.surface_display_opacity(surface.id);
+            // CDspObjWindow::Draw (sub_42B520) blits its own buffer only
+            // while Graph90:0C is on, at 256 - ((256 - global) * (256 -
+            // own) >> 8).
+            if Self::is_window_surface_handle(surface.id) {
+                let (enabled, global) = self.graph_config.window_buffer;
+                if enabled == 0 {
+                    continue;
+                }
+                let own = properties.map_or(0, |properties| properties.transparency_parameter());
+                let own_factor = 1.0 - own as f32 / 256.0;
+                let combined = 256 - (((256 - global as u32) * (256 - own as u32)) >> 8) as i32;
+                if own_factor > 0.0 {
+                    opacity = opacity / own_factor * (1.0 - combined as f32 / 256.0);
+                }
+            }
             items.push(RuntimeGraphDrawItem {
                 owner_object: Some(surface.id),
                 key: key.to_string(),
@@ -8106,7 +8122,7 @@ impl RuntimeTraceApi {
                 src_y: region.y + viewport_y,
                 src_width: width,
                 src_height: height,
-                opacity: self.surface_display_opacity(surface.id),
+                opacity,
                 ignore_source_alpha: surface
                     .resource_id
                     .and_then(|bitmap| self.bitmap_formats.get(&bitmap).copied())
@@ -11385,7 +11401,7 @@ mod input_tests {
         assert_eq!(api.graph_config.center, (640, 360));
         assert_eq!(api.graph_config.sync_load_hold_ms, 250);
         assert_eq!(api.graph_config.enabled, 1);
-        assert_eq!(api.graph_config.display_mode, (1, 0));
+        assert_eq!(api.graph_config.window_buffer, (1, 0));
         assert_eq!(api.graph_config.renderer_options, (1, 0));
         assert_eq!(api.graph_config.fonts.len(), 1);
         assert_eq!(api.text_state.font_size, 28.0);
@@ -14982,6 +14998,43 @@ mod input_tests {
             reference.rgba,
             "nothing of the first question is left"
         );
+    }
+
+    #[test]
+    fn window_buffers_are_drawn_only_after_graph90_0c() {
+        let manager =
+            ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let mut api = super::RuntimeTraceApi::new(manager);
+        let mut create = vec![Value::Int(320), Value::Int(180)];
+        let window = match call_graph(&mut api, 0x90, 0x80, &mut create).unwrap() {
+            Value::Int(handle) => handle,
+            value => panic!("unexpected window handle {value:?}"),
+        };
+        let mut bitmap = vec![Value::Int(5), Value::Int(320), Value::Int(180), Value::Int(2)];
+        call_graph(&mut api, 0x90, 0x11, &mut bitmap).unwrap();
+        let surface = api.graph_surfaces.get_mut(&window).unwrap();
+        surface.resource_id = Some(5);
+        surface.display_attached = true;
+        let window_items = |api: &super::RuntimeTraceApi| {
+            let mut items = Vec::new();
+            api.push_surface_draw_items(&mut items);
+            items
+                .into_iter()
+                .filter(|item| item.owner_object == Some(window))
+                .map(|item| item.opacity)
+                .collect::<Vec<_>>()
+        };
+        // dword_565B54 starts at 0: sub_42B520 skips the window's buffer.
+        assert!(window_items(&api).is_empty());
+        let mut on = vec![Value::Int(1), Value::Int(0)];
+        call_graph(&mut api, 0x90, 0x0c, &mut on).unwrap();
+        assert_eq!(window_items(&api), [1.0]);
+        // 256 - ((256 - 128) * (256 - 0) >> 8) = 128.
+        let mut half = vec![Value::Int(1), Value::Int(128)];
+        call_graph(&mut api, 0x90, 0x0c, &mut half).unwrap();
+        assert_eq!(window_items(&api), [0.5]);
+        let mut invalid = vec![Value::Int(1), Value::Int(257)];
+        assert!(call_graph(&mut api, 0x90, 0x0c, &mut invalid).is_err());
     }
 
     #[test]
@@ -23804,11 +23857,13 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                 trace_graph!(self, "default priority={priority}");
             }
             (0x90, 0x0c) => {
-                let arg2 = pop_int_value(stack).unwrap_or_default();
-                let arg1 = pop_int_value(stack).unwrap_or_default();
-                self.graph_config.display_mode = (arg1, arg2);
+                // sub_47A120 -> sub_440930: enable, transparency (checked
+                // by sub_498920); the sixteen windows are invalidated.
+                let transparency = pop_int_value(stack).unwrap_or_default();
+                let enabled = pop_int_value(stack).unwrap_or_default();
+                target_checks::effect_level(transparency)?;
+                self.graph_config.window_buffer = (enabled, transparency);
                 self.graph_redraw_requested = Some(true);
-                tracing::info!(arg1, arg2, "GraphSetDisplayMode");
             }
             (0x90, 0x0d) => {
                 // sub_47A160 -> sub_42E050: anti-aliasing level, fatal above

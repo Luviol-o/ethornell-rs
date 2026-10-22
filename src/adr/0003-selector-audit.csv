@@ -258,7 +258,7 @@ selector,handler,symbol,status
 90:09,47A0A0,Graph90_09_SetDefaultPriority,verified
 90:0A,47A0D0,Graph90_0A_SetObjectUpdateRedrawPolicy,verified
 90:0B,47A100,Graph90_0B_SetCurrentBitmap,verified
-90:0C,47A120,Graph90_0C_SetDisplayOptions,todo
+90:0C,47A120,Graph90_0C_SetDisplayOptions,verified
 90:0D,47A160,Graph90_0D_SetRasterFormatMode,verified
 90:0E,47A1C0,Graph90_0E_RegisterFont,verified
 90:0F,47A2C0,Graph90_0F_SetBitmapUnblendColor,verified
