@@ -485,7 +485,7 @@ pub mod opcodes {
     ///
     /// # Port
     ///
-    /// Audit status: deferred (ADR 0003). Deferred: the Rust VM uses typed values and its own heap tags instead of the target's segment&lt;&lt;26|offset cells and five-class heap, so script-visible pointer values differ (ADR 0003 VM value/memory model question).
+    /// Audit status: verified (ADR 0003). Verified (ADR 0005): blocks get sub_48E760 class/slot addresses (`target_heap.rs`); size and class-full checks and texts match.
     pub const SYS_ALLOC: NativeOpcode = NativeOpcode {
         group: 0x80,
         id: 0x20,
@@ -514,7 +514,7 @@ pub mod opcodes {
     ///
     /// # Port
     ///
-    /// Audit status: deferred (ADR 0003). Deferred: the Rust VM uses typed values and its own heap tags instead of the target's segment&lt;&lt;26|offset cells and five-class heap, so script-visible pointer values differ (ADR 0003 VM value/memory model question).
+    /// Audit status: verified (ADR 0003). Verified (ADR 0005): sub_48E800 on the target heap; a non-block address is the target's invalid-pointer error.
     pub const SYS_FREE: NativeOpcode = NativeOpcode {
         group: 0x80,
         id: 0x21,
@@ -1286,7 +1286,7 @@ pub mod opcodes {
     ///
     /// # Port
     ///
-    /// Audit status: deferred (ADR 0003). Deferred: the value returned is a code-segment offset of the target value model, which the Rust VM's typed values do not reproduce (ADR 0003 VM value/memory model).
+    /// Audit status: verified (ADR 0003). Verified (ADR 0005): the result is the module's code-region offset, as in the target.
     pub const SYS_LOAD_PROGRAM_MODULE: NativeOpcode = NativeOpcode {
         group: 0x80,
         id: 0x40,
@@ -1311,7 +1311,7 @@ pub mod opcodes {
     ///
     /// # Port
     ///
-    /// Audit status: deferred (ADR 0003). Deferred: the value returned is a code-segment offset of the target value model, which the Rust VM's typed values do not reproduce (ADR 0003 VM value/memory model).
+    /// Audit status: verified (ADR 0003). Verified (ADR 0005): frees the last module of the code region; texts match.
     pub const SYS_FREE_LAST_PROGRAM_MODULE: NativeOpcode = NativeOpcode {
         group: 0x80,
         id: 0x41,
@@ -1345,7 +1345,7 @@ pub mod opcodes {
     ///
     /// # Port
     ///
-    /// Audit status: deferred (ADR 0003). Deferred: the value returned is a code-segment offset of the target value model, which the Rust VM's typed values do not reproduce (ADR 0003 VM value/memory model).
+    /// Audit status: verified (ADR 0003). Verified (ADR 0005): the new thread starts at the module's code-region offset; texts match.
     pub const SYS_LOAD_PROGRAM_THREAD: NativeOpcode = NativeOpcode {
         group: 0x80,
         id: 0x44,
@@ -2578,7 +2578,7 @@ pub mod opcodes {
     ///
     /// # Port
     ///
-    /// Audit status: deferred (ADR 0003). Deferred: the global segment is still a global_config mirror beside VM memory (ADR 0003 VM value/memory model); the size check and result match.
+    /// Audit status: verified (ADR 0003). Verified (ADR 0005): segment 0 is script memory; the size check and result match.
     pub const SYS_ALLOCATE_GLOBAL_CONFIG: NativeOpcode = NativeOpcode {
         group: 0x80,
         id: 0x70,
@@ -2599,7 +2599,7 @@ pub mod opcodes {
     ///
     /// # Port
     ///
-    /// Audit status: deferred (ADR 0003). Deferred: same global_config mirror question as Sys80:70.
+    /// Audit status: verified (ADR 0003). Verified (ADR 0005): zeroes the global segment in script memory.
     pub const SYS_CLEAR_GLOBAL_CONFIG: NativeOpcode = NativeOpcode {
         group: 0x80,
         id: 0x71,
@@ -5679,7 +5679,7 @@ pub mod opcodes {
     ///
     /// Create a child BP thread inside the calling thread.
     ///
-    /// Constructs a DCTChildThread parented to the caller's parent (or the caller), carving code and stack regions from the parent (sub_453040), sets the initial IP and starts it. The child gets a new thread id (++dword_565D74).
+    /// Constructs a DCTChildThread (sub_452F30: own operand ring, no regions of its own, numbered ++dword_565D74) and reserves `code_size` / `stack_size` at the top of the caller's code and data regions (vtable +28, sub_445710; a child caller forwards to its non-child ancestor). The child runs the caller's code buffer from `entry_ip` with its frame stack starting at the data block (segment 1/2 addresses are the caller's); its `ret` at the block start ends it, and its destructor releases the blocks (sub_445850) without raising the lowered free limits. It joins the end of the root's thread chain.
     ///
     /// # ABI
     ///
@@ -5687,7 +5687,7 @@ pub mod opcodes {
     ///
     /// | # | Name | Type | Meaning | Range |
     /// |---|---|---|---|---|
-    /// | 0 | `slot_count` | i32 | First construction value stored at CThread+0x10 (allocates the child's own table when nonzero); exact role unrecovered. | any |
+    /// | 0 | `slot_count` | u32 | Operand ring slots of the child (CThread+0x10). | any |
     /// | 1 | `code_size` | i32 | Size of the code region reserved in the parent. | any |
     /// | 2 | `stack_size` | i32 | Size of the stack region reserved in the parent. | any |
     /// | 3 | `entry_ip` | u32 | Initial instruction pointer of the child. | below the code-region limit (sub_445000) |
@@ -5704,7 +5704,7 @@ pub mod opcodes {
     ///
     /// # Port
     ///
-    /// Audit status: deferred (ADR 0003). Deferred (VM model): the port starts an empty async program and does not share parent memory.
+    /// Audit status: verified (ADR 0003). `child_thread.rs`: the child is a separate VM with the caller's module table that borrows the owner's local window while it runs.
     pub const SYS81_CREATE_CHILD_THREAD: NativeOpcode = NativeOpcode {
         group: 0x81,
         id: 0x44,
@@ -5928,7 +5928,7 @@ pub mod opcodes {
     ///
     /// # Port
     ///
-    /// Audit status: deferred (ADR 0003). Deferred (VM model): the port stores the flag, but its error path does not reproduce the capture/throw behaviour.
+    /// Audit status: verified (ADR 0003). Verified: script errors follow sub_464C50 (header, BGIError.txt, first-error box); capture mode stores the first message.
     pub const SYS81_SET_ERROR_CAPTURE_MODE: NativeOpcode = NativeOpcode {
         group: 0x81,
         id: 0x6A,
@@ -5953,7 +5953,7 @@ pub mod opcodes {
     ///
     /// # Port
     ///
-    /// Audit status: deferred (ADR 0003). Deferred (VM model): same contract, but captured text comes from the port's own error path.
+    /// Audit status: verified (ADR 0003). Verified: copies the captured message (sub_464C50 capture).
     pub const SYS81_COPY_CAPTURED_ERROR: NativeOpcode = NativeOpcode {
         group: 0x81,
         id: 0x6B,
@@ -15576,9 +15576,9 @@ pub mod opcodes {
     };
     /// `92:14` — `Graph92_14_PreloadBitmapResource`, BGI 1.622 handler `sub_486370`.
     ///
-    /// Start a DCProcPreloadBmp procedure that loads and synthesises images into the preload store.
+    /// Start a DCProcPreloadBmp procedure that loads and synthesises an image into the preload store.
     ///
-    /// Only the first string is used: a synthesis spec of '/'-separated parts, each 'name,x,y,mode,alpha' (DCProcImageSynth; mode > 7 becomes 0x80, else mode+0x20; alpha > 0x100 becomes 0). Loaded data is kept in the preload store (dword_566AB8) that later image loads consult first.
+    /// The spec is '/'-separated parts, each 'name,x,y,mode,alpha' (DCProcImageSynth, sub_4514C0; mode > 7 becomes 0x80, else mode+0x20; alpha > 0x100 becomes 0), all read from `archive` (CProcLoad, sub_439EA0, which also takes and fills the DCCache). When loaded, DCProcPreloadBmp (sub_4527C0) adds the image buffer to the preload store dword_566AB8 under (archive, spec), both lower-cased, the archive as none when it starts with '0'; an existing entry is kept. Graph90:10 and 90:C7 consume the entry, 92:15 empties the store. A missing archive or file ends the procedure without an entry.
     ///
     /// # ABI
     ///
@@ -15586,8 +15586,8 @@ pub mod opcodes {
     ///
     /// | # | Name | Type | Meaning | Range |
     /// |---|---|---|---|---|
-    /// | 0 | `spec` | string | Synthesis spec / resource name | any |
-    /// | 1 | `unused` | string | Converted but ignored | any |
+    /// | 0 | `archive` | string | Archive the parts are read from | any |
+    /// | 1 | `spec` | string | Synthesis spec / resource name | any |
     ///
     /// Returns: nothing (the procedure owns the result)
     ///
@@ -15595,11 +15595,11 @@ pub mod opcodes {
     ///
     /// # Errors
     ///
-    /// - fatal 「指定された合成ファイル名 \[ %s \] の第%sパートにファイル名が記述されていません」 when a part has no file name
+    /// - fatal 「指定された合成ファイル名 \[ %s \] の第%sパートにファイル名が記述されていません」 when a part's name field is empty (the part number in kanji numerals, sub_464CC0)
     ///
     /// # Port
     ///
-    /// Audit status: deferred (ADR 0003). Deferred (VM procedure phase): the port loads the resource synchronously and completes the procedure at once.
+    /// Audit status: verified (ADR 0003). The load is synchronous; the procedure ends at the next poll, the earliest tick the target can finish.
     pub const GRAPH92_PRELOAD_BITMAP_RESOURCE: NativeOpcode = NativeOpcode {
         group: 0x92,
         id: 0x14,
@@ -15608,7 +15608,7 @@ pub mod opcodes {
     ///
     /// Discard every buffer held in the image preload store.
     ///
-    /// sub_450940 frees each (archive, name, data) entry of dword_566AB8 filled by 92:14.
+    /// sub_450940 frees each (archive, name, data) entry of dword_566AB8: 92:14 preloads and 90:C6 registrations alike.
     ///
     /// # ABI
     ///
@@ -15620,7 +15620,7 @@ pub mod opcodes {
     ///
     /// # Port
     ///
-    /// Audit status: deferred (ADR 0003). Deferred (VM procedure phase): the port keeps no pending preload, so this is a no-op.
+    /// Audit status: verified (ADR 0003). Empties the port's store (`graph_blob_cache`).
     pub const GRAPH92_CANCEL_PENDING_BITMAP_PRELOADS: NativeOpcode = NativeOpcode {
         group: 0x92,
         id: 0x15,
@@ -16663,7 +16663,7 @@ pub mod opcodes {
     ///
     /// Start a BF_Movie (BurikoMV) load procedure.
     ///
-    /// Mode 0 installs DCProcLoadBurikoMV, nonzero DCProcLoadBMVHeader (header only); the procedure writes the movie handle and a five-DWORD metadata block.
+    /// Mode 0 installs DCProcLoadBurikoMV (CProcLoad of `archive` / `resource`, the whole file), nonzero DCProcLoadBMVHeader (the 64-byte header and the frame table; frames are read from the file later). Both end in sub_405B50: a "BF_Movie_______" file gets the next movie handle (dword_50A884) and the header DWORDs +20, +24, +32, +36, +40 as metadata. A missing archive or file, or another magic, writes nothing.
     ///
     /// # ABI
     ///
@@ -16674,7 +16674,7 @@ pub mod opcodes {
     /// | 0 | `handle_out` | ptr->DWORD | Receives the movie handle | writable BP memory |
     /// | 1 | `metadata_out` | ptr->5 DWORDs | Receives movie metadata (20 bytes) | writable BP memory |
     /// | 2 | `archive` | string | Archive / file name | any |
-    /// | 3 | `resource` | string | Resource name (header mode) | any |
+    /// | 3 | `resource` | string | Resource name | any |
     /// | 4 | `mode` | i32 | 0 full load, nonzero header only | any |
     ///
     /// Returns: nothing (the procedure writes the outputs)
@@ -16683,7 +16683,7 @@ pub mod opcodes {
     ///
     /// # Port
     ///
-    /// Audit status: deferred (ADR 0003). Deferred (VM value model phase).
+    /// Audit status: verified (ADR 0003). The port loads the whole file in both modes and writes the outputs at dispatch; the script resumes at the next poll.
     pub const GRAPH92_LOAD_BURIKO_MOVIE_RESOURCE: NativeOpcode = NativeOpcode {
         group: 0x92,
         id: 0xF1,
@@ -39205,6 +39205,19 @@ const PORTABLE_EQUIVALENT_OPCODES: &[NativeOpcode] = &[
     opcodes::SYS_REQUIRE_RESOURCE_FILE,
     opcodes::SYS_CONFIGURE_REMOVABLE_ARCHIVE,
     opcodes::SYS_QUERY_LAUNCHER_MODE,
+    opcodes::GRAPH92_PRELOAD_BITMAP_RESOURCE,
+    opcodes::GRAPH92_CANCEL_PENDING_BITMAP_PRELOADS,
+    opcodes::GRAPH92_LOAD_BURIKO_MOVIE_RESOURCE,
+    opcodes::SYS81_SET_ERROR_CAPTURE_MODE,
+    opcodes::SYS81_COPY_CAPTURED_ERROR,
+    opcodes::SYS_ALLOC,
+    opcodes::SYS_FREE,
+    opcodes::SYS_ALLOCATE_GLOBAL_CONFIG,
+    opcodes::SYS_CLEAR_GLOBAL_CONFIG,
+    opcodes::SYS_LOAD_PROGRAM_MODULE,
+    opcodes::SYS_FREE_LAST_PROGRAM_MODULE,
+    opcodes::SYS_LOAD_PROGRAM_THREAD,
+    opcodes::SYS81_CREATE_CHILD_THREAD,
 ];
 
 const PARTIAL_IMPLEMENTATION_OPCODES: &[NativeOpcode] = &[
@@ -39225,7 +39238,6 @@ const PARTIAL_IMPLEMENTATION_OPCODES: &[NativeOpcode] = &[
     opcodes::SYS_WRITE_WINDOWS_DIRECTORY,
     opcodes::GRAPH90_IMPORT_EXTERNAL_IMAGE,
     opcodes::GRAPH90_SAVE_BITMAP_TO_IMAGE_FILE,
-    opcodes::SYS81_CREATE_CHILD_THREAD,
     opcodes::SYS81_ENUMERATE_RESOURCES,
     opcodes::SYS81_QUEUE_RESOURCE_SEEK,
     opcodes::SYS81_QUEUE_RESOURCE_READ,
@@ -39240,27 +39252,15 @@ const PARTIAL_IMPLEMENTATION_OPCODES: &[NativeOpcode] = &[
     opcodes::SYS_CONFIGURE_DISPLAY_MODE,
     opcodes::SYS_REMOVE_INSTALLER_SHORTCUTS,
     opcodes::SYS_READ_WINDOWS_PATH_FILE,
-    opcodes::GRAPH92_PRELOAD_BITMAP_RESOURCE,
-    opcodes::GRAPH92_CANCEL_PENDING_BITMAP_PRELOADS,
     opcodes::GRAPH92_LOAD_EXTERNAL_BMP,
-    opcodes::GRAPH92_LOAD_BURIKO_MOVIE_RESOURCE,
     opcodes::SYS81_OPEN_RESOURCE_STREAM,
     opcodes::SYS81_TEST_PATH_WRITABLE,
     opcodes::SYS81_READ_RESOURCE_BINARY,
     opcodes::SYS81_DIRECT_FILE_READ,
     opcodes::SYS81_RESOURCE_SIZE,
     opcodes::SYS81_RESOURCE_EXISTS,
-    opcodes::SYS81_SET_ERROR_CAPTURE_MODE,
-    opcodes::SYS81_COPY_CAPTURED_ERROR,
-    opcodes::SYS_ALLOC,
-    opcodes::SYS_FREE,
-    opcodes::SYS_ALLOCATE_GLOBAL_CONFIG,
-    opcodes::SYS_CLEAR_GLOBAL_CONFIG,
     opcodes::SYS_REMOVE_UNINSTALL_LISTED_FILES,
     opcodes::SYS_APPEND_UNINSTALL_LIST_ENTRIES,
-    opcodes::SYS_LOAD_PROGRAM_MODULE,
-    opcodes::SYS_FREE_LAST_PROGRAM_MODULE,
-    opcodes::SYS_LOAD_PROGRAM_THREAD,
 ];
 
 const COMPATIBILITY_FALLBACK_OPCODES: &[NativeOpcode] = &[
@@ -39728,10 +39728,10 @@ mod tests {
             recovery_level(clear_config),
             NativeRecoveryLevel::TargetConfirmed
         );
-        // Deferred on the VM value model (ADR 0003).
+        // Verified with the VM value model (ADR 0005).
         assert_eq!(
             implementation_level(clear_config),
-            NativeImplementationLevel::Partial
+            NativeImplementationLevel::PortableEquivalent
         );
 
         let unknown = NativeOpcode {

@@ -745,7 +745,11 @@ struct RuntimeTraceApi {
     /// movie in `global_movie_handle`.
     global_movie_size: (i32, i32),
     global_movie_volume: i32,
-    graph_blob_cache: BTreeMap<(String, String), Vec<u8>>,
+    /// dword_566AB8, the BG data / preload store (sub_4507D0 adds, sub_4508D0
+    /// finds, sub_450940 empties): (lower-cased archive or none, lower-cased
+    /// name) -> image buffer in the target layout (16-byte header + pixels).
+    /// Graph90:C6 and Graph92:14 fill it; Graph90:10 / 90:C7 consume it.
+    graph_blob_cache: BTreeMap<(Option<String>, String), Vec<u8>>,
     /// Target System91:0B gate: bind the screen bitmap context around each BP tick.
     graph91_script_bitmap_context_binding_enabled: bool,
     /// Target System91:0C glyph coverage conversion mode (0=linear, 1=sine).
@@ -916,9 +920,6 @@ struct RuntimeTraceApi {
     last_named_mutex: u64,
     /// sub_402080 dword_565AE4: end of the current synchronous-load window.
     sync_load_deadline: u64,
-    /// Resources a Graph92:14 preload decoded (DCProcPreloadBmp cache); a
-    /// later Graph90:10 for them always loads synchronously.
-    preloaded_bitmap_keys: BTreeSet<String>,
     /// Object nodes of the pointer scope chain (sub_46D6E0): (scope, object)
     /// in chain order, scope = the object's sort key when it registered.
     pointer_object_nodes: Vec<(u32, i32)>,
@@ -1300,7 +1301,6 @@ impl RuntimeTraceApi {
             last_named_mutex: 0,
             pointer_object_nodes: Vec::new(),
             sync_load_deadline: 0,
-            preloaded_bitmap_keys: BTreeSet::new(),
             window_messages: VecDeque::new(),
             input_configuration_enabled: 1,
             input_master_gate: 1,
@@ -15637,6 +15637,59 @@ mod input_tests {
     }
 
     #[test]
+    fn preload_store_follows_graph92_14_90_c7_and_92_15() {
+        let manager =
+            ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let mut api = super::RuntimeTraceApi::new(manager);
+        api.store_graph_image(
+            "Data.arc:pic".to_string(),
+            DecodedImage { width: 1, height: 1, rgba: vec![10, 20, 30, 40] },
+        );
+        // Script order: archive, spec.
+        let mut args = vec![Value::Str("Data.arc".into()), Value::Str("pic".into())];
+        call_graph(&mut api, 0x92, 0x14, &mut args).unwrap();
+        let key = (Some("data.arc".to_string()), "pic".to_string());
+        assert_eq!(
+            api.graph_blob_cache.get(&key).map(Vec::as_slice),
+            Some(&[1, 0, 1, 0, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 30, 20, 10, 40][..])
+        );
+        // 90:C7 without consuming keeps the entry; 92:15 empties the store.
+        let mut args = vec![
+            Value::Int(5),
+            Value::Str("DATA.ARC".into()),
+            Value::Str("PIC".into()),
+            Value::Int(0),
+        ];
+        assert_eq!(call_graph(&mut api, 0x90, 0xC7, &mut args).unwrap(), Value::Int(1));
+        assert_eq!(api.graph_bitmap_image(5).unwrap().rgba, vec![10, 20, 30, 40]);
+        assert!(api.graph_blob_cache.contains_key(&key));
+        call_graph(&mut api, 0x92, 0x15, &mut Vec::new()).unwrap();
+        assert!(api.graph_blob_cache.is_empty());
+        // A part without a file name is fatal at dispatch.
+        let mut args = vec![Value::Str("Data.arc".into()), Value::Str("a,0,0//b".into())];
+        let error = call_graph(&mut api, 0x92, 0x14, &mut args).unwrap_err();
+        assert!(error.to_string().contains("[ a,0,0//b ] の第二パート"), "{error}");
+    }
+
+    #[test]
+    fn kanji_numbers_follow_sub_464cc0() {
+        for (value, text) in [
+            (0, "零"),
+            (1, "一"),
+            (10, "十"),
+            (11, "十一"),
+            (21, "二十一"),
+            (105, "百五"),
+            (1000, "千"),
+            (10000, "一万"),
+            (100000, "十万"),
+            (123456789, "一億二千三百四十五万六千七百八十九"),
+        ] {
+            assert_eq!(super::kanji_number(value), text);
+        }
+    }
+
+    #[test]
     fn bitmap_text_draw_uses_native_argument_order_and_rasterizes_pixels() {
         let font = super::snapshot::load_default_font().unwrap();
         let _font_session = super::snapshot::enter_font_session(&font);
@@ -22855,10 +22908,10 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
         if decode_image(bytes).is_err() {
             return false;
         }
-        self.graph_blob_cache.insert(
-            (namespace.to_ascii_lowercase(), name.to_ascii_lowercase()),
-            bytes.to_vec(),
-        );
+        // sub_4507D0 keeps an existing entry; sub_401CB0 still succeeds.
+        self.graph_blob_cache
+            .entry((Some(namespace.to_ascii_lowercase()), name.to_ascii_lowercase()))
+            .or_insert_with(|| bytes.to_vec());
         true
     }
 
@@ -24208,16 +24261,26 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                 // A preloaded (cached) image and, while sub_402080 holds, a
                 // name without '/' load synchronously; everything else goes
                 // through CProcLoadBitmap and yields until it completes.
-                let key = format!("{archive_name}:{resource_name}");
                 // sub_401CE0: the BG registry / preloads, then the DCCache
                 // (a hit refreshes the entry) answer at once; otherwise a
                 // name without '/' loads synchronously while sub_402080
                 // allows it and the file joins the DCCache (sub_401E00).
+                // A preload store hit is consumed (sub_4508D0 with a5 = 1)
+                // and moves into the DCCache (sub_439CF0).
                 let now = self.clock_base_ms.wrapping_add(self.engine_time_ms as u32);
-                let cached = self.graph_dc_cache.as_mut().is_some_and(|cache| {
-                    cache.lookup(Some(&archive_name), Some(&resource_name), now).is_some()
-                });
-                let preloaded = self.preloaded_bitmap_keys.contains(&key) || cached;
+                let preload_key =
+                    (Some(archive_name.to_ascii_lowercase()), resource_name.to_ascii_lowercase());
+                let preloaded = match self.graph_blob_cache.remove(&preload_key) {
+                    Some(bytes) => {
+                        if let Some(cache) = self.graph_dc_cache.as_mut() {
+                            cache.store(Some(&archive_name), Some(&resource_name), &bytes, now);
+                        }
+                        true
+                    }
+                    None => self.graph_dc_cache.as_mut().is_some_and(|cache| {
+                        cache.lookup(Some(&archive_name), Some(&resource_name), now).is_some()
+                    }),
+                };
                 let synchronous =
                     preloaded || (!resource_name.contains('/') && self.graph_sync_load_active());
                 if synchronous && !preloaded && self.graph_dc_cache.is_some()
@@ -26861,6 +26924,65 @@ fn pop_string_value(stack: &mut Vec<ethornell_vm::Value>) -> Option<String> {
         ethornell_vm::Value::Func { offset, .. } => Some(format!("0x{offset:08X}")),
         ethornell_vm::Value::Program(_) | ethornell_vm::Value::None => Some(String::new()),
     }
+}
+
+/// sub_401C10 on an image buffer: the bitmap format of a CBG file or of a
+/// raw image (16-byte header: width, height, bpp).
+fn image_buffer_format(bytes: &[u8]) -> i32 {
+    if let Ok(metadata) = ethornell_image::parse_cbg_metadata(bytes) {
+        return metadata.native_bitmap_format().unwrap_or(2);
+    }
+    match bytes.get(4..6).map(|bpp| u16::from_le_bytes([bpp[0], bpp[1]])) {
+        Some(8) => 3,
+        Some(16) => 0,
+        Some(24) => 1,
+        Some(0x30) => 6,
+        _ => 2,
+    }
+}
+
+/// An image as the target keeps it in the preload store: width, height and
+/// bpp in a 16-byte header, then top-down BGR(A) pixels (24 bpp for format
+/// 1, 32 bpp otherwise).
+fn preload_image_buffer(image: &DecodedImage, format: i32) -> Vec<u8> {
+    let bpp: u16 = if format == 1 { 24 } else { 32 };
+    let mut bytes = Vec::with_capacity(16 + image.rgba.len());
+    bytes.extend_from_slice(&(image.width as u16).to_le_bytes());
+    bytes.extend_from_slice(&(image.height as u16).to_le_bytes());
+    bytes.extend_from_slice(&bpp.to_le_bytes());
+    bytes.resize(16, 0);
+    for pixel in image.rgba.chunks_exact(4) {
+        bytes.extend_from_slice(&[pixel[2], pixel[1], pixel[0]]);
+        if bpp == 32 {
+            bytes.push(pixel[3]);
+        }
+    }
+    bytes
+}
+
+/// sub_464CC0: `value` in kanji numerals (零, 一 .. 九, 十, 百, 千, 万, 億).
+fn kanji_number(value: u32) -> String {
+    const DIGITS: [&str; 10] = ["", "一", "二", "三", "四", "五", "六", "七", "八", "九"];
+    const PLACES: [&str; 4] = ["", "十", "百", "千"];
+    const GROUPS: [&str; 3] = ["", "万", "億"];
+    if value == 0 {
+        return "零".to_string();
+    }
+    let mut parts = Vec::new();
+    let (mut rest, mut place) = (value, 0usize);
+    while rest != 0 {
+        let digit = (rest % 10) as usize;
+        let suffix = match place % 4 {
+            0 => GROUPS[place / 4],
+            _ if digit != 0 => PLACES[place % 4],
+            _ => "",
+        };
+        let text = if digit == 1 && place % 4 != 0 { "" } else { DIGITS[digit] };
+        parts.push(format!("{text}{suffix}"));
+        rest /= 10;
+        place += 1;
+    }
+    parts.iter().rev().map(String::as_str).collect()
 }
 
 fn pop_args(stack: &mut Vec<ethornell_vm::Value>, count: usize) -> Vec<ethornell_vm::Value> {

@@ -1,6 +1,6 @@
 # 0005. The VM uses BGI 1.622's value and address model
 
-**Status:** In progress (decided 2026-10-22: "如果简单尝试后现在的没法和原版等价导致很多功能接入有问题，那就优先修").
+**Status:** Accepted, done 2026-10-22 (decided the same day: "如果简单尝试后现在的没法和原版等价导致很多功能接入有问题，那就优先修").
 
 ## Context
 
@@ -97,13 +97,20 @@ per-game workarounds can be removed. The change touches most of
   data region (`CODE_WINDOW_OFFSET` 1 MiB, data limited to it), filled by
   `install_module_code`; push_string offsets give `0x04000000 | (base + off)`.
   Segment 0 maps only below the local window; other segments are invalid.
-* Still legacy (superseded note): code pointers (`0x10000000 | offset`, mapped onto the global
-  window), invalid addresses are a Rust `MemoryOutOfBounds` instead of the
-  target's fatal text. Next: code segment 1 with the module bytes, then
-  phase 2 (strings).
-* Next (resume here): invalid addresses still raise a Rust
-  `MemoryOutOfBounds` instead of the target's 「無効なポインタ [ $%.8X ] にアクセスしようとしました」;
-  then phase 2 (string literals as code pointers, generated string-parameter
-  table at the app boundary, `eq` on addresses), phase 3 (functions as code
-  addresses, drop `mem_values`), phase 4 (the twelve blocked selectors).
-  Also open: the 19 selectors reopened in ADR 0003 (documentation pass).
+* Phase 1 done: invalid addresses raise 「無効なポインタ [ $%.8X ] にアクセスしようとしました」.
+* Phase 2 done: string literals are code-segment pointers; the host boundary
+  converts parameters by tables generated from the 1.622 handlers
+  (`native_strings.rs`).
+* Phase 3 done: function values, jump targets and return addresses are
+  code-region offsets; memory keeps no pointer or function shadows.
+* Phase 4 done: 80:20/21 on the target heap, 80:40/41/44 code offsets,
+  80:70/71 global segment in script memory, 81:6A/6B through the sub_464C50
+  error flow, 92:14/15 on the preload store (dword_566AB8, shared with
+  90:C6/C7/10), 92:F1 outputs through target pointers, and 81:44
+  (`child_thread.rs`): the child borrows its owner's local window, reserves
+  its blocks with sub_445710's lists, and `ret` at its frame base ends it.
+  Calls check `sp + 4` against the data limit (base + free limit) with
+  「スタック領域が不足しています」.
+* 80:60 was listed here but is not a value-model item: what remains is the
+  graph reset on a real screen-size change (sub_443100), which stays
+  deferred with the window/filter/effector audit (ADR 0003).

@@ -217,7 +217,7 @@ selector,handler,symbol,status
 81:3C,48C9A0,Sys81_3C_ResourceExists,deferred
 81:3D,48C9D0,Sys81_3D_GetVolumeLabel,deferred
 81:3E,48CA10,Sys81_3E_QueryDevicePowerState,deferred
-81:44,48CA50,Sys81_44_CreateChildThread,deferred
+81:44,48CA50,Sys81_44_CreateChildThread,verified
 81:60,48CBC0,Sys81_60_ConfigureScreenMode,verified
 81:61,48CC00,Sys81_61_QueryEffectiveDisplayMode,verified
 81:62,48CC20,Sys81_62_SetMonitorAdapterMode,verified
@@ -538,8 +538,8 @@ selector,handler,symbol,status
 92:11,486220,Graph92_11_GenerateAxisVectorMap,verified
 92:12,4862F0,Graph92_12_SetBitmapAuxiliaryPair,verified
 92:13,486330,Graph92_13_ReplaceBitmapColor,verified
-92:14,486370,Graph92_14_PreloadBitmapResource,deferred
-92:15,486400,Graph92_15_CancelPendingBitmapPreloads,deferred
+92:14,486370,Graph92_14_PreloadBitmapResource,verified
+92:15,486400,Graph92_15_CancelPendingBitmapPreloads,verified
 92:16,486410,Graph92_16_GetBitmapAuxiliaryPair,verified
 92:17,486450,Graph92_17_ReadBitmapPixelValue,verified
 92:18,4864A0,Graph92_18_ConvertBitmapToAlphaDescriptor,verified
@@ -565,7 +565,7 @@ selector,handler,symbol,status
 92:9E,487630,Graph92_9E_DrainTextFragmentRecords,verified
 92:9F,487660,Graph92_9F_SetTextRenderOverride,verified
 92:F0,487680,Graph92_F0_OpenGlobalDirectShowMovie,verified
-92:F1,487740,Graph92_F1_LoadBurikoMovieResource,deferred
+92:F1,487740,Graph92_F1_LoadBurikoMovieResource,verified
 92:F2,487830,Graph92_F2_OpenBitmapDirectShowMovie,verified
 92:F4,487910,Graph92_F4_SeekBitmapDirectShowMovie,verified
 92:F5,4879A0,Graph92_F5_GetBitmapDirectShowMoviePosition,verified

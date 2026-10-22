@@ -87,31 +87,61 @@ impl RuntimeTraceApi {
                 ))
             }
             0x14 => {
-                // sub_485870 converts both script strings, but DCProcPreloadBmp
-                // receives only the first source argument. The second remains
-                // diagnostic/context input in this target build.
-                let mut source = pop_args(stack, 2);
-                source.reverse();
-                let resource = source.first().and_then(value_to_string).unwrap_or_default();
-                let context = source.get(1).and_then(value_to_string).unwrap_or_default();
-                let loaded = !resource.is_empty()
-                    && self.load_graph_image_resource_target(None, &context, &resource);
-                if loaded {
-                    self.preloaded_bitmap_keys.insert(format!("{context}:{resource}"));
+                // sub_486370 pops the synthesis spec, then the archive:
+                // DCProcImageSynth parses the spec (sub_4514C0) and loads
+                // its parts from the archive (CProcLoad, sub_439EA0);
+                // DCProcPreloadBmp's last step (sub_4527C0) adds the result
+                // to the preload store unless it is there already. A missing
+                // archive or file ends the procedure quietly (tick 1 / -1).
+                let spec = pop_string_value(stack).unwrap_or_default();
+                let archive = pop_string_value(stack).unwrap_or_default();
+                for (index, part) in spec.split('/').enumerate() {
+                    if part.split(',').next().unwrap_or_default().is_empty() {
+                        return Some(Err(ethornell_vm::VmError::Runtime(format!(
+                            "指定された合成ファイル名 [ {spec} ] の第{}パートにファイル名が記述されていません",
+                            crate::kanji_number(index as u32 + 1)
+                        ))));
+                    }
                 }
-                tracing::debug!(resource, context, loaded, "Graph92PreloadBitmap");
+                // sub_451010: each part file is taken from the DCCache or
+                // stored in it once loaded.
+                if self.graph_dc_cache.is_some() {
+                    let now = self.clock_base_ms.wrapping_add(self.engine_time_ms as u32);
+                    for part in spec.split('/') {
+                        let name = part.split(',').next().unwrap_or_default().trim();
+                        let hit = self.graph_dc_cache.as_mut().is_some_and(|cache| {
+                            cache.lookup(Some(&archive), Some(name), now).is_some()
+                        });
+                        if !hit
+                            && let Some(entry) = find_runtime_resource(&self.manager, &archive, name)
+                            && let Ok(bytes) = self.manager.read_by_entry_raw(&entry)
+                            && let Some(cache) = self.graph_dc_cache.as_mut()
+                        {
+                            cache.store(Some(&archive), Some(name), &bytes, now);
+                        }
+                    }
+                }
+                let loaded = self.load_graph_image_resource_target(None, &archive, &spec);
+                let key = format!("{archive}:{spec}");
+                if loaded && let Some(image) = self.graph_images.get(&key) {
+                    let format = self.graph_image_formats.get(&key).copied().unwrap_or(2);
+                    let bytes = crate::preload_image_buffer(image, format);
+                    let archive_key = (!archive.starts_with('0')).then(|| archive.to_ascii_lowercase());
+                    self.graph_blob_cache
+                        .entry((archive_key, spec.to_ascii_lowercase()))
+                        .or_insert(bytes);
+                }
+                tracing::debug!(archive, spec, loaded, "Graph92PreloadBitmap");
                 call.complete_procedure(
                     ethornell_vm::native_call::NativeProcedureClass::PreloadBitmap,
-                    if loaded { 0 } else { 1 },
+                    if loaded { 1 } else { -1 },
                 );
                 ethornell_vm::Value::None
             }
             0x15 => {
-                // sub_4504F0 removes every pending DCProcPreloadBmp node.
-                // Portable preloads complete synchronously, so there is no
-                // pending node after dispatch; retain the exact queue-drain
-                // boundary as an explicit no-op.
-                tracing::debug!("Graph92CancelPendingBitmapPreloads");
+                // sub_450940 empties the whole store: Graph92:14 preloads
+                // and Graph90:C6 registrations alike.
+                self.graph_blob_cache.clear();
                 ethornell_vm::Value::None
             }
             0x18 => {

@@ -4367,7 +4367,7 @@ impl RuntimeTraceApi {
                 if let Err(error) = target_checks::bitmap(bitmap) {
                     return Some(Err(error));
                 }
-                let key = (namespace.to_ascii_lowercase(), name.to_ascii_lowercase());
+                let key = (Some(namespace.to_ascii_lowercase()), name.to_ascii_lowercase());
                 // sub_401CE0: the BG registry first, then the DCCache.
                 let bytes = if consume {
                     self.graph_blob_cache.remove(&key)
@@ -4383,10 +4383,7 @@ impl RuntimeTraceApi {
                 // sub_402330: the BG's own pixel format (sub_401C10).
                 let loaded = bytes
                     .and_then(|bytes| {
-                        let format = ethornell_image::parse_cbg_metadata(&bytes)
-                            .ok()
-                            .and_then(|metadata| metadata.native_bitmap_format())
-                            .unwrap_or(2);
+                        let format = crate::image_buffer_format(&bytes);
                         decode_image(&bytes).ok().map(|image| (image, format))
                     })
                     .map(|(image, format)| {

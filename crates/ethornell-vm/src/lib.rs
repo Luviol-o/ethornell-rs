@@ -15,6 +15,7 @@ use std::sync::{
 };
 
 mod async_program;
+mod child_thread;
 pub mod cpu_record;
 mod debug;
 mod extended_opcodes;
@@ -2347,6 +2348,15 @@ pub struct Vm {
     pub calls: BTreeMap<String, usize>,
     pub stubs: BTreeMap<String, usize>,
     program_cache: BTreeMap<String, usize>,
+    /// sub_445710 / sub_445850 blocks in this thread's regions; a
+    /// DCTChildThread holds its ancestor's (Sys81:44, `child_thread.rs`).
+    region_reservations: Arc<std::sync::Mutex<child_thread::RegionReservations>>,
+    /// A DCTChildThread: its reservation tag (the thread id).
+    child_thread_tag: Option<i32>,
+    /// The thread whose local window (data and code regions) this one runs in.
+    local_window_owner: Option<i32>,
+    /// Lowest code offset a module is appended at (a child's code block).
+    code_used_floor: u32,
     program_free_stack: Vec<usize>,
     mediation_programs: BTreeMap<u8, BpProgram>,
     record_tables: BTreeMap<u32, records::RecordTableState>,
@@ -3427,7 +3437,8 @@ impl Vm {
                 }
             },
             BpOpcode::Known { name: "ret", .. } => {
-                if self.mem_ptr == 0 {
+                // sub_474020: a frame stack at the region base ends the thread.
+                if self.mem_ptr <= self.thread.frame_region_base() {
                     self.halted = true;
                 } else if let Some((program_id, fallback_ret, stack_base)) = self.call_stack.pop() {
                     let ret_offset = self.read_return_addr()?;
@@ -4192,7 +4203,7 @@ impl Vm {
             BpOpcode::Known {
                 name: "script_ret", ..
             } => {
-                if self.mem_ptr == 0 {
+                if self.mem_ptr <= self.thread.frame_region_base() {
                     self.halted = true;
                 } else if let Some((program_id, fallback_ret, stack_base)) = self.call_stack.pop() {
                     let ret_offset = self.read_return_addr()?;
@@ -5400,13 +5411,6 @@ impl Vm {
                         NativeOpcode { group: code, id },
                         trace_events,
                     );
-                    if (code, id) == (0x92, 0x14) {
-                        let pending = self.read_int(1644, 2)?.saturating_sub(1);
-                        self.write_int(1644, 2, pending)?;
-                        if trace_events {
-                            tracing::info!(pending, "VM graph preload completed");
-                        }
-                    }
                     result
                 };
                 if api.take_runtime_stub() {
@@ -6873,6 +6877,7 @@ impl Vm {
             })
             .max()
             .unwrap_or_default()
+            .max(self.code_used_floor)
     }
 
     /// `CThread+0x38` (`code_used`): the initial module plus every module
@@ -6899,6 +6904,7 @@ impl Vm {
         let code_used_end = self.active_code_used_end();
         self.thread
             .sync_program_region(self.target_loaded_programs.len(), code_used_end);
+        self.sync_region_reservations(code_used_end);
     }
 
     fn resolve_target_code_offset(&self, target_offset: u32) -> Option<(usize, u32)> {
@@ -7426,14 +7432,10 @@ impl Vm {
             .and_then(|program| program.instructions.get(next_pc))
             .map(|instruction| self.code_offset_of(program_index, instruction.offset as u32))
             .unwrap_or_default();
-        // sub_473A70 rejects a call whose frame pointer already reached the
-        // data region limit.
-        if self.mem_ptr >= self.thread.data_region_size() {
-            return Err(VmError::Runtime(format!(
-                "call: SP 0x{:08X} outside the {}-byte data region",
-                self.mem_ptr,
-                self.thread.data_region_size()
-            )));
+        // sub_473FD0: the return address must fit below the data limit
+        // (sub_445010: base + free limit, lowered by child reservations).
+        if self.mem_ptr.wrapping_add(4) >= self.data_region_limit() {
+            return Err(VmError::Runtime("スタック領域が不足しています".into()));
         }
         self.write_int(FRAME_SEGMENT | self.mem_ptr, 2, return_offset)?;
         self.mem_ptr = self.mem_ptr.saturating_add(4);
@@ -9715,21 +9717,13 @@ impl Vm {
                 Value::Int(i32::from(available))
             }
             (0x81, 0x44) => {
-                let data_size = self.pop_int()?;
-                let code_size = self.pop_int()?;
-                let operand_slots = self.pop_int()?;
-                let entry_index = self.pop_int()?;
-                let program = empty_loaded_program(format!(
-                    "DCTChildThread:{entry_index}:{operand_slots}:{code_size}:{data_size}"
-                ));
-                let thread_id = self
-                    .start_async_program_with_args(
-                        Value::Program(Arc::new(program)),
-                        Vec::new(),
-                        false,
-                    )
-                    .unwrap_or(0);
-                Value::Int(thread_id)
+                // sub_48CA50 pops the initial IP, the data (stack) bytes,
+                // the code bytes and the operand slots (`child_thread.rs`).
+                let initial_ip = self.pop_int()? as u32;
+                let data_bytes = self.pop_int()? as u32;
+                let code_bytes = self.pop_int()? as u32;
+                let operand_slots = self.pop_int()? as u32;
+                Value::Int(self.start_child_thread(operand_slots, code_bytes, data_bytes, initial_ip, false)?)
             }
             (0x81, 0x60) => {
                 // sub_4615A0: index >= 8 (unsigned) -> 1, a zero dimension
@@ -18533,6 +18527,50 @@ mod tests {
         assert!(vm.async_tasks[0].runnable);
         assert!(vm.switch_to_async_program(handle, false).0);
         assert!(vm.async_tasks[0].runnable);
+    }
+
+    #[test]
+    fn child_thread_runs_parent_code_in_a_block_of_the_parent_regions() {
+        #[rustfmt::skip]
+        let code = vec![
+            0x02, 4, 0, 0, 0,          // operand slots
+            0x02, 0, 1, 0, 0,          // code bytes 0x100
+            0x02, 0, 1, 0, 0,          // data bytes 0x100
+            0x06, 0x06, 0x00,          // push_offset 0x15 (child entry)
+            0x81, 0x44,                // Sys81:44
+            0x17,                      // ret
+            // child entry 0x15
+            0x02, 0x10, 0, 0, 0, 0x00, 42, 0x09, 2,   // [0x10] = 42
+            0x04, 0, 0, 0x00, 7, 0x09, 2,             // [frame + 0] = 7
+            0x17,                                     // ret at the block base ends it
+        ];
+        let program = ethornell_script::parse_bp_program(Some("child-root._bp".into()), &code);
+        let mut vm = Vm::new();
+        vm.start(&program);
+        let report = vm.run_loaded(&mut TraceApi, &VmRunOptions::default());
+        assert_eq!(report.stop_reason, VmStopReason::Completed, "{report:?}");
+        assert_eq!(vm.async_tasks.len(), 1);
+        let child = &vm.async_tasks[0].vm;
+        // The blocks sit at the top of the 0x80000 / 0x40000 regions.
+        assert_eq!(child.mem_ptr, 0x3FF00);
+        assert_eq!(child.thread.frame_region_base(), 0x3FF00);
+        assert_eq!(vm.data_region_limit(), 0x3FF00);
+        vm.pump_async_programs(&mut TraceApi, false, &VmRunOptions::default());
+        assert!(vm.async_tasks.is_empty());
+        assert_eq!(vm.read_int(0x10, 2).unwrap(), 42);
+        assert_eq!(vm.read_int(crate::FRAME_SEGMENT | 0x3FF00, 2).unwrap(), 7);
+        // sub_445850 drops the blocks but not the lowered limit.
+        let regions = vm.region_reservations.lock().unwrap();
+        assert_eq!(regions.data_free_limit(), 0x3FF00);
+        drop(regions);
+        // A block that does not fit, and an IP past the child's code block.
+        let instruction = test_instruction(0, 0x81, "sys2", vec![0x81, 0x44], Vec::new());
+        vm.stack.extend([Value::Int(4), Value::Int(0x100), Value::Int(0x40001), Value::Int(0x15)]);
+        let error = vm.dispatch(&instruction, &mut TraceApi).unwrap_err();
+        assert!(error.to_string().contains("[ 262145 ] のスタック領域"), "{error}");
+        vm.stack.extend([Value::Int(4), Value::Int(0x100), Value::Int(0x10), Value::Int(0x80000)]);
+        let error = vm.dispatch(&instruction, &mut TraceApi).unwrap_err();
+        assert!(error.to_string().contains("$80000"), "{error}");
     }
 
     #[test]

@@ -413,3 +413,14 @@ handlers; status set back to todo):
 * B0:C3: argument order reversed (target: archive first, font name last).
 * C0:C0: spline handles start at 0 (target 0x80000000).
 * C0:F0: VM reads (archive, table_out, count_out, resource, base); target order is table_out, count_out, archive, resource, base.
+
+All nineteen reopened selectors fixed and verified (2026-10-22).
+
+VM value model done (ADR 0005, 2026-10-22): 80:20/21/40/41/44/70/71,
+81:44/6A/6B and 92:14/15/F1 verified. 92:14 had its arguments swapped
+(script order is archive, spec), so preloads never loaded; it now fills the
+preload store dword_566AB8 that 90:C6 registers into, 90:10 / 90:C7 consume
+and 92:15 empties. Status: 701 verified, 40 deferred: the ADR 0004 file
+layer (80:3A, 80:F0..FC, 81:28..3E, 81:F2/F7, 90:C4/C5, 92:1F) and 80:60
+(graph reset on a screen-size change, sub_443100: filters +537, effectors
++547, windows +573 re-centred).

@@ -52,6 +52,28 @@ impl Vm {
         args: Vec<Value>,
         trace_events: bool,
     ) -> Option<i32> {
+        self.spawn_async_program(program, args, None, trace_events)
+    }
+
+    /// A thread whose id was taken already (Sys81:44 numbers the child
+    /// before it reserves its blocks).
+    pub(crate) fn start_async_program_with_thread_id(
+        &mut self,
+        program: Value,
+        thread_id: i32,
+        trace_events: bool,
+    ) -> bool {
+        self.spawn_async_program(program, Vec::new(), Some(thread_id), trace_events)
+            .is_some()
+    }
+
+    fn spawn_async_program(
+        &mut self,
+        program: Value,
+        args: Vec<Value>,
+        thread_id: Option<i32>,
+        trace_events: bool,
+    ) -> Option<i32> {
         let Some(program) = self.value_program(program) else {
             return None;
         };
@@ -90,8 +112,11 @@ impl Vm {
         vm.validated_file_root = self.validated_file_root.clone();
         vm.system_wait_state = self.system_wait_state;
         vm.start(&program);
-        let thread_id = self.next_thread_id.max(1);
-        self.next_thread_id = self.next_thread_id.saturating_add(1).max(1);
+        let thread_id = thread_id.unwrap_or_else(|| {
+            let thread_id = self.next_thread_id.max(1);
+            self.next_thread_id = self.next_thread_id.saturating_add(1).max(1);
+            thread_id
+        });
         vm.next_thread_id = self.next_thread_id;
         vm.thread.set_thread_id(thread_id);
         vm.thread.set_root_thread_id(Some(self.thread.thread_id()));
@@ -381,6 +406,9 @@ impl Vm {
             };
             let mut task = self.async_tasks.remove(cursor);
             transfer_async_shared_state(self, &mut task.vm);
+            let mut others = std::mem::take(&mut self.async_tasks);
+            lend_owner_window(self, &mut others, &mut task.vm);
+            self.async_tasks = others;
             let mut scheduler_tasks = std::mem::take(&mut self.async_tasks);
             scheduler_tasks.append(&mut task.vm.async_tasks);
             task.vm.async_tasks = scheduler_tasks;
@@ -445,11 +473,13 @@ impl Vm {
                 VmStopReason::Completed | VmStopReason::InterpreterTerminated
             ) {
                 task.completed = true;
+                task.vm.release_child_thread_regions();
                 if report.stop_reason != VmStopReason::InterpreterTerminated {
                     task.vm.thread.mark_terminated();
                 }
             }
             let mut scheduler_tasks = std::mem::take(&mut task.vm.async_tasks);
+            lend_owner_window(self, &mut scheduler_tasks, &mut task.vm);
             transfer_async_shared_state(&mut task.vm, self);
             self.thread.extend_messages(root_messages);
             for callback in root_callbacks {
@@ -558,6 +588,23 @@ impl Vm {
             }
             Value::Str(_) | Value::Func { .. } | Value::None => None,
         }
+    }
+}
+
+/// A DCTChildThread runs in its owner's local window: swapped in after the
+/// shared state reaches it and back out before it leaves (the swap is its
+/// own inverse). The owner is the scheduling VM or another idle task.
+fn lend_owner_window(scheduler: &mut Vm, tasks: &mut [AsyncProgramTask], child: &mut Vm) {
+    let Some(owner) = child.local_window_owner else {
+        return;
+    };
+    if scheduler.thread.thread_id() == owner {
+        crate::child_thread::lend_local_window(scheduler, child);
+    } else if let Some(task) = tasks
+        .iter_mut()
+        .find(|task| task.vm.thread.thread_id() == owner)
+    {
+        crate::child_thread::lend_local_window(&mut task.vm, child);
     }
 }
 

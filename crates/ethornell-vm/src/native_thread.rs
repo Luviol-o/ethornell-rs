@@ -417,6 +417,20 @@ impl CThread {
         self.native.instruction_ip
     }
 
+    /// +0x40: where the frame stack starts (a child's data block, else 0).
+    pub(crate) fn frame_region_base(&self) -> u32 {
+        self.native.frame_region_base
+    }
+
+    /// sub_453040: a DCTChildThread's code and data blocks in its parent's
+    /// regions (+0x20 code base, +0x38 code used end, +0x40 frame base).
+    pub(crate) fn set_child_regions(&mut self, code_start: u32, data_start: u32) {
+        self.native.code_region_base = code_start;
+        self.native.code_used_end = code_start;
+        self.native.frame_region_base = data_start;
+        self.native.frame_region_free_top = self.native.frame_region_size;
+    }
+
     pub(crate) fn frame_base(&self) -> u32 {
         self.native.frame_base
     }
