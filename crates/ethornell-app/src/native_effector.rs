@@ -122,7 +122,9 @@ impl RuntimeTraceApi {
         let key = format!("runtime:effector:{object}");
         self.store_graph_image(key.clone(), crate::native_map_filter::blank(w, h));
         self.install_native_map_filter_layer(object, key, w, h);
-        self.set_graph_object_draw_enabled_raw(object, true);
+        // Configuring never touches vtable+4; keep a 91:64 hide in place.
+        let shown = self.graph_object_draw_enabled.get(&object).copied().unwrap_or(true);
+        self.set_graph_object_draw_enabled_raw(object, shown);
         self.refresh_native_filters();
         Ok(())
     }

@@ -31,6 +31,33 @@ pub(crate) struct LandscapeRaster {
     cells: Vec<Option<CellGeometry>>,
     layers: BTreeMap<u32, i32>,
 }
+pub(super) const LANDSCAPE_HANDLE: &str = "無効なランドスケープハンドルが指定されました";
+pub(super) const LANDSCAPE_NO_MAP: &str =
+    "指定されたランドスケープオブジェクトにはマップが設定されていません";
+pub(super) const LANDSCAPE_NO_COLUMNS: &str =
+    "指定されたランドスケープオブジェクトには柱が設定されていません";
+pub(super) fn landscape_error(text: impl Into<String>) -> ethornell_vm::VmError {
+    ethornell_vm::VmError::Runtime(text.into())
+}
+/// sub_4090A0 against sub_409180's [0, 0, w-1, h-1]: unsigned compares of
+/// the inclusive [x, y, x+w-1, y+h-1] record, after the zero width/height
+/// stop of sub_421C60 / sub_422800.
+fn part_record_fits(source: &DecodedImage, r: [i32; 5]) -> bool {
+    let (x, y, w, h) = (r[0] as u32, r[1] as u32, r[2] as u32, r[3] as u32);
+    w != 0
+        && h != 0
+        && x.wrapping_add(w).wrapping_sub(1) <= source.width.wrapping_sub(1)
+        && y.wrapping_add(h).wrapping_sub(1) <= source.height.wrapping_sub(1)
+}
+/// sub_422C50 tests byte +3 of a 32-bit pixel and the byte of an 8-bit
+/// one; any other format never hits.
+fn coverage(format: i32, pixel: &[u8; 4]) -> u8 {
+    match format {
+        2 => pixel[3],
+        3 => pixel[0],
+        _ => 0,
+    }
+}
 fn crop_part(source: &DecodedImage, format: i32, r: [i32; 5]) -> Option<Part> {
     let (x, y, w, h) = (r[0], r[1], r[2], r[3]);
     if w <= 0
@@ -116,7 +143,7 @@ fn compose_columns(
                         .as_chunks::<4>()
                         .0
                         .iter()
-                        .map(|p| if format == 2 { p[3] } else { 0 })
+                        .map(|p| coverage(format, p))
                         .collect(),
                 );
                 extra = (height as i32 / step - boundary as i32 - 2).max(1);
@@ -139,8 +166,22 @@ impl LandscapeRaster {
     pub(super) fn layer_ids(&self) -> Vec<i32> {
         self.layers.values().copied().collect()
     }
+    pub(super) fn cell_visible_height(&self, index: usize) -> Option<u32> {
+        Some(self.cells.get(index)?.as_ref()?.height)
+    }
 }
 impl RuntimeTraceApi {
+    /// Records a failed part/pillar index (sub_41C3F0) and returns the text
+    /// sub_483C20 / sub_484060 format from it.
+    fn landscape_detail_error(&mut self, object: i32, detail: i32, text: &str) -> ethornell_vm::VmError {
+        if let Some(state) = self.graph91_landscapes.get_mut(&object) {
+            state.error_detail = detail;
+        }
+        landscape_error(format!("{text} [ {detail} ] に無効な情報が指定されています"))
+    }
+    /// sub_483C20 -> sub_4403C0 -> sub_421C60: zero part count (2) and zero
+    /// pillar count (3) report index -1, then the bitmap (1), each part
+    /// record (2) and each pillar record (3).
     pub(super) fn configure_native_landscape_parts(
         &mut self,
         object: i32,
@@ -150,26 +191,30 @@ impl RuntimeTraceApi {
         spacing: i32,
         column_count: i32,
         column_words: &[i32],
-    ) -> bool {
-        let Some(state) = self.graph91_landscapes.get(&object) else {
-            return false;
+    ) -> ethornell_vm::VmResult<()> {
+        let Some(state) = self.graph91_landscapes.get(&object).cloned() else {
+            return Err(landscape_error(LANDSCAPE_HANDLE));
         };
-        if count <= 0
-            || column_count <= 0
-            || words.len() != count as usize * 5
-            || column_words.len() != column_count as usize * 34
-        {
-            return false;
+        if count == 0 {
+            return Err(self.landscape_detail_error(object, -1, "部品番号"));
+        }
+        if column_count == 0 {
+            return Err(self.landscape_detail_error(object, -1, "柱番号"));
         }
         let Some(source) = self.graph_bitmap_image(bitmap) else {
-            return false;
+            return Err(landscape_error(format!(
+                "指定されたビットマップ [ {bitmap} ] は存在しません"
+            )));
         };
         let format = self.bitmap_formats.get(&bitmap).copied().unwrap_or(2);
         let flags = words.as_chunks::<5>().0.to_vec();
         let mut parts = Vec::new();
-        for &record in &flags {
-            let Some(part) = crop_part(&source, format, record) else {
-                return false;
+        for (index, &record) in flags.iter().enumerate() {
+            let part = part_record_fits(&source, record)
+                .then(|| crop_part(&source, format, record))
+                .flatten();
+            let Some(part) = part else {
+                return Err(self.landscape_detail_error(object, index as i32, "部品番号"));
             };
             parts.push(part);
         }
@@ -177,9 +222,22 @@ impl RuntimeTraceApi {
             .chunks_exact(34)
             .map(|c| c.to_vec())
             .collect::<Vec<_>>();
-        if state.column_step == 0 {
-            return false;
+        for (index, words) in records.iter().enumerate() {
+            let pieces = words[0] as u32;
+            let boundary = words[33] as u32;
+            if pieces == 0
+                || pieces > 32
+                || boundary == 0
+                || boundary > 32
+                || words[1..=pieces as usize]
+                    .iter()
+                    .any(|&id| id as u32 >= count as u32 && id != -1)
+            {
+                return Err(self.landscape_detail_error(object, index as i32, "柱番号"));
+            }
         }
+        // A pillar of only empty slots composes to nothing; the target then
+        // allocates a zero-sized bitmap, which this raster cannot hold.
         let Some(columns) = compose_columns(
             &parts,
             &records,
@@ -188,7 +246,7 @@ impl RuntimeTraceApi {
             state.column_step,
             spacing,
         ) else {
-            return false;
+            return Err(self.landscape_detail_error(object, 0, "柱番号"));
         };
         let state = self.graph91_landscapes.get_mut(&object).unwrap();
         state.source_bitmap = bitmap;
@@ -204,29 +262,36 @@ impl RuntimeTraceApi {
         raster.columns = columns;
         raster.cells.clear();
         self.refresh_native_landscape(object);
-        true
+        Ok(())
     }
+    /// sub_484060 -> sub_440530 -> sub_422800: zero count (2, index -1),
+    /// bitmap (1), then each guide record (2).
     pub(super) fn configure_native_landscape_guides(
         &mut self,
         object: i32,
         bitmap: i32,
         count: i32,
         words: &[i32],
-    ) -> bool {
-        if count <= 0
-            || words.len() != count as usize * 5
-            || !self.graph91_landscapes.contains_key(&object)
-        {
-            return false;
+    ) -> ethornell_vm::VmResult<()> {
+        if !self.graph91_landscapes.contains_key(&object) {
+            return Err(landscape_error(LANDSCAPE_HANDLE));
+        }
+        if count == 0 {
+            return Err(self.landscape_detail_error(object, -1, "部品番号"));
         }
         let Some(source) = self.graph_bitmap_image(bitmap) else {
-            return false;
+            return Err(landscape_error(format!(
+                "指定されたビットマップ [ {bitmap} ] は存在しません"
+            )));
         };
         let format = self.bitmap_formats.get(&bitmap).copied().unwrap_or(2);
         let mut guides = Vec::new();
-        for &record in words.as_chunks::<5>().0 {
-            let Some(part) = crop_part(&source, format, record) else {
-                return false;
+        for (index, &record) in words.as_chunks::<5>().0.iter().enumerate() {
+            let part = part_record_fits(&source, record)
+                .then(|| crop_part(&source, format, record))
+                .flatten();
+            let Some(part) = part else {
+                return Err(self.landscape_detail_error(object, index as i32, "部品番号"));
             };
             guides.push(part);
         }
@@ -236,27 +301,41 @@ impl RuntimeTraceApi {
         state.guides = words.as_chunks::<5>().0.to_vec();
         // 423780 replaces assets but leaves stored cell guide indices intact.
         self.refresh_native_landscape(object);
-        true
+        Ok(())
     }
+    /// sub_484390 -> sub_440690 -> sub_422380: pillars (4), destination
+    /// part (8), source part or incompatible image (9).
     pub(super) fn copy_native_landscape_part(
         &mut self,
         object: i32,
         destination: i32,
         source: i32,
-    ) -> bool {
-        let Some(raster) = self.native_landscapes.get_mut(&object) else {
-            return false;
+    ) -> ethornell_vm::VmResult<()> {
+        let Some(state) = self.graph91_landscapes.get(&object) else {
+            return Err(landscape_error(LANDSCAPE_HANDLE));
         };
+        if state.columns.is_empty() {
+            return Err(landscape_error(LANDSCAPE_NO_COLUMNS));
+        }
+        let incompatible = || {
+            landscape_error(format!(
+                "指定された転送元部品 [ {source} ] のイメージは転送先部品 [ {destination} ] のイメージと互換性がありません"
+            ))
+        };
+        let raster = self.native_landscapes.entry(object).or_default();
+        if destination as u32 >= raster.parts.len() as u32 {
+            return Err(landscape_error(format!(
+                "無効な部品番号 [ {destination} ] が指定されました"
+            )));
+        }
         let Some(part) = raster.parts.get(source as usize).cloned() else {
-            return false;
+            return Err(incompatible());
         };
-        let Some(dest) = raster.parts.get_mut(destination as usize) else {
-            return false;
-        };
+        let dest = &mut raster.parts[destination as usize];
         if (part.image.width, part.image.height, part.format)
             != (dest.image.width, dest.image.height, dest.format)
         {
-            return false;
+            return Err(incompatible());
         }
         *dest = part;
         let state = &self.graph91_landscapes[&object];
@@ -268,7 +347,7 @@ impl RuntimeTraceApi {
             state.column_step,
             state.part_spacing,
         ) else {
-            return false;
+            return Ok(());
         };
         // 423AB0 only rebuilds color pixels. Boundary alpha snapshots and
         // column geometry remain the configure-time copies.
@@ -276,31 +355,34 @@ impl RuntimeTraceApi {
             old.image = new.image;
         }
         self.refresh_native_landscape(object);
-        true
+        Ok(())
     }
+    /// sub_4849A0 -> sub_440840 -> sub_422AF0: cell checks, an empty cell
+    /// returns false (14), then sub_407D90 allocates the destination (15).
     pub(super) fn copy_native_landscape_cell(
         &mut self,
         destination: i32,
         object: i32,
         row: i32,
         column: i32,
-    ) -> bool {
-        if destination as u32 >= 0x4000 {
-            return false;
-        }
-        let Some(state) = self.graph91_landscapes.get(&object) else {
-            return false;
-        };
-        let Some(index) = state.cell_index(row, column) else {
-            return false;
-        };
+    ) -> ethornell_vm::VmResult<bool> {
+        let index = self.graph91_landscape_cell(object, row, column)?;
+        let state = &self.graph91_landscapes[&object];
         let id = state.cells[index].column_index;
+        if id == -1 {
+            return Ok(false);
+        }
+        if destination as u32 >= 0x4000 {
+            return Err(landscape_error(format!(
+                "指定された出力先ビットマップ [ {destination} ] は存在しません"
+            )));
+        }
         let Some(words) = state.columns.get(id as usize) else {
-            return false;
+            return Ok(false);
         };
         let boundary = words[33] as usize;
         let Some(&part_id) = words.get(boundary) else {
-            return false;
+            return Ok(false);
         };
         let Some(part) = self
             .native_landscapes
@@ -308,10 +390,10 @@ impl RuntimeTraceApi {
             .and_then(|r| r.parts.get(part_id as usize))
             .cloned()
         else {
-            return false;
+            return Ok(false);
         };
         self.store_runtime_bitmap(destination, part.image, part.format);
-        true
+        Ok(true)
     }
     pub(super) fn refresh_native_landscape(&mut self, object: i32) {
         let Some(mut raster) = self.native_landscapes.remove(&object) else {
@@ -503,6 +585,22 @@ impl RuntimeTraceApi {
         }
         Some(result)
     }
+    /// sub_4838A0 -> sub_462CD0 -> sub_4401B0 -> sub_422C50: no map is
+    /// status 13; no hit (14) returns false.
+    pub(super) fn graph91_landscape_hit_test(
+        &self,
+        object: i32,
+        mode: i32,
+    ) -> ethornell_vm::VmResult<Option<[i32; 2]>> {
+        let state = self
+            .graph91_landscapes
+            .get(&object)
+            .ok_or_else(|| landscape_error(LANDSCAPE_HANDLE))?;
+        if state.map_height == 0 {
+            return Err(landscape_error(LANDSCAPE_NO_MAP));
+        }
+        Ok(self.native_landscape_hit(object, mode))
+    }
     pub(super) fn native_landscape_hit(&self, object: i32, mode: i32) -> Option<[i32; 2]> {
         let state = self.graph91_landscapes.get(&object)?;
         let raster = self.native_landscapes.get(&object)?;
@@ -535,23 +633,16 @@ impl RuntimeTraceApi {
                 continue;
             }
             let index = py as usize * column.image.width as usize + px as usize;
+            let pixel = column.image.rgba[index * 4..index * 4 + 4].try_into().unwrap();
             let alpha = if mode == 1 {
                 column
                     .hit
                     .as_ref()
                     .and_then(|m| m.get(index))
                     .copied()
-                    .unwrap_or_else(|| {
-                        if column.format == 2 {
-                            column.image.rgba[index * 4 + 3]
-                        } else {
-                            0
-                        }
-                    })
-            } else if column.format == 2 {
-                column.image.rgba[index * 4 + 3]
+                    .unwrap_or_else(|| coverage(column.format, pixel))
             } else {
-                0
+                coverage(column.format, pixel)
             };
             if alpha != 0 {
                 return Some([col, row]);
@@ -600,7 +691,7 @@ mod tests {
         columns[34] = 1;
         columns[35] = 1;
         columns[67] = 1;
-        assert!(GraphApi::configure_graph91_landscape_parts(
+        GraphApi::configure_graph91_landscape_parts(
             &mut api,
             object,
             100,
@@ -609,16 +700,16 @@ mod tests {
             1,
             2,
             &columns
-        ));
+        ).unwrap();
         api.graph_resources.remove(&100);
         api.graph_images.remove("runtime:bitmap:100");
-        assert!(GraphApi::configure_graph91_landscape_map(
+        GraphApi::configure_graph91_landscape_map(
             &mut api,
             object,
             2,
             1,
             &[0, 1]
-        ));
+        ).unwrap();
         call(&mut api, 0x75, &[object, 0, 0, 1, 0, 5]);
         api.refresh_native_filters();
         let frame = snapshot::compose_runtime_frame(&api, false);
@@ -630,7 +721,7 @@ mod tests {
         );
         api.mouse_pos = Some((3., 1.));
         assert_eq!(api.native_landscape_hit(object, 0), Some([1, 0]));
-        assert_eq!(api.graph91_landscape_cell_value(object, 0, 0), Some(5));
+        assert_eq!(api.graph91_landscape_cell_value(object, 0, 0).unwrap(), Some(5));
         call(&mut api, 0x7c, &[object, 0, 1]);
         api.refresh_native_filters();
         assert_eq!(
@@ -651,21 +742,21 @@ mod tests {
             },
             2,
         );
-        assert!(GraphApi::configure_graph91_landscape_guides(
+        GraphApi::configure_graph91_landscape_guides(
             &mut api,
             object,
             101,
             1,
             &[0, 0, 1, 1, 0]
-        ));
-        assert!(GraphApi::set_graph91_landscape_cell_guides(
+        ).unwrap();
+        GraphApi::set_graph91_landscape_cell_guides(
             &mut api,
             object,
             &[0, 0],
             0,
             0,
             0
-        ));
+        ).unwrap();
         api.graph_resources.remove(&101);
         api.refresh_native_filters();
         assert_eq!(
@@ -678,5 +769,52 @@ mod tests {
             &snapshot::compose_runtime_frame(&api, false).rgba[..4],
             &[0, 0, 100, 255]
         );
+    }
+
+    #[test]
+    fn landscape_statuses_use_target_texts_and_order() {
+        let manager =
+            ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let mut api = RuntimeTraceApi::new(manager);
+        let object = GraphApi::call_graph(
+            &mut api,
+            &mut NativeCallFrame::new(
+                NativeOpcode { group: 0x91, id: 0x70 },
+                [2, 1, 1, 2, 1, 0].map(Value::Int).to_vec(),
+            ),
+        )
+        .unwrap()
+        .as_i32();
+        let text = |result: ethornell_vm::VmResult<()>| result.unwrap_err().to_string();
+        // sub_421C60: zero part count reports index -1 before the bitmap.
+        assert!(text(GraphApi::configure_graph91_landscape_parts(
+            &mut api, object, 999, 0, &[], 0, 1, &[0; 34]
+        ))
+        .contains("部品番号 [ -1 ] に無効な情報が指定されています"));
+        assert!(text(GraphApi::configure_graph91_landscape_parts(
+            &mut api, object, 999, 1, &[0, 0, 1, 1, 0], 0, 1, &[0; 34]
+        ))
+        .contains("指定されたビットマップ [ 999 ] は存在しません"));
+        // sub_422190: no pillars wins over a bad size.
+        assert!(text(GraphApi::configure_graph91_landscape_map(&mut api, object, 0, 0, &[]))
+            .contains("柱が設定されていません"));
+        assert!(text(GraphApi::configure_graph91_landscape_guides(
+            &mut api, object, 999, 0, &[]
+        ))
+        .contains("部品番号 [ -1 ]"));
+        // sub_4229B0 reports the missing map before the layer.
+        assert!(text(GraphApi::set_graph91_landscape_cell_guides(
+            &mut api, object, &[0, 0], 9, 0, 0
+        ))
+        .contains("マップが設定されていません"));
+        assert!(api
+            .graph91_landscape_cell_value(object, 0, 0)
+            .unwrap_err()
+            .to_string()
+            .contains("マップが設定されていません"));
+        assert!(GraphApi::graph91_landscape_hit_test(&api, 0x1234, 0)
+            .unwrap_err()
+            .to_string()
+            .contains("無効なランドスケープハンドル"));
     }
 }

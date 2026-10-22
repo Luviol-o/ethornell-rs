@@ -17382,7 +17382,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_CREATE_LANDSCAPE_PARAMETERS,
         returns: "0xA1000000 tagged handle or 0",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_43FC50 allocates one of four CDspObjLandscape slots; sub_421780 applies native defaults for zero/odd geometry fields and constructs CDspObj with sort_class=1 plus a per-registry monotonic construction index at +0x20, independent of the reusable tagged slot.",
+        notes: "sub_4837F0 -> sub_440010 -> sub_421AB0: six arguments; four slots, exhaustion is a script error.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_RELEASE_LANDSCAPE,
@@ -17390,7 +17390,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_LANDSCAPE_HANDLE_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_43FD70 releases a validated 0xA1000000-tagged CDspObjLandscape.",
+        notes: "sub_483870 -> sub_440130: unknown landscape is a script error.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_HIT_TEST_LANDSCAPE,
@@ -17398,7 +17398,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_LANDSCAPE_HIT_TEST_PARAMETERS,
         returns: "i32 boolean",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "4838A0 ->422C50 scans candidate rows back-to-front with staggered columns, visible bounds and actual alpha or copied boundary alpha. Writes(column,row).",
+        notes: "sub_4838A0 -> sub_462CD0 -> sub_4401B0 -> sub_422C50: 255/13 fatal; hit writes [column, line]; 8-bit parts test their byte.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_SET_LANDSCAPE_ENABLED,
@@ -17406,7 +17406,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_LANDSCAPE_ENABLED_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "0x00482E10 invokes the base CDspObj enable setter.",
+        notes: "sub_483910 -> sub_440220: vtable+4 draw-enable (sub_41B120); unknown landscape fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_CONFIGURE_LANDSCAPE_OBJECT,
@@ -17414,7 +17414,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_LANDSCAPE_OBJECT_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "483950 ->422E20 sets native position/blend/alpha and validates the priority range of every terrain row.",
+        notes: "sub_483950: priority, alpha, blend mode validators; sub_423380 refuses a priority whose last row passes 0xFFFF and then nothing else changes.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_SET_LANDSCAPE_CELL_SILHOUETTE,
@@ -17422,7 +17422,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_LANDSCAPE_SILHOUETTE_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "4839F0 ->422A60 sets one cell color/level/type, consumed by alpha-over/additive silhouette kernels before object blend.",
+        notes: "sub_4839F0 -> sub_422A60: map 13, line 11, column 12, type 18, level 19 with target texts.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_CONFIGURE_LANDSCAPE_PARTS,
@@ -17430,7 +17430,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_LANDSCAPE_PARTS_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "483C20 ->421C60 copies private part images and builds stacked column images from34-DWORD records, including boundary alpha snapshots and occlusion/depth metadata.",
+        notes: "sub_483C20 -> sub_4403C0 -> sub_421C60: part/pillar count -1 details, bitmap, unsigned part rect containment, pillar record checks; error index kept at CDspObj+0x118.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_CONFIGURE_LANDSCAPE_MAP,
@@ -17438,7 +17438,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_LANDSCAPE_MAP_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "483E90 ->422190/4237D0 builds staggered cells, front-neighbor bottom cropping and independent manager packed depth keys.",
+        notes: "sub_483E90 -> sub_422190: pillars 4, size and last-row priority 5, entries 6.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_CONFIGURE_LANDSCAPE_GUIDES,
@@ -17446,7 +17446,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_LANDSCAPE_GUIDES_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "484060 ->422800 copies private guide images from five-DWORD rectangles; old cell indices remain stored.",
+        notes: "sub_484060 -> sub_422800: count, bitmap, guide rect checks.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_SET_LANDSCAPE_CELL_GUIDES,
@@ -17454,7 +17454,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_LANDSCAPE_CELL_GUIDES_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "484140 ->4229B0 assigns four guide slots to(column,row) pairs, composed at the column boundary height with combined alpha.",
+        notes: "sub_484140: value validator, then per-pair sub_4229B0 checks (map, line, column, layer, guide); earlier pairs stay applied.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_COPY_LANDSCAPE_PART,
@@ -17462,7 +17462,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_LANDSCAPE_PART_COPY_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "484390 ->422380 copies one private part and rebuilds referencing column color bitmaps; configure-time boundary alpha snapshots remain unchanged.",
+        notes: "sub_484390 -> sub_422380: pillars 4, destination 8, source/incompatible 9.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_SET_LANDSCAPE_CELL_COLUMN,
@@ -17470,7 +17470,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_LANDSCAPE_CELL_COLUMN_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "484590 ->4225D0 replaces a column and rebuilds itself plus three cells behind it, resetting affected guide/shade records.",
+        notes: "sub_484590 -> sub_4225D0: cell checks then pillar 10; sub_4237D0 clears guides only on visible pillar cells.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_GET_LANDSCAPE_CELL_VALUE,
@@ -17478,7 +17478,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_LANDSCAPE_CELL_VALUE_PARAMETERS,
         returns: "i32 boolean",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "4847A0 ->422BE0 writes high16 of the cell packed manager key, including terrain row/frame priority offsets.",
+        notes: "sub_4847A0 -> sub_422BE0: cell checks fatal, empty cell returns false.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_COPY_LANDSCAPE_CELL_IMAGE,
@@ -17486,7 +17486,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_LANDSCAPE_CELL_IMAGE_PARAMETERS,
         returns: "i32 boolean",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "4849A0 ->422AF0 recreates destination in the private boundary part dimensions/format and copies it; original source atlas is not consulted.",
+        notes: "sub_4849A0 -> sub_422AF0: cell checks, empty cell false, destination allocation 15.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_CONFIGURE_WINDOW_FONT,
@@ -20151,6 +20151,17 @@ const PORTABLE_EQUIVALENT_OPCODES: &[NativeOpcode] = &[
     opcodes::GRAPH91_CONFIGURE_RIPPLE_EFFECTOR,
     opcodes::GRAPH91_CONFIGURE_TRANSFORM_EFFECTOR,
     opcodes::GRAPH91_CONFIGURE_SURFACE_EFFECTOR,
+    opcodes::GRAPH91_HIT_TEST_LANDSCAPE,
+    opcodes::GRAPH91_CONFIGURE_LANDSCAPE_OBJECT,
+    opcodes::GRAPH91_SET_LANDSCAPE_CELL_SILHOUETTE,
+    opcodes::GRAPH91_CONFIGURE_LANDSCAPE_PARTS,
+    opcodes::GRAPH91_CONFIGURE_LANDSCAPE_MAP,
+    opcodes::GRAPH91_CONFIGURE_LANDSCAPE_GUIDES,
+    opcodes::GRAPH91_SET_LANDSCAPE_CELL_GUIDES,
+    opcodes::GRAPH91_COPY_LANDSCAPE_PART,
+    opcodes::GRAPH91_SET_LANDSCAPE_CELL_COLUMN,
+    opcodes::GRAPH91_GET_LANDSCAPE_CELL_VALUE,
+    opcodes::GRAPH91_COPY_LANDSCAPE_CELL_IMAGE,
 ];
 
 const PARTIAL_IMPLEMENTATION_OPCODES: &[NativeOpcode] = &[
@@ -20227,17 +20238,6 @@ const PARTIAL_IMPLEMENTATION_OPCODES: &[NativeOpcode] = &[
     opcodes::GRAPH91_MEASURE_TEXT,
     opcodes::GRAPH91_DRAW_TEXT,
     opcodes::GRAPH91_DRAW_TEXT_WITH_STYLE_MODE,
-    opcodes::GRAPH91_HIT_TEST_LANDSCAPE,
-    opcodes::GRAPH91_CONFIGURE_LANDSCAPE_OBJECT,
-    opcodes::GRAPH91_SET_LANDSCAPE_CELL_SILHOUETTE,
-    opcodes::GRAPH91_CONFIGURE_LANDSCAPE_PARTS,
-    opcodes::GRAPH91_CONFIGURE_LANDSCAPE_MAP,
-    opcodes::GRAPH91_CONFIGURE_LANDSCAPE_GUIDES,
-    opcodes::GRAPH91_SET_LANDSCAPE_CELL_GUIDES,
-    opcodes::GRAPH91_COPY_LANDSCAPE_PART,
-    opcodes::GRAPH91_SET_LANDSCAPE_CELL_COLUMN,
-    opcodes::GRAPH91_GET_LANDSCAPE_CELL_VALUE,
-    opcodes::GRAPH91_COPY_LANDSCAPE_CELL_IMAGE,
     opcodes::GRAPH90_SET_DISPLAY_OPTIONS,
     opcodes::GRAPH90_UPLOAD_MAP_TILE_DATA,
     opcodes::GRAPH90_IMPORT_EXTERNAL_IMAGE,
@@ -20847,7 +20847,7 @@ mod tests {
         );
         assert_eq!(
             implementation_level(transform),
-            NativeImplementationLevel::Partial
+            NativeImplementationLevel::PortableEquivalent
         );
 
         let clear_config = NativeOpcode {

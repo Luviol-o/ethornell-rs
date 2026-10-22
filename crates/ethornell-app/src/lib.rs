@@ -22623,7 +22623,11 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
         Some([x, y])
     }
 
-    fn graph91_landscape_hit_test(&self, landscape: i32, alpha_test_mode: i32) -> Option<[i32; 2]> {
+    fn graph91_landscape_hit_test(
+        &self,
+        landscape: i32,
+        alpha_test_mode: i32,
+    ) -> ethornell_vm::VmResult<Option<[i32; 2]>> {
         RuntimeTraceApi::graph91_landscape_hit_test(self, landscape, alpha_test_mode)
     }
 
@@ -22636,8 +22640,8 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
         part_spacing: i32,
         column_count: i32,
         column_words: &[i32],
-    ) -> bool {
-        self.graph91_configure_landscape_parts(
+    ) -> ethornell_vm::VmResult<()> {
+        self.configure_native_landscape_parts(
             landscape,
             bitmap,
             part_count,
@@ -22654,7 +22658,7 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
         width: i32,
         height: i32,
         map: &[i32],
-    ) -> bool {
+    ) -> ethornell_vm::VmResult<()> {
         self.graph91_configure_landscape_map(landscape, width, height, map)
     }
 
@@ -22664,8 +22668,8 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
         bitmap: i32,
         guide_count: i32,
         guide_words: &[i32],
-    ) -> bool {
-        self.graph91_configure_landscape_guides(landscape, bitmap, guide_count, guide_words)
+    ) -> ethornell_vm::VmResult<()> {
+        self.configure_native_landscape_guides(landscape, bitmap, guide_count, guide_words)
     }
 
     fn set_graph91_landscape_cell_guides(
@@ -22675,7 +22679,7 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
         layer: i32,
         guide: i32,
         value: i32,
-    ) -> bool {
+    ) -> ethornell_vm::VmResult<()> {
         self.graph91_set_landscape_cell_guides(landscape, pairs, layer, guide, value)
     }
 
@@ -22684,7 +22688,7 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
         landscape: i32,
         line: i32,
         column: i32,
-    ) -> Option<i32> {
+    ) -> ethornell_vm::VmResult<Option<i32>> {
         self.graph91_landscape_cell_value(landscape, line, column)
     }
 

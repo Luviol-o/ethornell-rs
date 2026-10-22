@@ -1404,8 +1404,8 @@ pub trait GraphApi {
         &self,
         _landscape: i32,
         _alpha_test_mode: i32,
-    ) -> Option<[i32; 2]> {
-        None
+    ) -> VmResult<Option<[i32; 2]>> {
+        Ok(None)
     }
 
     fn configure_graph91_landscape_parts(
@@ -1417,18 +1417,20 @@ pub trait GraphApi {
         _part_spacing: i32,
         _column_count: i32,
         _column_words: &[i32],
-    ) -> bool {
-        false
+    ) -> VmResult<()> {
+        Ok(())
     }
 
+    /// `map` is empty when either dimension is outside 1..=256; the target
+    /// reads the table only after its pillar and size checks.
     fn configure_graph91_landscape_map(
         &mut self,
         _landscape: i32,
         _width: i32,
         _height: i32,
         _map: &[i32],
-    ) -> bool {
-        false
+    ) -> VmResult<()> {
+        Ok(())
     }
 
     fn configure_graph91_landscape_guides(
@@ -1437,8 +1439,8 @@ pub trait GraphApi {
         _bitmap: i32,
         _guide_count: i32,
         _guide_words: &[i32],
-    ) -> bool {
-        false
+    ) -> VmResult<()> {
+        Ok(())
     }
 
     fn set_graph91_landscape_cell_guides(
@@ -1448,8 +1450,8 @@ pub trait GraphApi {
         _layer: i32,
         _guide: i32,
         _value: i32,
-    ) -> bool {
-        false
+    ) -> VmResult<()> {
+        Ok(())
     }
 
     fn query_graph91_landscape_cell_value(
@@ -1457,8 +1459,8 @@ pub trait GraphApi {
         _landscape: i32,
         _line: i32,
         _column: i32,
-    ) -> Option<i32> {
-        None
+    ) -> VmResult<Option<i32>> {
+        Ok(None)
     }
 
     fn cache_graph_blob(&mut self, _namespace: &str, _name: &str, _bytes: &[u8]) -> bool {
@@ -4545,7 +4547,7 @@ impl Vm {
                     let alpha_test_mode = self.pop_int()?;
                     let landscape = self.pop_int()?;
                     let destination = self.pop_ptr()?;
-                    let hit = api.graph91_landscape_hit_test(landscape, alpha_test_mode);
+                    let hit = api.graph91_landscape_hit_test(landscape, alpha_test_mode)?;
                     if let Some([line, column]) = hit {
                         self.write_int(destination, 2, line as u32)?;
                         self.write_int(destination.wrapping_add(4), 2, column as u32)?;
@@ -4575,7 +4577,7 @@ impl Vm {
                             self.read_int(columns_ptr.wrapping_add((index * 4) as u32), 2)? as i32,
                         );
                     }
-                    let valid = api.configure_graph91_landscape_parts(
+                    api.configure_graph91_landscape_parts(
                         landscape,
                         bitmap,
                         part_count,
@@ -4583,22 +4585,24 @@ impl Vm {
                         part_spacing,
                         column_count,
                         &column_words,
-                    );
-                    if !valid{return Err(VmError::Runtime("91:78: invalid landscape part or column definitions".into()));}
+                    )?;
                     Value::None
                 } else if (code, id) == (0x91, 0x79) {
                     let map_ptr = self.pop_ptr()?;
                     let height = self.pop_int()?;
                     let width = self.pop_int()?;
                     let landscape = self.pop_int()?;
-                    if !(1..=256).contains(&width)||!(1..=256).contains(&height){return Err(VmError::Runtime("91:79: map dimensions must be1..256".into()));}
-                    let count=width as usize*height as usize;
+                    let count = if (1..=256).contains(&width) && (1..=256).contains(&height) {
+                        width as usize * height as usize
+                    } else {
+                        0
+                    };
                     self.resolve_range(map_ptr,count*4)?;
                     let mut map = Vec::with_capacity(count);
                     for index in 0..count {
                         map.push(self.read_int(map_ptr.wrapping_add((index * 4) as u32), 2)? as i32);
                     }
-                    if !api.configure_graph91_landscape_map(landscape, width, height, &map){return Err(VmError::Runtime("91:79: invalid landscape map".into()));}
+                    api.configure_graph91_landscape_map(landscape, width, height, &map)?;
                     Value::None
                 } else if (code, id) == (0x91, 0x7A) {
                     let guides_ptr = self.pop_ptr()?;
@@ -4612,13 +4616,7 @@ impl Vm {
                             self.read_int(guides_ptr.wrapping_add((index * 4) as u32), 2)? as i32,
                         );
                     }
-                    let valid = api.configure_graph91_landscape_guides(
-                        landscape,
-                        bitmap,
-                        guide_count,
-                        &words,
-                    );
-                    if !valid{return Err(VmError::Runtime("91:7A: invalid landscape guide definitions".into()));}
+                    api.configure_graph91_landscape_guides(landscape, bitmap, guide_count, &words)?;
                     Value::None
                 } else if (code, id) == (0x91, 0x7B) {
                     let value = self.pop_int()?;
@@ -4634,14 +4632,14 @@ impl Vm {
                             self.read_int(pairs_ptr.wrapping_add((index * 4) as u32), 2)? as i32,
                         );
                     }
-                    if !api.set_graph91_landscape_cell_guides(landscape,&pairs,layer,guide,value){return Err(VmError::Runtime("91:7B: invalid landscape cell-guide assignment".into()));}
+                    api.set_graph91_landscape_cell_guides(landscape, &pairs, layer, guide, value)?;
                     Value::None
                 } else if (code, id) == (0x91, 0x7E) {
                     let column = self.pop_int()?;
                     let line = self.pop_int()?;
                     let landscape = self.pop_int()?;
                     let destination = self.pop_ptr()?;
-                    let value = api.query_graph91_landscape_cell_value(landscape, line, column);
+                    let value = api.query_graph91_landscape_cell_value(landscape, line, column)?;
                     if let Some(value) = value {
                         self.write_int(destination, 2, value as u32)?;
                         self.clear_shadow_values(destination, 4);
@@ -13668,12 +13666,13 @@ mod tests {
         fn create_bitmap_from_rgb(
             &mut self,
             bitmap: i32,
-            _width: i32,
-            _height: i32,
+            width: i32,
+            height: i32,
             _format: i32,
             pixels: &[u8],
         ) -> bool {
             self.bitmap_pixels.insert(bitmap, pixels.to_vec());
+            self.bitmap_dimensions.insert(bitmap, (width as u32, height as u32));
             true
         }
 

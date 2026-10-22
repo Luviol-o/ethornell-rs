@@ -1,4 +1,7 @@
 use super::*;
+use crate::native_landscape::{
+    LANDSCAPE_HANDLE, LANDSCAPE_NO_COLUMNS, LANDSCAPE_NO_MAP, landscape_error,
+};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(super) struct Graph91FontTransform {
@@ -143,6 +146,9 @@ pub(super) struct Graph91LandscapeState {
     pub cells: Vec<Graph91LandscapeCell>,
     pub guide_bitmap: i32,
     pub guides: Vec<[i32; 5]>,
+    /// CDspObj+0x118 (sub_41C3F0): the part/pillar index reported by a
+    /// failed 91:78/7A, read back through vtable+0x60 query -1.
+    pub error_detail: i32,
 }
 
 impl Graph91LandscapeState {
@@ -188,6 +194,7 @@ impl Graph91LandscapeState {
             cells: Vec::new(),
             guide_bitmap: -1,
             guides: Vec::new(),
+            error_detail: 0,
         }
     }
 
@@ -1068,9 +1075,10 @@ impl RuntimeTraceApi {
                         "無効なエフェクターハンドルが指定されました".into(),
                     )));
                 };
+                // sub_43FAF0 dispatches vtable+4 (sub_41B120), the
+                // draw-enable virtual.
                 state.enabled = enabled;
-                self.graph_object_enabled.insert(handle, enabled);
-                self.display_tree.set_enabled(handle, enabled);
+                self.set_graph_object_draw_enabled(handle, enabled);
                 ethornell_vm::Value::None
             }
             0x65..=0x69=>{
@@ -1079,6 +1087,7 @@ impl RuntimeTraceApi {
                 if let Err(error)=self.configure_native_effector(id,&args){return Some(Err(error));}
                 ethornell_vm::Value::None
             }
+            // sub_4837F0 -> sub_440010: four slots.
             0x70 => {
                 let args = Self::graph91_source_ints(stack, 6);
                 let handle = if let [
@@ -1101,34 +1110,57 @@ impl RuntimeTraceApi {
                 } else {
                     0
                 };
+                if handle == 0 {
+                    return Some(Err(ethornell_vm::VmError::Runtime(
+                        "これ以上、ランドスケープオブジェクトを生成する事は出来ません".into(),
+                    )));
+                }
                 ethornell_vm::Value::Int(handle)
             }
             0x71 => {
-                if let Some(handle) = Self::graph91_source_ints(stack, 1).first().copied() {
-                    self.graph91_release_landscape(handle);
+                let handle = Self::graph91_source_ints(stack, 1).first().copied().unwrap_or(0);
+                if !self.graph91_release_landscape(handle) {
+                    return Some(Err(landscape_error(LANDSCAPE_HANDLE)));
                 }
                 ethornell_vm::Value::None
             }
             0x73 => unreachable!("0x91:73 is handled by the VM landscape hit-test pointer bridge"),
+            // sub_483910 -> sub_440220: CDspObj vtable+4, the draw-enable
+            // virtual (sub_41B120), like 90:54.
             0x74 => {
                 let args = Self::graph91_source_ints(stack, 2);
-                if let [handle, enabled] = args.as_slice() {
-                    let enabled = *enabled != 0;
-                    if let Some(state) = self.graph91_landscapes.get_mut(handle) {
-                        state.enabled = enabled;
-                        self.graph_object_enabled.insert(*handle, enabled);
-                        self.display_tree.set_enabled(*handle, enabled);
-                    }
-                }
+                let [handle, enabled] = args[..] else {
+                    return Some(Err(landscape_error(LANDSCAPE_HANDLE)));
+                };
+                let Some(state) = self.graph91_landscapes.get_mut(&handle) else {
+                    return Some(Err(landscape_error(LANDSCAPE_HANDLE)));
+                };
+                state.enabled = enabled != 0;
+                self.set_graph_object_draw_enabled(handle, enabled != 0);
                 ethornell_vm::Value::None
             }
             0x75 => {
                 let args = Self::graph91_source_ints(stack, 6);
                 if let [handle, x, y, blend_mode, alpha, priority] = args.as_slice() {
-                    // sub_422AF0 first calls the base priority virtual
-                    // (sub_41B8B0); an out-of-range value fails before any of
-                    // the remaining landscape state is changed.
-                    if (0..0x1_0000).contains(priority)
+                    // sub_483950 checks priority, alpha and blend mode, then
+                    // sub_440290 -> sub_422E20. CDspObjLandscape's priority
+                    // virtual (sub_423380 -> sub_4233C0) refuses a priority
+                    // whose last map row would pass 0xFFFF; sub_422E20 then
+                    // skips position, mode and alpha, and the call succeeds.
+                    if let Err(error) = target_checks::priority(*priority)
+                        .and_then(|()| target_checks::effect_level(*alpha))
+                        .and_then(|()| target_checks::effect_mode(*blend_mode))
+                    {
+                        return Some(Err(error));
+                    }
+                    let Some(state) = self.graph91_landscapes.get(handle) else {
+                        return Some(Err(landscape_error(LANDSCAPE_HANDLE)));
+                    };
+                    let rows = state.map_height.max(1) as u32;
+                    let last_row = (*priority as u32).wrapping_add(
+                        (state.priority_row_factor as u32).wrapping_mul(rows - 1),
+                    );
+                    if last_row < 0x1_0000
                         && let Some(state) = self.graph91_landscapes.get_mut(handle)
                     {
                         state.x = *x;
@@ -1141,26 +1173,37 @@ impl RuntimeTraceApi {
                         self.display_tree.set_chain_depth(*handle, *priority);
                         self.graph90_refresh_native_sort_key(*handle);
                         self.graph90_set_common_state(*handle,Some((*x,*y)),Some(*blend_mode),Some(*alpha),Some(*priority));
-                        self.set_graph_object_draw_enabled_raw(*handle,true);
                         self.refresh_native_landscape(*handle);
                     }
                 }
                 ethornell_vm::Value::None
             }
+            // sub_4839F0 -> sub_440310 -> sub_422A60.
             0x76 => {
                 let args = Self::graph91_source_ints(stack, 6);
-                if let [handle, line, column, silhouette_type, level, value] = args.as_slice()
-                    && (0..=2).contains(silhouette_type)
-                    && (0..=256).contains(level)
-                    && let Some(state) = self.graph91_landscapes.get_mut(handle)
-                    && let Some(index) = state.cell_index(*line, *column)
-                    && let Some(cell) = state.cells.get_mut(index)
-                {
-                    cell.silhouette_type = *silhouette_type;
-                    cell.silhouette_level = *level;
-                    cell.silhouette_value = *value;
-                    self.refresh_native_landscape(*handle);
+                let [handle, line, column, silhouette_type, level, value] = args[..] else {
+                    return Some(Err(landscape_error(LANDSCAPE_HANDLE)));
+                };
+                let index = match self.graph91_landscape_cell(handle, line, column) {
+                    Ok(index) => index,
+                    Err(error) => return Some(Err(error)),
+                };
+                if silhouette_type as u32 > 2 {
+                    return Some(Err(landscape_error(format!(
+                        "無効なシルエットタイプ [ {silhouette_type} ] が指定されました"
+                    ))));
                 }
+                if level as u32 > 0x100 {
+                    return Some(Err(landscape_error(format!(
+                        "無効なシルエットレベル [ {level} ] が指定されました"
+                    ))));
+                }
+                let state = self.graph91_landscapes.get_mut(&handle).unwrap();
+                let cell = &mut state.cells[index];
+                cell.silhouette_type = silhouette_type;
+                cell.silhouette_level = level;
+                cell.silhouette_value = value;
+                self.refresh_native_landscape(handle);
                 ethornell_vm::Value::None
             }
             0x78 => {
@@ -1173,27 +1216,34 @@ impl RuntimeTraceApi {
             }
             0x7c => {
                 let args = Self::graph91_source_ints(stack, 3);
-                if let [handle, destination_part, source_part] = args.as_slice() {
-                    self.graph91_copy_landscape_part(*handle, *destination_part, *source_part);
+                if let [handle, destination_part, source_part] = args.as_slice()
+                    && let Err(error) =
+                        self.copy_native_landscape_part(*handle, *destination_part, *source_part)
+                {
+                    return Some(Err(error));
                 }
                 ethornell_vm::Value::None
             }
             0x7d => {
                 let args = Self::graph91_source_ints(stack, 4);
-                if let [handle, line, column, column_index] = args.as_slice() {
-                    self.graph91_set_landscape_cell_column(*handle, *line, *column, *column_index);
+                if let [handle, line, column, column_index] = args.as_slice()
+                    && let Err(error) =
+                        self.graph91_set_landscape_cell_column(*handle, *line, *column, *column_index)
+                {
+                    return Some(Err(error));
                 }
                 ethornell_vm::Value::None
             }
             0x7e => unreachable!("0x91:7E is handled by the VM landscape value pointer bridge"),
             0x7f => {
                 let args = Self::graph91_source_ints(stack, 4);
-                let copied = if let [destination, handle, line, column] = args.as_slice() {
-                    self.graph91_copy_landscape_cell_image(*destination, *handle, *line, *column)
-                } else {
-                    false
+                let [destination, handle, line, column] = args[..] else {
+                    return Some(Err(landscape_error(LANDSCAPE_HANDLE)));
                 };
-                ethornell_vm::Value::Int(i32::from(copied))
+                match self.copy_native_landscape_cell(destination, handle, line, column) {
+                    Ok(copied) => ethornell_vm::Value::Int(i32::from(copied)),
+                    Err(error) => return Some(Err(error)),
+                }
             }
             _ => return None,
         };
@@ -2354,50 +2404,65 @@ impl RuntimeTraceApi {
         removed
     }
 
-    pub(super) fn graph91_landscape_hit_test(
+    /// The shared map/line/column checks of sub_422A60, sub_4225D0,
+    /// sub_422BE0 and sub_422AF0 (statuses 255, 13, 11, 12).
+    pub(super) fn graph91_landscape_cell(
         &self,
         handle: i32,
-        _alpha_test_mode: i32,
-    ) -> Option<[i32; 2]> {
-        self.native_landscape_hit(handle,_alpha_test_mode)
+        line: i32,
+        column: i32,
+    ) -> ethornell_vm::VmResult<usize> {
+        let state = self
+            .graph91_landscapes
+            .get(&handle)
+            .ok_or_else(|| landscape_error(LANDSCAPE_HANDLE))?;
+        if state.map_height == 0 {
+            return Err(landscape_error(LANDSCAPE_NO_MAP));
+        }
+        if line as u32 >= state.map_height as u32 {
+            return Err(landscape_error(format!("無効なライン番号 [ {line} ] が指定されました")));
+        }
+        if column as u32 >= state.map_width as u32 {
+            return Err(landscape_error(format!("無効なカラム番号 [ {column} ] が指定されました")));
+        }
+        Ok(line as usize * state.map_width as usize + column as usize)
     }
 
-    pub(super) fn graph91_configure_landscape_parts(
-        &mut self,
-        handle: i32,
-        bitmap: i32,
-        part_count: i32,
-        part_words: &[i32],
-        part_spacing: i32,
-        column_count: i32,
-        column_words: &[i32],
-    ) -> bool {
-        self.configure_native_landscape_parts(handle,bitmap,part_count,part_words,part_spacing,column_count,column_words)
-    }
-
+    /// sub_483E90 -> sub_440480 -> sub_422190: pillars (4), size and the
+    /// last row's priority (5), then every entry (6).
     pub(super) fn graph91_configure_landscape_map(
         &mut self,
         handle: i32,
         width: i32,
         height: i32,
         map: &[i32],
-    ) -> bool {
+    ) -> ethornell_vm::VmResult<()> {
+        let priority = self
+            .graph_object_properties
+            .get(&handle)
+            .map_or(0, |p| p.native.priority);
+        let Some(state) = self.graph91_landscapes.get_mut(&handle) else {
+            return Err(landscape_error(LANDSCAPE_HANDLE));
+        };
+        if state.columns.is_empty() {
+            return Err(landscape_error(LANDSCAPE_NO_COLUMNS));
+        }
         if !(1..=256).contains(&width)
             || !(1..=256).contains(&height)
+            || priority.wrapping_add(
+                (state.priority_row_factor as u32).wrapping_mul(height as u32 - 1),
+            ) >= 0x1_0000
             || map.len() != width as usize * height as usize
         {
-            return false;
+            return Err(landscape_error(format!(
+                "無効なマップサイズ [ {width} , {height} ] が指定されました"
+            )));
         }
-        let Some(state) = self.graph91_landscapes.get_mut(&handle) else {
-            return false;
-        };
-        let priority=self.graph_object_properties.get(&handle).map_or(0,|p|p.native.priority);
-        if priority.wrapping_add((state.priority_row_factor as u32).wrapping_mul(height as u32-1))>=65536{return false;}
         if map
             .iter()
-            .any(|&column| column < -1 || column >= state.columns.len() as i32)
+            .any(|&column| column as u32 >= state.columns.len() as u32 && column != -1)
         {
-            return false;
+            return Err(landscape_error("無効なマップ情報が指定されました"));
         }
         state.map_width = width;
         state.map_height = height;
@@ -2412,19 +2477,12 @@ impl RuntimeTraceApi {
             state.cells.push(cell);
         }
         self.refresh_native_landscape(handle);
-        true
+        Ok(())
     }
 
-    pub(super) fn graph91_configure_landscape_guides(
-        &mut self,
-        handle: i32,
-        bitmap: i32,
-        guide_count: i32,
-        words: &[i32],
-    ) -> bool {
-        self.configure_native_landscape_guides(handle,bitmap,guide_count,words)
-    }
-
+    /// sub_484140 checks the value (sub_498920), then sub_440590 applies the
+    /// (column, line) pairs one by one through sub_4229B0, so the pairs
+    /// before a failing one stay applied.
     pub(super) fn graph91_set_landscape_cell_guides(
         &mut self,
         handle: i32,
@@ -2432,87 +2490,97 @@ impl RuntimeTraceApi {
         layer: i32,
         guide: i32,
         value: i32,
-    ) -> bool {
-        if !pairs.len().is_multiple_of(2) || !(0..4).contains(&layer) {
-            return false;
-        }
+    ) -> ethornell_vm::VmResult<()> {
+        target_checks::effect_level(value)?;
         let Some(state) = self.graph91_landscapes.get_mut(&handle) else {
-            return false;
+            return Err(landscape_error(LANDSCAPE_HANDLE));
         };
-        if guide < -1 || guide >= state.guides.len() as i32 {
-            return false;
-        }
+        let mut result = Ok(());
         for pair in pairs.as_chunks::<2>().0 {
-            let column = pair[0];
-            let line = pair[1];
-            let Some(index) = state.cell_index(line, column) else {
-                return false;
+            let [column, line] = *pair;
+            let error = if state.map_height == 0 {
+                Some(LANDSCAPE_NO_MAP.to_string())
+            } else if line as u32 >= state.map_height as u32 {
+                Some("指定されたフロア情報の中に無効なライン番号が設定されているものが検出されました".into())
+            } else if column as u32 >= state.map_width as u32 {
+                Some("指定されたフロア情報の中に無効なカラム番号が設定されているものが検出されました".into())
+            } else if layer as u32 >= 4 {
+                Some(format!("無効なレイヤー番号 [ {layer} ] が指定されました"))
+            } else if guide as u32 >= state.guides.len() as u32 && guide != -1 {
+                Some(format!("無効なガイド番号 [ {guide} ] が指定されました"))
+            } else {
+                None
             };
-            if let Some(cell) = state.cells.get_mut(index) {
-                cell.guides[layer as usize] = if guide == -1 {
-                    None
-                } else {
-                    Some((guide, value))
-                };
+            if let Some(text) = error {
+                result = Err(landscape_error(text));
+                break;
             }
+            let index = line as usize * state.map_width as usize + column as usize;
+            state.cells[index].guides[layer as usize] =
+                if guide == -1 { None } else { Some((guide, value)) };
         }
         self.refresh_native_landscape(handle);
-        true
+        result
     }
 
-    fn graph91_copy_landscape_part(&mut self, handle: i32, destination: i32, source: i32) -> bool {
-        self.copy_native_landscape_part(handle,destination,source)
-    }
-
+    /// sub_484590 -> sub_440720 -> sub_4225D0: cell checks, then the pillar
+    /// (status 10).
     fn graph91_set_landscape_cell_column(
         &mut self,
         handle: i32,
         line: i32,
         column: i32,
         column_index: i32,
-    ) -> bool {
-        let Some(state) = self.graph91_landscapes.get_mut(&handle) else {
-            return false;
-        };
-        if column_index < -1 || column_index >= state.columns.len() as i32 {
-            return false;
+    ) -> ethornell_vm::VmResult<()> {
+        let index = self.graph91_landscape_cell(handle, line, column)?;
+        let state = self.graph91_landscapes.get_mut(&handle).unwrap();
+        if column_index as u32 >= state.columns.len() as u32 && column_index != -1 {
+            return Err(landscape_error(format!(
+                "無効な柱番号 [ {column_index} ] が指定されました"
+            )));
         }
-        let Some(index) = state.cell_index(line, column) else {
-            return false;
-        };
         let derived = state.rebuild_derived_value(line, column);
-        if let Some(cell) = state.cells.get_mut(index) {
-            cell.column_index = column_index;
-            cell.derived_value = derived;
-            let behind=column-if line&1!=0{0}else{1};
-            for (row,col) in [(line,column),(line-1,behind),(line-1,behind+1),(line-2,column)]{
-                if let Some(index)=state.cell_index(row,col){state.cells[index].guides=[None;4];state.cells[index].silhouette_type=0;state.cells[index].silhouette_level=0;state.cells[index].silhouette_value=0;}
+        let cell = &mut state.cells[index];
+        cell.column_index = column_index;
+        cell.derived_value = derived;
+        // sub_4237D0 rebuilds the cell and the three it can hide. Only a
+        // pillar cell left with visible height gets its guides and
+        // silhouette cleared; empty or fully hidden cells keep them.
+        self.refresh_native_landscape(handle);
+        let behind = column - if line & 1 != 0 { 0 } else { 1 };
+        let rebuilt = [(line, column), (line - 1, behind), (line - 1, behind + 1), (line - 2, column)];
+        let state = self.graph91_landscapes.get_mut(&handle).unwrap();
+        let raster = self.native_landscapes.get(&handle);
+        for (row, col) in rebuilt {
+            let Some(index) = state.cell_index(row, col) else {
+                continue;
+            };
+            let visible = raster
+                .and_then(|raster| raster.cell_visible_height(index))
+                .is_some_and(|height| height > 0);
+            if visible {
+                let cell = &mut state.cells[index];
+                cell.guides = [None; 4];
+                cell.silhouette_type = 0;
+                cell.silhouette_level = 0;
+                cell.silhouette_value = 0;
             }
-            self.refresh_native_landscape(handle);
-            return true;
         }
-        false
+        self.refresh_native_landscape(handle);
+        Ok(())
     }
 
+    /// sub_4847A0 -> sub_4407C0 -> sub_422BE0: an empty cell (status 14)
+    /// returns false without writing.
     pub(super) fn graph91_landscape_cell_value(
         &self,
         handle: i32,
         line: i32,
         column: i32,
-    ) -> Option<i32> {
-        let state = self.graph91_landscapes.get(&handle)?;
-        let index = state.cell_index(line, column)?;
-        Some(state.cells.get(index)?.derived_value as i32)
-    }
-
-    fn graph91_copy_landscape_cell_image(
-        &mut self,
-        destination: i32,
-        handle: i32,
-        line: i32,
-        column: i32,
-    ) -> bool {
-        self.copy_native_landscape_cell(destination,handle,line,column)
+    ) -> ethornell_vm::VmResult<Option<i32>> {
+        let index = self.graph91_landscape_cell(handle, line, column)?;
+        let cell = &self.graph91_landscapes[&handle].cells[index];
+        Ok((cell.column_index != -1).then_some(cell.derived_value as i32))
     }
 
     fn graph91_apply_grayscale_mask(
