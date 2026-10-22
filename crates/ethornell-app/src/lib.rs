@@ -11536,6 +11536,12 @@ mod input_tests {
         assert_eq!(api.graph_frame_interval_ms, 1);
         let mut invalid_frame_rate = vec![Value::Int(1001)];
         assert!(call_graph(&mut api, 0x90, 0x02, &mut invalid_frame_rate).is_err());
+        // Wonderful Everyday's boot script passes 0: the rate stays.
+        let mut zero_frame_rate = vec![Value::Int(0)];
+        call_graph(&mut api, 0x90, 0x02, &mut zero_frame_rate).unwrap();
+        assert_eq!(api.graph_frame_interval_ms, 1);
+        let mut negative_frame_rate = vec![Value::Int(-1)];
+        assert!(call_graph(&mut api, 0x90, 0x02, &mut negative_frame_rate).is_err());
 
         let mut memory_limit = vec![Value::Int(0x2000_0000)];
         call_graph(&mut api, 0x90, 0x03, &mut memory_limit).unwrap();
@@ -24636,14 +24642,19 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                 // sub_479EF0 -> sub_462280: 1..=1000 (else fatal); the next
                 // presentation is due at once.
                 let frame_rate = pop_int_value(stack).unwrap_or_default() as u32;
-                if frame_rate.wrapping_sub(1) > 999 {
-                    return Err(ethornell_vm::VmError::Runtime(format!(
-                        "無効なフレームレート [ {} ] が指定されました",
-                        frame_rate as i32
-                    )));
+                // Wonderful Everyday's boot script (ipl._bp, a BGI older than
+                // 1.622) calls this with 0 and runs on in the original: the
+                // rate stays as it is.
+                if frame_rate != 0 {
+                    if frame_rate.wrapping_sub(1) > 999 {
+                        return Err(ethornell_vm::VmError::Runtime(format!(
+                            "無効なフレームレート [ {} ] が指定されました",
+                            frame_rate as i32
+                        )));
+                    }
+                    self.graph_frame_interval_ms = (1000 / frame_rate).max(1);
+                    self.graph_next_present_ms = 0;
                 }
-                self.graph_frame_interval_ms = (1000 / frame_rate).max(1);
-                self.graph_next_present_ms = 0;
             }
             (0x90, 0x03) => {
                 // sub_479F60 -> sub_439C80: a new DCCache of `limit` bytes
