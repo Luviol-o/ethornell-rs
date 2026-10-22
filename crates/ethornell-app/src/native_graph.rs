@@ -4351,11 +4351,18 @@ impl RuntimeTraceApi {
                 let namespace = pop_string_value(stack).unwrap_or_default();
                 let bitmap = pop_int_value(stack).unwrap_or_default();
                 let key = (namespace.to_ascii_lowercase(), name.to_ascii_lowercase());
+                // sub_401CE0: the BG registry first, then the DCCache.
                 let bytes = if consume {
                     self.graph_blob_cache.remove(&key)
                 } else {
                     self.graph_blob_cache.get(&key).cloned()
-                };
+                }
+                .or_else(|| {
+                    let now = self.clock_base_ms.wrapping_add(self.engine_time_ms as u32);
+                    self.graph_dc_cache
+                        .as_mut()
+                        .and_then(|cache| cache.lookup(Some(&namespace), Some(&name), now))
+                });
                 if let Err(error) = target_checks::bitmap(bitmap) {
                     return Some(Err(error));
                 }

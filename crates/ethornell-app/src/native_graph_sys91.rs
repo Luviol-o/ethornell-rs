@@ -239,7 +239,8 @@ impl RuntimeTraceApi {
                 let y = pop_int_value(stack).unwrap_or_default();
                 let x = pop_int_value(stack).unwrap_or_default();
                 self.graph_global_offset = (x as f32, y as f32);
-                self.graph_redraw_requested = Some(false);
+                // sub_443280 marks the screen object dirty: a full redraw.
+                self.graph_redraw_requested = Some(true);
                 tracing::info!(x, y, "GraphSetGlobalDisplayOffset");
                 self.trace_graph(format!("global display offset=({x},{y}) (91:06)"));
                 ethornell_vm::Value::None
@@ -270,8 +271,27 @@ impl RuntimeTraceApi {
                 let scale_y = pop_int_value(stack).unwrap_or_default();
                 let scale_x = pop_int_value(stack).unwrap_or_default();
                 let name = pop_string_value(stack).unwrap_or_default();
-                let valid_scale = |value: i32| value == 0 || (0x1_0000..=0x2_0000).contains(&value);
-                if valid_scale(scale_x) && valid_scale(scale_y) {
+                // sub_42EF10: all zero is accepted; else the X scale is 0 or
+                // 0x10000..=0x20000, the Y scale 0x10000..=0x20000 (0x80000005)
+                // and each offset at most 65536 - 2^32 / scale (0x80000006).
+                if !(scale_x == 0 && scale_y == 0 && offset_x == 0 && offset_y == 0) {
+                    let in_range = |value: i32| (0x1_0000..=0x2_0000).contains(&value);
+                    if !(scale_x == 0 || in_range(scale_x)) || !in_range(scale_y) {
+                        return Some(Err(ethornell_vm::VmError::Runtime(format!(
+                            "無効な倍率 [ 0x{:05X} , 0x{:05X} ] が指定されました",
+                            scale_x as u32, scale_y as u32
+                        ))));
+                    }
+                    let x_scale = if scale_x == 0 { scale_y } else { scale_x };
+                    let limit = |scale: i32| (65536.0 - 4294967296.0 / f64::from(scale)) as i32;
+                    if offset_x > limit(x_scale) || offset_y > limit(scale_y) {
+                        return Some(Err(ethornell_vm::VmError::Runtime(format!(
+                            "無効な座標 [ 0x{:05X} , 0x{:05X} ] が指定されました",
+                            offset_x as u32, offset_y as u32
+                        ))));
+                    }
+                }
+                {
                     self.graph91_font_transforms.insert(
                         name.to_ascii_lowercase(),
                         Graph91FontTransform {
@@ -290,6 +310,20 @@ impl RuntimeTraceApi {
                     .map(|value| value_to_i32(&value))
                     .collect::<Vec<_>>();
                 args.reverse();
+                // sub_481360 -> sub_462310: unknown face (0x80000004), then
+                // sub_42E1C0's size (2) and width (3) checks.
+                if let [font_number, size, width_percent, ..] = args.as_slice() {
+                    let fatal = |message: String| Some(Err(ethornell_vm::VmError::Runtime(message)));
+                    if !self.native_user.font_name_known(*font_number) {
+                        return fatal(format!("無効なフォント番号 [ {font_number} ] が指定されました"));
+                    }
+                    if !(4..=200).contains(size) {
+                        return fatal(format!("無効なフォントサイズ [ {size} ] が指定されました"));
+                    }
+                    if !(25..=200).contains(width_percent) {
+                        return fatal(format!("無効なフォント幅 [ {width_percent} ] が指定されました"));
+                    }
+                }
                 if let [font_number, size, width_percent, bold, field_56, field_60] =
                     args.as_slice()
                     && (4..=200).contains(size)
@@ -321,6 +355,41 @@ impl RuntimeTraceApi {
                     _ => unreachable!(),
                 };
                 let args = pop_args(stack, count);
+                // sub_481470..sub_481B20: the destination must exist (1) and
+                // be a non-empty vector map, format 4 (3); then each
+                // generator's own zero checks.
+                let source: Vec<i32> = args.iter().rev().map(value_to_i32).collect();
+                let destination = source[0];
+                let fatal = |message: String| Some(Err(ethornell_vm::VmError::Runtime(message)));
+                let Some(info) = ethornell_vm::GraphApi::query_bitmap_info(self, destination) else {
+                    return fatal(format!("指定された出力先ビットマップ [ {destination} ] は存在しません"));
+                };
+                if info.format != 4 || info.width == 0 || info.height == 0 {
+                    return fatal(format!(
+                        "指定された出力先ビットマップ [ {destination} ] はベクトルマップではない、\n\n若しくは無効なピクセル数のベクトルマップです"
+                    ));
+                }
+                match id {
+                    0x10 if source[3] == 0 || source[4] == 0 => {
+                        return fatal(format!("無効な伸縮範囲 [ {} , {} ] が指定されました", source[3], source[4]));
+                    }
+                    0x12 if source[3] == 0 => {
+                        return fatal(format!("無効な波紋の周期 [ {} ] が指定されました", source[3]));
+                    }
+                    0x14 if source[3] == 0 || source[4] == 0 => {
+                        return fatal(format!(
+                            "無効な湾曲角度 [ {} ] 、或いは半径 [ {} ] が指定されました",
+                            source[3], source[4]
+                        ));
+                    }
+                    0x15 if source[3] == 0 || source[4] == 0 => {
+                        return fatal(format!(
+                            "無効な湾曲度 [ {} ] 、或いは半径 [ {} ] が指定されました",
+                            source[3], source[4]
+                        ));
+                    }
+                    _ => {}
+                }
                 let _ = self.effects.configure_displacement_map(id, &args);
                 ethornell_vm::Value::None
             }

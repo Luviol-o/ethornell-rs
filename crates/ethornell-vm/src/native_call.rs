@@ -16974,7 +16974,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_CACHE_BINARY_RESOURCE_PARAMETERS,
         returns: "0 on success or -1 when the native cache is disabled or insertion fails",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_480680 calls sub_401ED0 then sub_439930 and copies the sized BP payload into the enabled two-key graph cache.",
+        notes: "BGI 1.622 sub_481180 -> sub_401ED0/sub_446310: stores the bytes in the DCCache (only while Graph90:03 set one; size up to half the budget, LRU eviction); 0 or -1.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_SET_GLOBAL_DISPLAY_OFFSET,
@@ -16982,7 +16982,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_DISPLAY_OFFSET_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_4806D0 calls sub_461E40 then sub_442EC0 and stores the two process-global CDspObj offsets. They are not an unconditional renderer translation: sub_41C0E0 adds them to an object's composite position only when that CDspObj's +0x48 gate is nonzero. CDspObj::CDspObj (sub_41A400) initializes that gate through sub_41ADF0(1); generic property selector 196 (0xC4) may change it afterward.",
+        notes: "sub_4811D0 -> sub_41A9C0: global display offset dword_565B44/48, screen marked dirty.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_SET_SCRIPT_BITMAP_CONTEXT_BINDING_ENABLED,
@@ -16990,7 +16990,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_BOOLEAN_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_480700 calls sub_48D210 and stores the main-loop gate for binding the active screen bitmap around BP execution.",
+        notes: "sub_481200 -> sub_48DD00: dword_503EFC script bitmap-context binding.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_SET_GLYPH_COVERAGE_MODE,
@@ -16998,7 +16998,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_GLYPH_COVERAGE_MODE_PARAMETERS,
         returns: "1 for accepted mode 0 or 1, otherwise 0",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_480720 calls sub_42DC40 and changes the target linear or sine glyph-coverage conversion mode only for values zero and one.",
+        notes: "sub_481220 -> sub_42E010: glyph coverage mode 0/1 (unsigned), 1 when accepted.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_SET_FONT_PITCH_DETECTION_ENABLED,
@@ -17006,7 +17006,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_BOOLEAN_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_480750 calls sub_42DC30 and stores the GDI pitch and family auto-detection gate used by native font creation.",
+        notes: "sub_481250 -> sub_42E000: dword_565B70 pitch detection.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_REGISTER_NAMED_FONT_TRANSFORM,
@@ -17014,7 +17014,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_FONT_TRANSFORM_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_480770 calls sub_461D90 and registers a named four-value font transform after scale and coordinate validation.",
+        notes: "sub_481270 -> sub_42F1B0/sub_42EF10: named font transform; scale and offset limits fatal with the 1.622 texts.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_CONFIGURE_NATIVE_FONT,
@@ -17022,7 +17022,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_NATIVE_FONT_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_480860 validates the numbered face, size and width, includes bold in the cache key and writes target font-record offsets 0x38 and 0x3C.",
+        notes: "sub_481360 -> sub_462310: unknown face, size, width are fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_GENERATE_AFFINE_DISPLACEMENT_MAP,
@@ -17030,7 +17030,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_AFFINE_MAP_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_480970 writes signed one-sixteenth-pixel affine offsets into a format-4 bitmap.",
+        notes: "sub_481470 -> sub_403D10: zoom vector map; destination missing / not a vector map / zero range fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_GENERATE_RANDOM_DISPLACEMENT_MAP,
@@ -17038,7 +17038,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_RANDOM_MAP_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_480A80 fills both displacement components independently in the inclusive negative-amplitude through positive-amplitude range.",
+        notes: "sub_481580 -> sub_403F00: random vector map; destination checks.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_GENERATE_RIPPLE_DISPLACEMENT_MAP,
@@ -17046,7 +17046,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_RIPPLE_MAP_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_480B20 calls sub_404130 to build a radial cosine scalar field and sub_403F40 to derive signed squared-difference gradients.",
+        notes: "sub_481620 -> sub_404130: ripple vector map; destination checks, zero period fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_GENERATE_PERSPECTIVE_BEND_MAP,
@@ -17054,7 +17054,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_FIVE_MAP_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_480C30 calls sub_4042E0 and combines polar horizontal mapping with a perspective radial vertical coordinate.",
+        notes: "sub_481730 -> sub_4044E0: perspective bend map; destination checks.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_GENERATE_CURVATURE_DISPLACEMENT_MAP,
@@ -17062,7 +17062,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_FIVE_MAP_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_480D00 calls sub_404530 and generates a bounded nonlinear curvature field inside the supplied nonzero radius.",
+        notes: "sub_481800 -> sub_404530: curvature map; destination checks, zero angle or radius fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_GENERATE_RADIAL_LENS_DISPLACEMENT_MAP,
@@ -17070,7 +17070,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_FIVE_MAP_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_480E10 builds a sine radial scalar field and passes divisor 0x40000000 divided by curvature to sub_403F40.",
+        notes: "sub_481910 -> sub_404740: radial lens map; destination checks, zero strength or radius fatal.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_GENERATE_SINE_DISPLACEMENT_MAP,
@@ -17078,7 +17078,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_SINE_MAP_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_480F20 calls sub_404910 and generates separable row-driven X and column-driven Y sine displacements.",
+        notes: "sub_481A20 -> sub_404AB0: sine map; destination checks.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_GENERATE_RADIAL_WARP_DISPLACEMENT_MAP,
@@ -17086,7 +17086,7 @@ const DOCUMENTED_OPCODES: &[NativeOpcodeSpec] = &[
         parameters: GRAPH91_RADIAL_WARP_PARAMETERS,
         returns: "void",
         scheduling: NativeSchedulingEffect::Continue,
-        notes: "sub_481020 calls sub_404B00 and derives the warp radius from the distance between the two supplied points plus radius bias.",
+        notes: "sub_481B20 -> sub_404C50: radial warp map; destination checks.",
     },
     NativeOpcodeSpec {
         opcode: opcodes::GRAPH91_COMPOSITE_BITMAP_RECT_ALPHA,
@@ -20123,6 +20123,16 @@ const PORTABLE_EQUIVALENT_OPCODES: &[NativeOpcode] = &[
     opcodes::GRAPH90_DECODE_BURIKO_MOVIE_FRAME,
     opcodes::GRAPH90_HIT_TEST_SPRITE_TARGETS,
     opcodes::GRAPH90_GET_SPRITE_TARGET_STATE,
+    opcodes::GRAPH91_SET_SCRIPT_BITMAP_CONTEXT_BINDING_ENABLED,
+    opcodes::GRAPH91_SET_GLYPH_COVERAGE_MODE,
+    opcodes::GRAPH91_SET_FONT_PITCH_DETECTION_ENABLED,
+    opcodes::GRAPH91_REGISTER_NAMED_FONT_TRANSFORM,
+    opcodes::GRAPH91_CONFIGURE_NATIVE_FONT,
+    opcodes::GRAPH91_GENERATE_RANDOM_DISPLACEMENT_MAP,
+    opcodes::GRAPH91_GENERATE_PERSPECTIVE_BEND_MAP,
+    opcodes::GRAPH91_GENERATE_CURVATURE_DISPLACEMENT_MAP,
+    opcodes::GRAPH91_GENERATE_SINE_DISPLACEMENT_MAP,
+    opcodes::GRAPH91_GENERATE_RADIAL_WARP_DISPLACEMENT_MAP,
 ];
 
 const PARTIAL_IMPLEMENTATION_OPCODES: &[NativeOpcode] = &[
@@ -20307,16 +20317,6 @@ const PARTIAL_IMPLEMENTATION_OPCODES: &[NativeOpcode] = &[
     opcodes::GRAPH92_GET_BITMAP_DIRECTSHOW_MOVIE_POSITION,
     opcodes::GRAPH92_SET_BITMAP_DIRECTSHOW_MOVIE_VOLUME,
     opcodes::GRAPH_SET_PERSISTENT_TEXT_STYLE,
-    opcodes::GRAPH91_SET_SCRIPT_BITMAP_CONTEXT_BINDING_ENABLED,
-    opcodes::GRAPH91_SET_GLYPH_COVERAGE_MODE,
-    opcodes::GRAPH91_SET_FONT_PITCH_DETECTION_ENABLED,
-    opcodes::GRAPH91_REGISTER_NAMED_FONT_TRANSFORM,
-    opcodes::GRAPH91_CONFIGURE_NATIVE_FONT,
-    opcodes::GRAPH91_GENERATE_RANDOM_DISPLACEMENT_MAP,
-    opcodes::GRAPH91_GENERATE_PERSPECTIVE_BEND_MAP,
-    opcodes::GRAPH91_GENERATE_CURVATURE_DISPLACEMENT_MAP,
-    opcodes::GRAPH91_GENERATE_SINE_DISPLACEMENT_MAP,
-    opcodes::GRAPH91_GENERATE_RADIAL_WARP_DISPLACEMENT_MAP,
     opcodes::GRAPH91_COMPOSITE_BITMAP_RECT_ALPHA,
     opcodes::GRAPH91_COMPOSITE_BITMAP_RECT_CONVERTED,
     opcodes::GRAPH91_CONCENTRATE_BITMAP,

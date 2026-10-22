@@ -62,6 +62,7 @@ mod native_effector;
 mod native_backml;
 mod native_landscape;
 mod native_sprite_filters;
+mod dc_cache;
 mod native_system;
 mod target_checks;
 mod native_user;
@@ -722,6 +723,8 @@ struct RuntimeTraceApi {
     graph_next_present_ms: u32,
     /// dword_565D50: the DCCache byte budget (0 = no cache).
     graph_memory_limit: u32,
+    /// dword_565D50: the DCCache, present while Graph90:03 set a budget.
+    graph_dc_cache: Option<dc_cache::DcCache>,
     /// dword_566714 / dword_506BD0: a pending redraw, Some(full).
     graph_redraw_requested: Option<bool>,
     graph_global_offset: (f32, f32),
@@ -1164,6 +1167,7 @@ impl RuntimeTraceApi {
             graph_frame_interval_ms: 16,
             graph_next_present_ms: 0,
             graph_memory_limit: 0,
+            graph_dc_cache: None,
             graph_redraw_requested: None,
             graph_global_offset: (0.0, 0.0),
             screen_shake_offset: (0.0, 0.0),
@@ -22696,23 +22700,25 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
         Ok(())
     }
 
+    /// Graph91:03 (sub_401ED0 -> sub_439CF0): into the DCCache, which
+    /// only exists after Graph90:03.
     fn cache_graph_blob(&mut self, namespace: &str, name: &str, bytes: &[u8]) -> bool {
-        if bytes.is_empty() {
+        let now = self.clock_base_ms.wrapping_add(self.engine_time_ms as u32);
+        self.graph_dc_cache
+            .as_mut()
+            .is_some_and(|cache| cache.store(Some(namespace), Some(name), bytes, now))
+    }
+
+    /// Graph90:C6 (sub_401CB0): the BG data registry, lower-cased keys.
+    fn register_bg_resource_data(&mut self, namespace: &str, name: &str, bytes: &[u8]) -> bool {
+        if decode_image(bytes).is_err() {
             return false;
         }
         self.graph_blob_cache.insert(
             (namespace.to_ascii_lowercase(), name.to_ascii_lowercase()),
             bytes.to_vec(),
         );
-        tracing::debug!(namespace, name, size = bytes.len(), "GraphCacheBlob");
         true
-    }
-
-    fn register_bg_resource_data(&mut self, namespace: &str, name: &str, bytes: &[u8]) -> bool {
-        if decode_image(bytes).is_err() {
-            return false;
-        }
-        self.cache_graph_blob(namespace, name, bytes)
     }
 
     fn encode_graph_bitmap(
@@ -23679,6 +23685,7 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                     )));
                 }
                 self.graph_memory_limit = limit;
+                self.graph_dc_cache = (limit != 0).then(|| dc_cache::DcCache::new(limit));
             }
             (0x90, 0x04) => {
                 let bitmap = pop_int_value(stack).unwrap_or_default();
@@ -24050,8 +24057,24 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                 // name without '/' load synchronously; everything else goes
                 // through CProcLoadBitmap and yields until it completes.
                 let key = format!("{archive_name}:{resource_name}");
-                let synchronous = self.preloaded_bitmap_keys.contains(&key)
-                    || (!resource_name.contains('/') && self.graph_sync_load_active());
+                // sub_401CE0: the BG registry / preloads, then the DCCache
+                // (a hit refreshes the entry) answer at once; otherwise a
+                // name without '/' loads synchronously while sub_402080
+                // allows it and the file joins the DCCache (sub_401E00).
+                let now = self.clock_base_ms.wrapping_add(self.engine_time_ms as u32);
+                let cached = self.graph_dc_cache.as_mut().is_some_and(|cache| {
+                    cache.lookup(Some(&archive_name), Some(&resource_name), now).is_some()
+                });
+                let preloaded = self.preloaded_bitmap_keys.contains(&key) || cached;
+                let synchronous =
+                    preloaded || (!resource_name.contains('/') && self.graph_sync_load_active());
+                if synchronous && !preloaded && self.graph_dc_cache.is_some()
+                    && let Some(entry) = find_runtime_resource(&self.manager, &archive_name, &resource_name)
+                    && let Ok(bytes) = self.manager.read_by_entry_raw(&entry)
+                    && let Some(cache) = self.graph_dc_cache.as_mut()
+                {
+                    cache.store(Some(&archive_name), Some(&resource_name), &bytes, now);
+                }
                 let loaded =
                     self.load_graph_image_resource(target_id, &archive_name, &resource_name);
                 if !loaded {
