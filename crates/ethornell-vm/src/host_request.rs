@@ -542,7 +542,7 @@ mod tests {
     ) {
         let (bytes, _, errors) = encoding.encode(text);
         assert!(!errors);
-        let start = Vm::memory_addr(pointer) as usize;
+        let start = vm.memory_addr(pointer) as usize;
         vm.memory[start..start + bytes.len()].copy_from_slice(&bytes);
         vm.memory[start + bytes.len()] = 0;
     }
@@ -762,7 +762,7 @@ mod tests {
                 numeric: false,
             })]
         );
-        let offset = Vm::memory_addr(out) as usize;
+        let offset = root.memory_addr(out) as usize;
         root.memory[offset] = 7;
         root.complete_user_dialog(1, Some(crate::UserDialogResponse::Input("*".into())))
             .unwrap();
@@ -1059,7 +1059,7 @@ impl Vm {
         // `hand_over_memory`), so only the address itself is checked here;
         // `settle_ready_host_response` writes once the thread runs again.
         for write in &response.writes {
-            let start = Vm::memory_addr(write.address) as usize;
+            let start = target.memory_addr(write.address) as usize;
             if start
                 .checked_add(write.bytes.len())
                 .is_none_or(|end| end > crate::MAX_MEMORY_SIZE)

@@ -106,13 +106,13 @@ impl Vm {
         }
 
         let code_base = self.read_raw_u32(SCRIPT_CODE_BASE_SLOT)?;
-        let code_base_addr = Self::memory_addr(code_base);
+        let code_base_addr = self.memory_addr(code_base);
         let current_offset = self.read_raw_u32(SCRIPT_CURRENT_OFFSET_SLOT)?;
-        if Self::memory_addr(ptr) != Self::memory_addr(code_base.wrapping_add(current_offset)) {
+        if self.memory_addr(ptr) != self.memory_addr(code_base.wrapping_add(current_offset)) {
             return None;
         }
 
-        let ptr_addr = Self::memory_addr(ptr);
+        let ptr_addr = self.memory_addr(ptr);
         if self.loaded_bcs_ranges.iter().any(|range| {
             ptr_addr >= range.base.saturating_add(range.code_start)
                 && ptr_addr < range.base.saturating_add(range.code_end)
@@ -146,7 +146,7 @@ impl Vm {
         total_len: usize,
         program: &ethornell_script::bcs::BcsProgram,
     ) {
-        let base = Self::memory_addr(base);
+        let base = self.memory_addr(base);
         self.loaded_bcs_ranges
             .retain(|range| !(range.base == base && range.script_name == script_name));
         self.loaded_bcs_ranges.push(LoadedBcsRange {
@@ -199,7 +199,7 @@ impl Vm {
                 }
                 let addr = bcs_base.saturating_add(string_ref.offset);
                 self.mem_values
-                    .insert(Self::value_key(addr), Value::Str(string_ref.text.clone()));
+                    .insert(self.value_key(addr), Value::Str(string_ref.text.clone()));
                 written += 1;
             }
         }
@@ -245,7 +245,7 @@ impl Vm {
         let Some(handle) = self.read_raw_u32(SCRIPT_FUNCTION_TABLE_SLOT) else {
             return Ok(0);
         };
-        if handle == 0 || !self.record_tables.contains_key(&Self::value_key(handle)) {
+        if handle == 0 || !self.record_tables.contains_key(&self.value_key(handle)) {
             tracing::warn!(subs = program.subs.len(), "BCS function table is not open");
             return Ok(0);
         }
@@ -253,7 +253,7 @@ impl Vm {
         let script_index = self
             .read_raw_u32(SCRIPT_INFO_COUNT_SLOT)
             .unwrap_or_default();
-        let bcs_base = Self::memory_addr(bcs_base);
+        let bcs_base = self.memory_addr(bcs_base);
         if std::env::var_os("DEBUG").is_some() {
             tracing::info!(
                 script_index,
@@ -295,14 +295,14 @@ impl Vm {
                 .saturating_add(field_bias)
                 .saturating_add((index as u32).saturating_mul(4));
             self.mem_values
-                .insert(Self::value_key(addr), Value::Str(text.to_string()));
+                .insert(self.value_key(addr), Value::Str(text.to_string()));
             written += 1;
         }
         for string_ref in &command.string_refs {
             if !string_ref.text.is_empty() {
                 let addr = bcs_base.saturating_add(string_ref.offset);
                 self.mem_values
-                    .insert(Self::value_key(addr), Value::Str(string_ref.text.clone()));
+                    .insert(self.value_key(addr), Value::Str(string_ref.text.clone()));
                 written += 1;
             }
         }
@@ -310,7 +310,7 @@ impl Vm {
     }
 
     fn read_raw_u32(&self, ptr: u32) -> Option<u32> {
-        let start = Self::memory_addr(ptr) as usize;
+        let start = self.memory_addr(ptr) as usize;
         let bytes = self.memory.get(start..start.checked_add(4)?)?;
         Some(u32::from_le_bytes(bytes.try_into().ok()?))
     }
@@ -367,7 +367,7 @@ mod tests {
             .copy_from_slice(&current_offset.to_le_bytes());
         vm.loaded_bcs_ranges.push(LoadedBcsRange {
             script_name: "main".into(),
-            base: Vm::memory_addr(raw_base),
+            base: vm.memory_addr(raw_base),
             code_start: 0x60,
             code_end: 0x0a98,
             total_len: 3003,
@@ -391,14 +391,14 @@ mod tests {
             .copy_from_slice(&target_offset.to_le_bytes());
         vm.loaded_bcs_ranges.push(LoadedBcsRange {
             script_name: "main".into(),
-            base: Vm::memory_addr(raw_base),
+            base: vm.memory_addr(raw_base),
             code_start: 0x60,
             code_end: 0x0ae0,
             total_len: 3003,
         });
         vm.loaded_bcs_ranges.push(LoadedBcsRange {
             script_name: "function".into(),
-            base: Vm::memory_addr(target_base),
+            base: vm.memory_addr(target_base),
             code_start: 0x550,
             code_end: 0x7c44,
             total_len: 63_940,

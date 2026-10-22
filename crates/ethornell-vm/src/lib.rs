@@ -38,6 +38,7 @@ mod scheduler;
 mod system80_state;
 mod system81_state;
 pub mod target_thread;
+mod target_heap;
 mod time;
 mod user_data;
 mod user_dialog;
@@ -53,10 +54,6 @@ pub use native_call::{
     scheduling_effect,
 };
 
-const SYSTEM_PROGRAM_TABLE: u32 = 273_280;
-const SYSTEM_PROGRAM_SLOTS: usize = 32;
-const SYSTEM_PROGRAM_STRIDE: u32 = 16;
-const SYSTEM_PROGRAM_DESCRIPTOR_BASE: u32 = 0x4000_0000;
 const ADDRESS_MASK: u32 = 0x01ff_ffff;
 const AUX_MEMORY_TAG_BASE: u32 = 0x20;
 const AUX_MEMORY_SEGMENT_SIZE: u32 = ADDRESS_MASK + 1;
@@ -2333,6 +2330,9 @@ pub struct Vm {
     pub mem_ptr: u32,
     pub heap_ptr: u32,
     heap_allocations: BTreeMap<u32, u32>,
+    /// Slot table of the target heap (ADR 0005): script-visible heap
+    /// addresses are sub_48E760's, mapped onto `heap_allocations` blocks.
+    pub(crate) target_heap: target_heap::TargetHeap,
     heap_free_blocks: Vec<(u32, u32)>,
     pub halted: bool,
     pub calls: BTreeMap<String, usize>,
@@ -3721,7 +3721,7 @@ impl Vm {
                 name: "getchar", ..
             } => {
                 let ptr = self.pop_ptr()?;
-                let start = Self::memory_addr(ptr) as usize;
+                let start = self.memory_addr(ptr) as usize;
                 let first = self.memory.get(start).copied().unwrap_or_default();
                 let is_two_byte = matches!(first, 0x81..=0x9f | 0xe0..=0xfc);
                 let ch = if is_two_byte {
@@ -5684,7 +5684,7 @@ impl Vm {
                     let mut args = Vec::with_capacity(count);
                     for _ in 0..count { args.push(self.pop_value()?); }
                     args.reverse();
-                    let pointer = Self::translate_system_descriptor(args[pointer_index].as_i32() as u32);
+                    let pointer = args[pointer_index].as_i32() as u32;
                     args[pointer_index] = Value::Int(self.read_int(pointer, 2)? as i32);
                     let mut call = NativeCallFrame::new(NativeOpcode {group: code, id}, args);
                     Some(api.call_user(&mut call)?.unwrap_or(Value::None))
@@ -7010,14 +7010,14 @@ impl Vm {
             Value::Program(program) => Some(program.as_ref()),
             Value::Ptr(ptr) => self
                 .mem_values
-                .get(&Self::value_key(*ptr))
+                .get(&self.value_key(*ptr))
                 .and_then(|value| match value {
                     Value::Program(program) => Some(program.as_ref()),
                     _ => None,
                 }),
             Value::Int(ptr) => {
                 self.mem_values
-                    .get(&Self::value_key(*ptr as u32))
+                    .get(&self.value_key(*ptr as u32))
                     .and_then(|value| match value {
                         Value::Program(program) => Some(program.as_ref()),
                         _ => None,
@@ -7141,7 +7141,7 @@ impl Vm {
     }
 
     fn pop_ptr(&mut self) -> VmResult<u32> {
-        Ok(Self::translate_system_descriptor(self.pop_int()? as u32))
+        Ok(self.pop_int()? as u32)
     }
 
     fn value_as_numeric_operand(&mut self, value: Value) -> VmResult<i32> {
@@ -7174,7 +7174,7 @@ impl Vm {
     }
 
     fn resolve_range(&self, ptr: u32, size: usize) -> VmResult<std::ops::Range<usize>> {
-        let addr = Self::memory_addr(ptr);
+        let addr = self.memory_addr(ptr);
         let start = addr as usize;
         let end = start
             .checked_add(size)
@@ -7190,7 +7190,7 @@ impl Vm {
         ptr: u32,
         size: usize,
     ) -> VmResult<std::ops::Range<usize>> {
-        let addr = Self::memory_addr(ptr);
+        let addr = self.memory_addr(ptr);
         let start = addr as usize;
         let end = start
             .checked_add(size)
@@ -7206,15 +7206,6 @@ impl Vm {
             self.memory.resize(grown, 0);
         }
         Ok(start..end)
-    }
-
-    fn translate_system_descriptor(ptr: u32) -> u32 {
-        let slot = ptr.wrapping_sub(SYSTEM_PROGRAM_DESCRIPTOR_BASE);
-        if slot < SYSTEM_PROGRAM_SLOTS as u32 {
-            SYSTEM_PROGRAM_TABLE + slot * SYSTEM_PROGRAM_STRIDE
-        } else {
-            ptr
-        }
     }
 
     fn read_int(&self, ptr: u32, width: u8) -> VmResult<u32> {
@@ -7281,7 +7272,7 @@ impl Vm {
     }
 
     fn read_value(&self, ptr: u32, width: u8) -> VmResult<Value> {
-        let addr = Self::value_key(ptr);
+        let addr = self.value_key(ptr);
         if width >= 2 {
             if let Some(value) = self.mem_values.get(&addr) {
                 let size = 1usize << width.min(2);
@@ -7696,7 +7687,7 @@ impl Vm {
     }
 
     fn write_value(&mut self, ptr: u32, width: u8, value: &Value) -> VmResult<()> {
-        let addr = Self::value_key(ptr);
+        let addr = self.value_key(ptr);
         self.write_int(ptr, width, value.as_i32() as u32)?;
         if width >= 2 {
             match value {
@@ -7748,7 +7739,7 @@ impl Vm {
         if watches.is_empty() {
             return;
         }
-        let start = Self::memory_addr(ptr);
+        let start = self.memory_addr(ptr);
         let end = start.saturating_add(size as u32);
         let hit = watches
             .iter()
@@ -7790,6 +7781,10 @@ impl Vm {
     }
 
     fn alloc_heap(&mut self, size: u32) -> u32 {
+        let requested = size;
+        if !self.target_heap.has_room(requested) {
+            return 0;
+        }
         let size = size.max(4).saturating_add(3) & !3;
         let previous_heap_ptr = self.heap_ptr;
         let offset = if let Some(index) = self
@@ -7833,7 +7828,10 @@ impl Vm {
             self.heap_ptr = next;
             offset
         };
-        let ptr = Self::heap_tagged_ptr(offset);
+        let ptr = self
+            .target_heap
+            .alloc(requested, offset)
+            .expect("checked by TargetHeap::has_room");
         let Ok(range) = self.resolve_write_range(ptr, size as usize) else {
             return 0;
         };
@@ -7859,13 +7857,14 @@ impl Vm {
         if ptr == 0 {
             return true;
         }
-        let Some(offset) = Self::heap_logical_offset(ptr) else {
+        let Some((offset, 0)) = self.target_heap.translate(ptr) else {
             return false;
         };
         let Some(size) = self.heap_allocations.remove(&offset) else {
             return false;
         };
         self.clear_shadow_values(ptr, size as usize);
+        self.target_heap.free(ptr);
         self.heap_free_blocks.push((offset, size));
         self.heap_free_blocks.sort_unstable_by_key(|block| block.0);
         let mut merged: Vec<(u32, u32)> = Vec::with_capacity(self.heap_free_blocks.len());
@@ -7928,23 +7927,6 @@ impl Vm {
                 .is_some_and(|end| end <= AUX_MEMORY_SEGMENT_SIZE)
     }
 
-    fn heap_tagged_ptr(offset: u32) -> u32 {
-        let segment = offset / AUX_MEMORY_SEGMENT_SIZE;
-        let tag = AUX_MEMORY_TAG_BASE.saturating_add(segment.saturating_mul(2));
-        (tag << 24) | (offset & ADDRESS_MASK)
-    }
-
-    fn heap_logical_offset(ptr: u32) -> Option<u32> {
-        let tag = ptr >> 24;
-        if tag < AUX_MEMORY_TAG_BASE {
-            return None;
-        }
-        let segment = (tag >> 1).checked_sub(AUX_MEMORY_TAG_BASE >> 1)?;
-        segment
-            .checked_mul(AUX_MEMORY_SEGMENT_SIZE)?
-            .checked_add(ptr & ADDRESS_MASK)
-    }
-
     fn rand_msvc(&mut self) -> i32 {
         self.rng_seed = self.rng_seed.wrapping_mul(214013).wrapping_add(2531011);
         ((self.rng_seed >> 16) & 0x7fff) as i32
@@ -7992,7 +7974,7 @@ impl Vm {
     }
 
     fn read_c_string_bytes(&self, ptr: u32) -> VmResult<Vec<u8>> {
-        let start = Self::memory_addr(ptr) as usize;
+        let start = self.memory_addr(ptr) as usize;
         if start >= self.memory.len() {
             return Err(VmError::MemoryOutOfBounds { addr: ptr, size: 1 });
         }
@@ -8005,7 +7987,7 @@ impl Vm {
     }
 
     fn read_wide_c_string(&self, ptr: u32) -> VmResult<Vec<u16>> {
-        let start = Self::memory_addr(ptr) as usize;
+        let start = self.memory_addr(ptr) as usize;
         if start >= self.memory.len() {
             return Err(VmError::MemoryOutOfBounds { addr: ptr, size: 2 });
         }
@@ -8026,7 +8008,7 @@ impl Vm {
     }
 
     fn c_string_byte_len(&self, ptr: u32) -> VmResult<usize> {
-        let start = Self::memory_addr(ptr) as usize;
+        let start = self.memory_addr(ptr) as usize;
         if start >= self.memory.len() {
             return Err(VmError::MemoryOutOfBounds { addr: ptr, size: 1 });
         }
@@ -8047,11 +8029,11 @@ impl Vm {
         match source {
             Value::Str(text) => self.write_c_string(dst, &text),
             Value::Int(ptr) if ptr != 0 => {
-                let src = Self::translate_system_descriptor(ptr as u32);
+                let src = ptr as u32;
                 self.copy_c_string_pointer(dst, src)
             }
             Value::Ptr(ptr) if ptr != 0 => {
-                let src = Self::translate_system_descriptor(ptr);
+                let src = ptr;
                 self.copy_c_string_pointer(dst, src)
             }
             Value::Func { offset, .. } if offset != 0 => self.copy_c_string_pointer(dst, offset),
@@ -8065,7 +8047,7 @@ impl Vm {
     }
 
     fn copy_c_string_pointer(&mut self, dst: u32, src: u32) -> VmResult<()> {
-        if let Some(Value::Str(text)) = self.mem_values.get(&Self::value_key(src)).cloned() {
+        if let Some(Value::Str(text)) = self.mem_values.get(&self.value_key(src)).cloned() {
             return self.write_c_string(dst, &text);
         }
         let size = self.c_string_byte_len(src)?.saturating_add(1);
@@ -8916,7 +8898,7 @@ impl Vm {
         let bit_offset = self.pop_int()? as u32;
         let name = self.pop_string_lossy()?;
         let output = self.pop_value()?;
-        let output_ptr = Self::translate_system_descriptor(output.as_i32() as u32);
+        let output_ptr = output.as_i32() as u32;
         let (status, enabled) = match self.read_flags.get(&name) {
             None => (1, None),
             Some(flags) => match flags.contains(bit_offset) {
@@ -9173,7 +9155,7 @@ impl Vm {
                 self.memory[range.start+bytes.len()]=0;
                 self.clear_shadow_values(destination,bytes.len()+1);
                 self.mem_values
-                    .insert(Self::value_key(destination), Value::Str(text));
+                    .insert(self.value_key(destination), Value::Str(text));
                 Value::None
             }
             (0x81, 0x28) => {
@@ -9876,7 +9858,7 @@ impl Vm {
                     if destination!=0 {
                         let range=self.resolve_write_range(destination,length+1)?;
                         self.memory[range.start..range.start+length].copy_from_slice(bytes);self.memory[range.start+length]=0;
-                        self.clear_shadow_values(destination,length+1);self.mem_values.insert(Self::value_key(destination),Value::Str(replacement));
+                        self.clear_shadow_values(destination,length+1);self.mem_values.insert(self.value_key(destination),Value::Str(replacement));
                     }
                     Value::Int(length as i32)
                 } else {Value::Int(0)}
@@ -10189,10 +10171,10 @@ impl Vm {
                 let descriptors = self.pop_ptr()?;
                 let mut total = 0i32;
                 if descriptors != 0 {
-                    let start = Self::memory_addr(descriptors) as usize;
+                    let start = self.memory_addr(descriptors) as usize;
                     if start >= self.memory.len() {
                         return Err(VmError::MemoryOutOfBounds {
-                            addr: Self::memory_addr(descriptors),
+                            addr: self.memory_addr(descriptors),
                             size: 4,
                         });
                     }
@@ -11644,7 +11626,7 @@ impl Vm {
     }
 
     fn memory_preview(&self, ptr: u32, size: usize) -> String {
-        let addr = Self::memory_addr(ptr) as usize;
+        let addr = self.memory_addr(ptr) as usize;
         let Some(bytes) = self
             .memory
             .get(addr..addr.saturating_add(size).min(self.memory.len()))
@@ -11703,7 +11685,7 @@ impl Vm {
             Value::Int(value) => match self.read_c_string_with_encoding(value as u32, encoding) {
                 _ if self
                     .mem_values
-                    .get(&Self::value_key(value as u32))
+                    .get(&self.value_key(value as u32))
                     .and_then(|stored| match stored {
                         Value::Str(text) => Some(text),
                         _ => None,
@@ -11713,7 +11695,7 @@ impl Vm {
                     Ok(
                         match self
                             .mem_values
-                            .get(&Self::value_key(value as u32))
+                            .get(&self.value_key(value as u32))
                             .expect("checked above")
                         {
                             Value::Str(text) => text.clone(),
@@ -11742,11 +11724,11 @@ impl Vm {
             }
             Value::Int(ptr) => {
                 let range =
-                    self.resolve_range(Self::translate_system_descriptor(ptr as u32), size)?;
+                    self.resolve_range(ptr as u32, size)?;
                 Ok(self.memory[range].to_vec())
             }
             Value::Ptr(ptr) => {
-                let range = self.resolve_range(Self::translate_system_descriptor(ptr), size)?;
+                let range = self.resolve_range(ptr, size)?;
                 Ok(self.memory[range].to_vec())
             }
             Value::None => Ok(vec![0; size]),
@@ -11854,7 +11836,7 @@ impl Vm {
 
     fn shadow_string_at(&self, addr: u32) -> Option<String> {
         self.mem_values
-            .get(&Self::value_key(addr))
+            .get(&self.value_key(addr))
             .and_then(|value| match value {
                 Value::Str(text) if is_plausible_text_payload(text) => Some(text.clone()),
                 _ => None,
@@ -11893,7 +11875,7 @@ impl Vm {
         };
         for offset in [0x5c_u32, 0x60, 0x58] {
             let addr = ptr.saturating_add(offset);
-            if let Some(Value::Str(text)) = self.mem_values.get(&Self::value_key(addr)) {
+            if let Some(Value::Str(text)) = self.mem_values.get(&self.value_key(addr)) {
                 if !text.is_empty() {
                     tracing::debug!(
                         ptr = format_args!("0x{ptr:08X}"),
@@ -11935,7 +11917,7 @@ impl Vm {
     }
 
     fn read_shadowed_c_string(&self, ptr: u32) -> VmResult<String> {
-        if let Some(Value::Str(text)) = self.mem_values.get(&Self::value_key(ptr)) {
+        if let Some(Value::Str(text)) = self.mem_values.get(&self.value_key(ptr)) {
             Ok(text.clone())
         } else {
             self.read_c_string(ptr)
@@ -11962,7 +11944,7 @@ impl Vm {
     /// lossy for other encodings. Memory stays authoritative whenever the
     /// shadow is just that decoding of it.
     fn read_shadowed_c_string_bytes(&self, ptr: u32) -> VmResult<Vec<u8>> {
-        let Some(Value::Str(text)) = self.mem_values.get(&Self::value_key(ptr)) else {
+        let Some(Value::Str(text)) = self.mem_values.get(&self.value_key(ptr)) else {
             return self.read_c_string_bytes(ptr);
         };
         if let Ok(raw) = self.read_c_string_bytes(ptr) {
@@ -12119,25 +12101,40 @@ impl Vm {
             .collect()
     }
 
-    pub(crate) fn memory_addr(ptr: u32) -> u32 {
-        // sub_48E8C0 segment 2: the data region (frames).
+    /// sub_48E8C0: a script address to its byte in the backing buffer.
+    /// Segment 0 is the global window, 2 the thread's frames, 0x10..0x3F
+    /// heap blocks; an unmapped address returns `u32::MAX` (out of range).
+    pub(crate) fn memory_addr(&self, ptr: u32) -> u32 {
         if ptr >> 26 == 2 {
             return LOCAL_MEMORY_BASE.saturating_add(ptr & 0x03FF_FFFF);
         }
-        let tag = ptr >> 24;
-        match tag {
-            AUX_MEMORY_TAG_BASE..=u32::MAX => {
-                let segment = (tag >> 1).saturating_sub(AUX_MEMORY_TAG_BASE >> 1);
-                LOCAL_MEMORY_BASE
-                    .saturating_add(segment.saturating_mul(AUX_MEMORY_SEGMENT_SIZE))
-                    .saturating_add(ptr & ADDRESS_MASK)
-            }
-            _ => ptr & ADDRESS_MASK,
+        if target_heap::TargetHeap::is_heap_address(ptr) {
+            return match self.target_heap.translate(ptr) {
+                Some((backing, inside)) => LOCAL_MEMORY_BASE.saturating_add(backing).saturating_add(inside),
+                None => u32::MAX,
+            };
+        }
+        match ptr >> 24 {
+            // Code pointers of string literals (phase 2 of ADR 0005).
+            0x00..=0x1F => ptr & ADDRESS_MASK,
+            _ => u32::MAX,
         }
     }
 
-    pub(crate) fn value_key(ptr: u32) -> u32 {
-        Self::memory_addr(ptr)
+    /// `memory_addr` for addresses that need no heap lookup (debug watch
+    /// lists); heap addresses map to `u32::MAX`.
+    fn static_memory_addr(ptr: u32) -> u32 {
+        if ptr >> 26 == 2 {
+            LOCAL_MEMORY_BASE.saturating_add(ptr & 0x03FF_FFFF)
+        } else if ptr >> 24 <= 0x1F {
+            ptr & ADDRESS_MASK
+        } else {
+            u32::MAX
+        }
+    }
+
+    pub(crate) fn value_key(&self, ptr: u32) -> u32 {
+        self.memory_addr(ptr)
     }
 }
 
@@ -12282,7 +12279,7 @@ fn trace_watch_addresses() -> &'static [u32] {
                             part.parse::<u32>().ok()
                         }
                     })
-                    .map(Vm::memory_addr)
+                    .map(Vm::static_memory_addr)
                     .collect::<Vec<_>>()
             })
             .collect()
@@ -15761,7 +15758,7 @@ mod tests {
 
         assert_eq!(report.stop_reason, VmStopReason::Completed);
         assert_eq!(vm.read_int(0x0800_0118, 2).unwrap(), 0);
-        assert!(!vm.mem_values.contains_key(&Vm::value_key(0x0800_0118)));
+        assert!(!vm.mem_values.contains_key(&vm.value_key(0x0800_0118)));
     }
 
     #[test]
@@ -15810,10 +15807,11 @@ mod tests {
 
         let ptr = vm.alloc_heap(2048);
 
-        assert_eq!(ptr >> 24, 0x22);
-        assert_eq!(ptr & ADDRESS_MASK, 0);
+        // The script sees sub_48E760's address (class 0, slot 0); the
+        // backing block still moves to the next auxiliary segment.
+        assert_eq!(ptr, 0x4000_0000);
         assert_eq!(
-            Vm::memory_addr(ptr),
+            vm.memory_addr(ptr),
             LOCAL_MEMORY_BASE + AUX_MEMORY_SEGMENT_SIZE
         );
         assert!(vm.free_heap(ptr));
@@ -16032,7 +16030,7 @@ mod tests {
     fn graph_text_decodes_gbk_memory_before_validating_the_payload() {
         let mut vm = Vm::new();
         vm.set_graph_text_encoding(encoding_rs::GBK);
-        let pointer = 0x2021_8ac7;
+        let pointer = vm.alloc_heap(64) + 7;
         // GBK bytes can be invalid Shift-JIS or valid but unrelated halfwidth
         // characters. Both require the selected code page, not error fallback.
         for (group, id, count, from_top, bytes, expected) in [
@@ -16047,7 +16045,7 @@ mod tests {
             (0x92, 0x1c, 10, 6, &b"\xd3\xbd"[..], "咏"),
             (0x90, 0x90, 6, 4, &b"\xeb\xca\xb0\xd7"[..], "胧白"),
         ] {
-            let start = Vm::memory_addr(pointer) as usize;
+            let start = vm.memory_addr(pointer) as usize;
             vm.memory
                 .resize(vm.memory.len().max(start + bytes.len() + 1), 0);
             vm.memory[start..start + bytes.len()].copy_from_slice(bytes);
@@ -16363,7 +16361,7 @@ mod tests {
         let bytes = [
             b'A', 0xEF, 0x40, 0xEF, 0x40, b'B', 0xEF, 0x41, 0xF0, 0x40, b'!', 0x7F, 0,
         ];
-        let at = Vm::memory_addr(text_pointer) as usize;
+        let at = vm.memory_addr(text_pointer) as usize;
         vm.memory[at..at + bytes.len()].copy_from_slice(&bytes);
         vm.stack.extend((0..11).map(Value::Int));
         let text_index = vm.stack.len() - 1 - 9;
@@ -16545,7 +16543,7 @@ mod tests {
         let destination = 0x3100;
         let mut vm = Vm::new();
         vm.mem_values
-            .insert(Vm::value_key(source), Value::Str("シナリオの台詞".into()));
+            .insert(vm.value_key(source), Value::Str("シナリオの台詞".into()));
         vm.stack
             .extend([Value::Ptr(destination), Value::Ptr(source)]);
 
@@ -16565,7 +16563,7 @@ mod tests {
         let mut vm = Vm::new();
         vm.set_native_abi_profile(super::NativeAbiProfile::Amachoco);
         vm.mem_values
-            .insert(Vm::value_key(source), Value::Str("シナリオの台詞".into()));
+            .insert(vm.value_key(source), Value::Str("シナリオの台詞".into()));
         vm.stack
             .extend([Value::Ptr(destination), Value::Ptr(source)]);
 
@@ -16577,7 +16575,7 @@ mod tests {
         assert!(vm.stack.is_empty());
         assert_eq!(vm.read_c_string_bytes(destination).unwrap(), "シナリオの台詞".as_bytes());
         assert_eq!(
-            vm.mem_values.get(&Vm::value_key(destination)),
+            vm.mem_values.get(&vm.value_key(destination)),
             Some(&Value::Str("シナリオの台詞".into()))
         );
     }
@@ -18120,7 +18118,7 @@ mod tests {
         vm.memory[0x100..0x104].copy_from_slice(&gbk);
         vm.memory[0x104] = 0;
         let lossy = encoding_rs::SHIFT_JIS.decode(&gbk).0.into_owned();
-        vm.mem_values.insert(Vm::value_key(0x100), Value::Str(lossy));
+        vm.mem_values.insert(vm.value_key(0x100), Value::Str(lossy));
 
         let strlen = test_instruction(0x10, 0x68, "strlen", vec![0x68], Vec::new());
         vm.stack.push(Value::Ptr(0x100));
@@ -18534,7 +18532,7 @@ mod tests {
         let mut vm=Vm::new();
         let source=0x1000_1000u32;
         let destination=0x2000u32;
-        vm.memory[Vm::memory_addr(source) as usize..Vm::memory_addr(source) as usize+4].copy_from_slice(b"data");
+        let at = vm.memory_addr(source) as usize; vm.memory[at..at + 4].copy_from_slice(b"data");
         vm.stack.extend([Value::Ptr(destination),Value::Ptr(source),Value::Int(4)]);
         let instruction=test_instruction(0,0x80,"sys1",vec![0x80,0xcf],Vec::new());
         vm.dispatch(&instruction,&mut TraceApi).unwrap();
@@ -18804,9 +18802,9 @@ mod tests {
 
     #[test]
     fn sys81_30_uses_target_pointer_and_string_pop_order_for_default_archive_entry() {
-        let destination = 0x2020_0000u32;
         let payload = b"SDC FORMAT 1.00\0payload".to_vec();
         let mut vm = Vm::new();
+        let destination = vm.alloc_heap(256);
         let mut api = ArchiveBytesApi {
             expected_archive: "data10000.arc".into(),
             expected_file: String::new(),
@@ -18836,9 +18834,9 @@ mod tests {
 
     #[test]
     fn sys81_30_named_archive_entry_treats_requested_length_as_capacity() {
-        let destination = 0x2020_0058u32;
         let payload = b"SDC FORMAT 1.00\0named-entry-payload".to_vec();
         let mut vm = Vm::new();
+        let destination = vm.alloc_heap(256) + 0x58;
         let mut api = ArchiveBytesApi {
             expected_archive: "data10000.arc".into(),
             expected_file: "evdb".into(),

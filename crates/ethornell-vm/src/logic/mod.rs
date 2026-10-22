@@ -682,7 +682,7 @@ impl Vm {
         if len == 0 {
             return Ok(Vec::new());
         }
-        let range = self.resolve_range(Self::translate_system_descriptor(ptr), len)?;
+        let range = self.resolve_range(ptr, len)?;
         Ok(self.memory[range].to_vec())
     }
 
@@ -692,7 +692,7 @@ impl Vm {
         if ptr == 0 || bytes.is_empty() {
             return Ok(());
         }
-        let ptr = Self::translate_system_descriptor(ptr);
+        let ptr = ptr;
         let range = self.resolve_write_range(ptr, bytes.len())?;
         self.memory[range].copy_from_slice(bytes);
         self.clear_shadow_values(ptr, bytes.len());

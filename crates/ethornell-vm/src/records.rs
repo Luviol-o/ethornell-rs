@@ -30,7 +30,7 @@ impl Vm {
             return;
         }
         self.trace_watch_write(ptr, size, 0, "clear_shadow_values");
-        let start = Self::value_key(ptr);
+        let start = self.value_key(ptr);
         let end = start.saturating_add(size as u32);
         self.mem_values
             .extract_if(start..end, |_, _| true)
@@ -42,8 +42,8 @@ impl Vm {
             return;
         }
         self.clear_shadow_values(dst, size);
-        let src_start = Self::value_key(src);
-        let dst_start = Self::value_key(dst);
+        let src_start = self.value_key(src);
+        let dst_start = self.value_key(dst);
         let end = src_start.saturating_add(size as u32);
         let copied: Vec<_> = self
             .mem_values
@@ -84,9 +84,9 @@ impl Vm {
     pub(crate) fn remember_script_record(&mut self, ptr: u32, text: &str) -> VmResult<()> {
         self.write_c_string_raw(ptr, text)?;
         self.script_records
-            .insert(Self::value_key(ptr), text.to_string());
+            .insert(self.value_key(ptr), text.to_string());
         self.mem_values
-            .insert(Self::value_key(ptr), Value::Str(text.to_string()));
+            .insert(self.value_key(ptr), Value::Str(text.to_string()));
         Ok(())
     }
 
@@ -94,7 +94,7 @@ impl Vm {
         if size == 0 || self.script_records.is_empty() {
             return Ok(());
         }
-        let start = Self::value_key(ptr);
+        let start = self.value_key(ptr);
         let end = start.saturating_add(size as u32);
         let records: Vec<_> = self
             .script_records
@@ -363,7 +363,7 @@ impl Vm {
     /// memcpy out of VM memory, keeping the typed shadow values.
     fn capture_record(&self, src: u32, size: u32) -> VmResult<IndexedRecordEntry> {
         let range = self.resolve_range(src, size as usize)?;
-        let start = Self::value_key(src);
+        let start = self.value_key(src);
         let end = start.saturating_add(size);
         Ok(IndexedRecordEntry {
             bytes: self.memory[range].to_vec(),
@@ -380,7 +380,7 @@ impl Vm {
         let range = self.resolve_write_range(dst, entry.bytes.len())?;
         self.memory[range].copy_from_slice(&entry.bytes);
         self.clear_shadow_values(dst, entry.bytes.len());
-        let start = Self::value_key(dst);
+        let start = self.value_key(dst);
         self.mem_values.extend(
             entry
                 .shadow_values
@@ -400,7 +400,7 @@ impl Vm {
         self.next_record_table_handle = handle.wrapping_add(1).max(1);
         self.write_int(slot, 2, handle)?;
         self.record_tables.insert(
-            Self::value_key(handle),
+            self.value_key(handle),
             RecordTableState {
                 slot,
                 record_size,
@@ -430,7 +430,7 @@ impl Vm {
             Value::Ptr(0) | Value::Int(0) | Value::None => String::new(),
             value => value.as_i32().to_string(),
         };
-        let handle_key = Self::value_key(handle);
+        let handle_key = self.value_key(handle);
         let entry = match self.record_tables.get(&handle_key) {
             Some(table) => self.capture_record(src, table.record_size)?,
             None => return Ok(TABLE_NOT_FOUND),
@@ -452,7 +452,7 @@ impl Vm {
 
     pub(crate) fn sys_record_table_close(&mut self, handle: u32) -> i32 {
         const TABLE_NOT_FOUND: i32 = 0x8000_0002u32 as i32;
-        if self.record_tables.remove(&Self::value_key(handle)).is_none() {
+        if self.record_tables.remove(&self.value_key(handle)).is_none() {
             return TABLE_NOT_FOUND;
         }
         0
@@ -462,7 +462,7 @@ impl Vm {
         const TABLE_NOT_FOUND: i32 = 0x8000_0002u32 as i32;
         const KEY_NOT_FOUND: i32 = 0x8000_0003u32 as i32;
 
-        let handle_key = Self::value_key(handle);
+        let handle_key = self.value_key(handle);
         let key = match self.normalize_record_key(key) {
             Value::Str(text) => text,
             Value::Ptr(0) | Value::Int(0) | Value::None => String::new(),
@@ -492,7 +492,7 @@ impl Vm {
     ) -> VmResult<Value> {
         const TABLE_NOT_FOUND: i32 = 0x8000_0002u32 as i32;
         const RECORD_NOT_FOUND: i32 = 0x8000_0003u32 as i32;
-        let handle_key = Self::value_key(handle);
+        let handle_key = self.value_key(handle);
         let Some(table) = self.record_tables.get(&handle_key) else {
             return Ok(Value::Int(TABLE_NOT_FOUND));
         };
@@ -535,7 +535,7 @@ impl Vm {
         self.next_indexed_record_handle = handle.wrapping_add(1).max(1);
         self.write_value(slot, 2, &Value::Int(handle as i32))?;
         self.indexed_record_tables.insert(
-            Self::value_key(handle),
+            self.value_key(handle),
             IndexedRecordState {
                 slot,
                 capacity,
@@ -560,7 +560,7 @@ impl Vm {
     }
 
     pub(crate) fn sys_indexed_record_close(&mut self, handle: u32) -> i32 {
-        if let Some(state) = self.indexed_record_tables.remove(&Self::value_key(handle)) {
+        if let Some(state) = self.indexed_record_tables.remove(&self.value_key(handle)) {
             if std::env::var_os("DEBUG").is_some() {
                 tracing::info!(
                     thread_id = self.thread.thread_id(),
@@ -579,7 +579,7 @@ impl Vm {
     }
 
     pub(crate) fn sys_indexed_record_count(&mut self, dst: u32, handle: u32) -> VmResult<i32> {
-        let Some(state) = self.indexed_record_tables.get(&Self::value_key(handle)) else {
+        let Some(state) = self.indexed_record_tables.get(&self.value_key(handle)) else {
             if std::env::var_os("DEBUG").is_some() {
                 tracing::info!(
                     thread_id = self.thread.thread_id(),
@@ -608,7 +608,7 @@ impl Vm {
     }
 
     pub(crate) fn sys_indexed_record_push(&mut self, handle: u32, src: u32) -> VmResult<i32> {
-        let key = Self::value_key(handle);
+        let key = self.value_key(handle);
         let Some(state) = self.indexed_record_tables.get(&key) else {
             if std::env::var_os("DEBUG").is_some() {
                 tracing::info!(
@@ -625,7 +625,7 @@ impl Vm {
         let capacity = state.capacity as usize;
         let slot = state.slot;
         let src_range = self.resolve_range(src, size)?;
-        let src_start = Self::value_key(src);
+        let src_start = self.value_key(src);
         let src_end = src_start.saturating_add(state.record_size);
         let shadow_values = self
             .mem_values
@@ -659,7 +659,7 @@ impl Vm {
         handle: u32,
         index: i32,
     ) -> VmResult<i32> {
-        let Some(state) = self.indexed_record_tables.get(&Self::value_key(handle)) else {
+        let Some(state) = self.indexed_record_tables.get(&self.value_key(handle)) else {
             return Ok(1);
         };
         let Some(entry) = usize::try_from(index)
@@ -676,7 +676,7 @@ impl Vm {
         let range = self.resolve_write_range(dst, size)?;
         self.memory[range].copy_from_slice(&entry.bytes);
         self.clear_shadow_values(dst, size);
-        let dst_start = Self::value_key(dst);
+        let dst_start = self.value_key(dst);
         self.mem_values.extend(
             entry
                 .shadow_values
@@ -708,7 +708,7 @@ impl Vm {
     }
 
     pub(crate) fn sys_indexed_record_remove(&mut self, handle: u32, start: i32, count: u32) -> i32 {
-        let Some(state) = self.indexed_record_tables.get_mut(&Self::value_key(handle)) else {
+        let Some(state) = self.indexed_record_tables.get_mut(&self.value_key(handle)) else {
             return 1;
         };
         // sub_46C940: skip `start` records (signed walk; running out is 2),
@@ -958,7 +958,7 @@ mod tests {
         assert_eq!(vm.sys_indexed_record_load(dst, handle, 0).unwrap(), 0);
         assert_eq!(vm.read_int(dst, 2).unwrap(), 30);
         assert_eq!(
-            vm.mem_values.get(&Vm::value_key(dst + 4)),
+            vm.mem_values.get(&vm.value_key(dst + 4)),
             Some(&Value::Str("record-30".into()))
         );
         assert_eq!(vm.sys_indexed_record_load(dst, handle, 1).unwrap(), 0);

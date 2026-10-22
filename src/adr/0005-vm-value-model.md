@@ -82,6 +82,17 @@ per-game workarounds can be removed. The change touches most of
 
 ## Progress / next step
 
-* 2026-10-22: model recovered (above), ADR written. Next: phase 1, starting
-  with the frame segment (producers of `0x1200_0000` in `lib.rs`,
-  `async_program.rs`, `debug.rs`, `host_request.rs`).
+* 2026-10-22: model recovered (above), ADR written.
+* Phase 1, frames: `FRAME_SEGMENT` (0x08000000); every producer of the old
+  0x12 tag and the tests' literals moved.
+* Phase 1, heap: `target_heap.rs` assigns sub_48E760's class/slot addresses
+  (0x40000000.. for class 0) and maps them onto the existing backing blocks;
+  `memory_addr` is a method (heap lookup), unmapped addresses give
+  `u32::MAX`. The table travels with the memory in
+  `transfer_async_shared_state`. The invented "system program descriptor"
+  window at 0x40000000 (no producer anywhere) is gone: in the target those
+  addresses are the first heap blocks.
+* Still legacy: code pointers (`0x10000000 | offset`, mapped onto the global
+  window), invalid addresses are a Rust `MemoryOutOfBounds` instead of the
+  target's fatal text. Next: code segment 1 with the module bytes, then
+  phase 2 (strings).

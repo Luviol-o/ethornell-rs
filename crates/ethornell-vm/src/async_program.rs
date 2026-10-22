@@ -537,7 +537,7 @@ impl Vm {
             Value::Program(program) => Some((*program).clone()),
             Value::Ptr(ptr) => self
                 .mem_values
-                .get(&Self::value_key(ptr))
+                .get(&self.value_key(ptr))
                 .and_then(|value| {
                     if let Value::Program(program) = value {
                         Some((**program).clone())
@@ -547,7 +547,7 @@ impl Vm {
                 }),
             Value::Int(ptr) => {
                 self.mem_values
-                    .get(&Self::value_key(ptr as u32))
+                    .get(&self.value_key(ptr as u32))
                     .and_then(|value| {
                         if let Value::Program(program) = value {
                             Some((**program).clone())
@@ -624,6 +624,7 @@ fn transfer_async_shared_state(source: &mut Vm, destination: &mut Vm) {
         &mut source.heap_free_blocks,
         &mut destination.heap_free_blocks,
     );
+    std::mem::swap(&mut source.target_heap, &mut destination.target_heap);
     std::mem::swap(&mut source.record_tables, &mut destination.record_tables);
     std::mem::swap(
         &mut source.next_record_table_handle,
@@ -852,8 +853,8 @@ mod tests {
         assert_eq!(task.alloc_heap(160), first);
 
         transfer_async_shared_state(&mut task, &mut root);
-        assert!(root.heap_allocations.contains_key(&(first & ADDRESS_MASK)));
-        assert!(!task.heap_allocations.contains_key(&(first & ADDRESS_MASK)));
+        assert!(root.target_heap.translate(first).is_some());
+        assert!(task.target_heap.translate(first).is_none());
     }
 
     #[test]
