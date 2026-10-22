@@ -15229,6 +15229,44 @@ mod input_tests {
     }
 
     #[test]
+    fn graph92_1b_outlines_log_text_in_white_around_its_glyphs() {
+        // logwnd._bp: 92:1B(B, X, 1), then B blended over X at (-8, -8) with
+        // transparency 64 (90:18 mode 1). The stub drew nothing.
+        let manager =
+            ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let mut api = super::RuntimeTraceApi::new(manager);
+        let (text, halo) = (1429, 1431);
+        let mut glyph = DecodedImage {
+            width: 5,
+            height: 5,
+            rgba: vec![0; 5 * 5 * 4],
+        };
+        glyph.rgba[(2 * 5 + 2) * 4..][..4].copy_from_slice(&[0, 0, 0, 255]);
+        api.store_runtime_bitmap(text, glyph.clone(), 2);
+        let mut stack = vec![Value::Int(halo), Value::Int(text), Value::Int(1)];
+        call_graph(&mut api, 0x92, 0x1b, &mut stack).unwrap();
+        assert!(stack.is_empty());
+        let image = api.graph_bitmap_image(halo).unwrap();
+        assert_eq!((image.width, image.height), (21, 21));
+        let pixel = |x: u32, y: u32| image.rgba[((y * 21 + x) * 4) as usize..][..4].to_vec();
+        // The glyph itself is not covered; a one-pixel ring around it is.
+        assert_eq!(pixel(10, 10)[3], 0);
+        for (x, y) in [(9, 9), (10, 9), (11, 10), (11, 11)] {
+            assert_eq!(pixel(x, y), [255, 255, 255, 255]);
+        }
+        assert_eq!(pixel(8, 10)[3], 0);
+
+        let mut composed = glyph;
+        assert!(crate::bitmap_blend::blit_alpha_over_parameter(
+            &mut composed, 2, &image, 2, -8, -8, 64
+        ));
+        let at = |x: usize, y: usize| composed.rgba[(y * 5 + x) * 4..][..4].to_vec();
+        assert_eq!(at(2, 2), [0, 0, 0, 255]);
+        assert_eq!(at(3, 2), [255, 255, 255, 191]);
+        assert_eq!(at(4, 2)[3], 0);
+    }
+
+    #[test]
     fn graph90_11_replaces_stale_same_handle_bitmap_storage() {
         let manager =
             ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
