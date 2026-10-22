@@ -647,6 +647,38 @@ impl ApplicationHandler for WindowApp {
                         target.exit();
                         return;
                     }
+                    // WinMain leaves its loop once the root interpreter ends:
+                    // Sys80:6A (status 6), the end of ipl._bp, or a script
+                    // error (sub_464C50 reports it, then the process exits).
+                    if runtime.vm.halted
+                        && runtime.api.native_system.restart.is_none()
+                        && last_report.as_ref().is_some_and(|report| {
+                            matches!(
+                                report.stop_reason,
+                                ethornell_vm::VmStopReason::InterpreterTerminated
+                                    | ethornell_vm::VmStopReason::Completed
+                            ) || report.stop_reason.is_fatal()
+                        })
+                    {
+                        let report = last_report.as_ref().expect("checked above");
+                        if report.stop_reason.is_fatal() {
+                            let message = format!(
+                                "script stopped at {} pc={} offset={:?}: {:?}",
+                                report.program,
+                                report.pc,
+                                report.offset,
+                                report.recent_trace.last()
+                            );
+                            tracing::error!(%message, "runtime stopped");
+                            if let Ok(mut slot) = failure.lock() {
+                                *slot = Some(message);
+                            }
+                        } else {
+                            tracing::info!(reason = ?report.stop_reason, "root interpreter ended");
+                        }
+                        target.exit();
+                        return;
+                    }
                     if runtime.api.quit_requested || runtime.api.native_system.restart.is_some() && runtime.vm.halted {
                         tracing::info!("runtime quit event received");
                         runtime.api.run_scheduled_restart();
