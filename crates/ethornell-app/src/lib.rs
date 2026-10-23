@@ -78,6 +78,10 @@ mod runtime_frontend;
 mod scenario;
 mod scene;
 mod snapshot;
+#[cfg(desktop_host)]
+mod text_encoding;
+#[cfg(desktop_host)]
+pub use text_encoding::TextEncoding;
 mod surface_controls;
 mod target_checks;
 mod text;
@@ -247,6 +251,9 @@ const CONFIRMED_TITLE_FNV: u64 = 0xc6bdd0d97d4f4893;
 const CONFIRMED_TITLE_LEN: usize = 26272;
 
 pub struct AppConfig {
+    /// None uses ETHORNELL_TEXT_ENCODING, then Auto. An explicit choice wins.
+    #[cfg(desktop_host)]
+    pub text_encoding: Option<TextEncoding>,
     pub game_root: GameRoot,
     pub trace: bool,
     pub fail_on_stub: bool,
@@ -298,6 +305,16 @@ pub fn run(config: AppConfig) -> Result<()> {
         "archive-backed resource manager ready"
     );
 
+    #[cfg(desktop_host)]
+    let encoding = match config.text_encoding {
+        Some(choice) => choice.resolve(&manager),
+        None => text_encoding::select(
+            &manager,
+            std::env::var("ETHORNELL_TEXT_ENCODING").ok().as_deref(),
+        ),
+    };
+    #[cfg(not(desktop_host))]
+    let encoding = encoding_rs::SHIFT_JIS;
     let bgm = load_runtime_bgm(&manager);
     let native_root = game_root_path(&manager);
     tracing::info!(
@@ -325,6 +342,7 @@ pub fn run(config: AppConfig) -> Result<()> {
                 config.trace,
                 config.fail_on_stub,
                 !headless,
+                encoding,
             )),
             Err(err) => {
                 tracing::warn!(script, %err, "startup script unavailable");
@@ -9466,20 +9484,12 @@ impl RuntimeEngine {
         trace: bool,
         fail_on_stub: bool,
         native_dialog_presentation: bool,
+        encoding: &'static encoding_rs::Encoding,
     ) -> Self {
         let program = ethornell_script::parse_bp_program(Some(script.to_string()), bytes);
         let mut vm = ethornell_vm::Vm::new();
         vm.set_native_abi_profile(confirmed_native_profile(&manager, bytes));
-        if let Ok(label) = std::env::var("ETHORNELL_TEXT_ENCODING") {
-            match label.trim().to_ascii_lowercase().as_str() {
-                "gbk" | "cp936" | "windows-936" => {
-                    vm.set_graph_text_encoding(encoding_rs::GBK);
-                    tracing::info!(encoding = "GBK", "game display text encoding configured");
-                }
-                "shift_jis" | "shift-jis" | "sjis" | "cp932" => {}
-                _ => tracing::warn!(%label, "unsupported ETHORNELL_TEXT_ENCODING; using Shift-JIS"),
-            }
-        }
+        vm.set_graph_text_encoding(encoding);
         vm.start(&program);
         Self {
             vm,
@@ -9538,6 +9548,7 @@ impl RuntimeEngine {
             self.options.trace,
             self.options.fail_on_stub,
             self.api.native_dialog_presentation,
+            self.vm.graph_text_encoding(),
         );
         if self.api.host_realtime_clock {
             engine.use_host_clock();

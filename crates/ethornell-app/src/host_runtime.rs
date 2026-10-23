@@ -1291,6 +1291,23 @@ mod tests {
     }
     #[test]
     #[cfg(unix)]
+    fn bootstrap_restart_preserves_session_text_encoding() {
+        let (root, mut host) = minimal_host("encoding-restart");
+        assert_eq!(host.runtime.vm.graph_text_encoding(), encoding_rs::GBK);
+        host.runtime.api.native_system.bootstrap_request = Some((
+            None,
+            "system.arc".into(),
+            "ipl._bp".into(),
+        ));
+        let restarted = host.runtime.take_restart().unwrap();
+        assert_eq!(restarted.vm.graph_text_encoding(), encoding_rs::GBK);
+        drop(restarted);
+        drop(host);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn public_host_without_surface_halts_and_pause_cancel_clears_gesture_history() {
         let (root, mut host) = minimal_host("pause");
         let before = host.runtime.api.engine_time_ms;

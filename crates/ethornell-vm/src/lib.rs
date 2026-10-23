@@ -2641,6 +2641,11 @@ impl Vm {
         self.timing.advance(milliseconds);
     }
 
+    /// The configured display-text code page, including the Shift-JIS default.
+    pub fn graph_text_encoding(&self) -> &'static encoding_rs::Encoding {
+        self.graph_text_encoding.unwrap_or(encoding_rs::SHIFT_JIS)
+    }
+
     /// Select the code page of text passed to native graph drawing calls.
     /// Resource names and BP system strings retain their original encoding.
     pub fn set_graph_text_encoding(&mut self, encoding: &'static encoding_rs::Encoding) {
