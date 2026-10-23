@@ -873,6 +873,8 @@ struct RuntimeTraceApi {
     fullwidth_glyph_cell_width: i32,
     surface_text_states: BTreeMap<i32, SurfaceTextState>,
     surface_text_buffers: BTreeMap<i32, String>,
+    /// Message text each window holds since its last clear (`text::MessagePage`).
+    message_pages: BTreeMap<i32, text::MessagePage>,
     /// Target CDspObjKnob registry: 32 slots, handles 0xF0000000 | slot.
     graph_knob_states: BTreeMap<i32, GraphKnobState>,
     /// Knob→target is a control pointer, not a CDspObj member/parent edge.
@@ -1341,6 +1343,7 @@ impl RuntimeTraceApi {
             fullwidth_glyph_cell_width: 0,
             surface_text_states: BTreeMap::new(),
             surface_text_buffers: BTreeMap::new(),
+            message_pages: BTreeMap::new(),
             graph_knob_states: BTreeMap::new(),
             graph_knob_watches: VecDeque::new(),
             graph_knob_input_mode: 0,
@@ -4872,6 +4875,7 @@ impl RuntimeTraceApi {
             .retain(|key, _| !is_composite(key));
         self.surface_text_states.remove(&surface);
         self.surface_text_buffers.remove(&surface);
+        self.message_pages.remove(&surface);
         // Text drawn into the window (Graph92:91 runs) goes with it, as in
         // the target, where it is part of the window's bitmap. Its text node
         // is keyed by the handle, so leaving it also kept the slot reserved
@@ -16130,6 +16134,227 @@ mod input_tests {
         );
     }
 
+    fn message_window(api: &mut super::RuntimeTraceApi) -> i32 {
+        let window = 0xB000_0000_u32 as i32;
+        api.graph_surfaces
+            .insert(window, RuntimeSurface::display(window, 1128.0, 200.0));
+        api.reset_window_text_cursor(window);
+        window
+    }
+
+    fn shown_message(api: &super::RuntimeTraceApi) -> String {
+        let node = api.text_runtime.target_node.unwrap();
+        api.text_nodes[&node].text.clone()
+    }
+
+    #[test]
+    fn a_message_continues_the_text_its_window_already_shows() {
+        let manager =
+            ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let mut api = super::RuntimeTraceApi::new(manager);
+        let window = message_window(&mut api);
+        let home = api.surface_text_states[&window];
+
+        // Wonderful Everyday extends a line in parts: messages that don't
+        // wait at their end, with neither 92:8E nor a page feed between.
+        api.start_native_message("Part one,".into(), Some(window));
+        api.tick_text(10_000);
+        assert_eq!(shown_message(&api), "Part one,");
+        let after_first = api.surface_text_states[&window];
+        assert_eq!(after_first.cursor_y, home.cursor_y);
+        assert!(after_first.cursor_x > home.cursor_x);
+
+        let first_layout = api.text_runtime.current_visible_text();
+        api.start_native_message(" part two.".into(), Some(window));
+        // The page keeps the window's whole width: the first part doesn't
+        // reflow.
+        assert!(api.text_runtime.current_visible_text().starts_with(&first_layout));
+        assert_eq!(
+            api.window_text_state(Some(window)).width,
+            1128.0 - api.surface_text_states[&window].cursor_x as f32
+        );
+        // The first part stays on screen while the second is typed out.
+        assert_eq!(shown_message(&api), "Part one,");
+        api.tick_text(10_000);
+        assert_eq!(shown_message(&api), "Part one, part two.");
+        assert!(api.surface_text_states[&window].cursor_x > after_first.cursor_x);
+    }
+
+    #[test]
+    fn a_reset_or_a_page_feed_starts_a_new_page() {
+        let manager =
+            ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let mut api = super::RuntimeTraceApi::new(manager);
+        let window = message_window(&mut api);
+        let home = api.surface_text_states[&window];
+
+        api.start_native_message("First line.".into(), Some(window));
+        api.tick_text(10_000);
+        // scrmsg._bp ends a waited line with Graph90:90(window, "\x0c"):
+        // sub_433890 clears the window and sends the cursor home.
+        api.start_native_message("\x0c".into(), Some(window));
+        assert_eq!(shown_message(&api), "");
+        assert_eq!(api.surface_text_states[&window].cursor_x, home.cursor_x);
+        api.start_native_message("Second line.".into(), Some(window));
+        api.tick_text(10_000);
+        assert_eq!(shown_message(&api), "Second line.");
+
+        // A message after Graph91:8C starts at the new cursor.
+        call_graph(
+            &mut api,
+            0x91,
+            0x8c,
+            &mut vec![Value::Int(window), Value::Int(200), Value::Int(80)],
+        )
+        .unwrap();
+        api.start_native_message("Moved.".into(), Some(window));
+        api.tick_text(10_000);
+        assert_eq!(shown_message(&api), "Moved.");
+        assert_eq!(api.window_text_state(Some(window)).y, 80.0);
+
+        // Graph92:8E (sub_440F80) clears the window too.
+        call_graph(&mut api, 0x92, 0x8e, &mut vec![Value::Int(window)]).unwrap();
+        api.start_native_message("Third line.".into(), Some(window));
+        api.tick_text(10_000);
+        assert_eq!(shown_message(&api), "Third line.");
+    }
+
+    fn draw_at_once(api: &mut super::RuntimeTraceApi, window: i32, text: &str) {
+        // Wonderful Everyday's scrmsg._bp draws a skipped line at once with
+        // Graph92:91 (its text colour setting and edge style), in a window
+        // that has its font from Graph91:88, which Graph92:91 checks.
+        let state = api.surface_text_states.entry(window).or_default();
+        if state.font_size == 0 {
+            state.font_size = 26;
+        }
+        let mut args = [window, 0, 0, 1, 0, 1, 2, 1, 1, 0xffffff, 192]
+            .map(Value::Int)
+            .to_vec();
+        args[1] = Value::Str(text.into());
+        call_graph(api, 0x92, 0x91, &mut args).unwrap();
+    }
+
+    #[test]
+    fn a_page_feed_clears_the_text_graph92_91_drew_on_the_window() {
+        let manager =
+            ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let mut api = super::RuntimeTraceApi::new(manager);
+        let window = message_window(&mut api);
+        let home = api.surface_text_states[&window];
+
+        // When skipping has stopped by the time a skipped line is done,
+        // scrmsg._bp ends its page with Graph90:90(window, "\x0c") rather
+        // than Graph92:8E.
+        draw_at_once(&mut api, window, "A skipped line.");
+        assert_eq!(shown_message(&api), "A skipped line.");
+
+        // sub_433890 clears the window's text bitmap (sub_42B9B0), where
+        // Graph92:91 drew too, so the next line doesn't show over it.
+        api.start_native_message("\x0c".into(), Some(window));
+        assert_eq!(shown_message(&api), "");
+        assert!(!api.text_nodes.contains_key(&window));
+        assert_eq!(api.surface_text_buffers[&window], "");
+        assert_eq!(api.surface_text_states[&window].cursor_x, home.cursor_x);
+        api.start_native_message("The next line.".into(), Some(window));
+        api.tick_text(10_000);
+        assert_eq!(shown_message(&api), "The next line.");
+    }
+
+    #[test]
+    fn graph92_91_draws_on_its_window_page_at_the_text_cursor() {
+        let manager =
+            ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let mut api = super::RuntimeTraceApi::new(manager);
+        let window = message_window(&mut api);
+        let home = api.surface_text_states[&window];
+
+        // sub_42B710 draws at the window's text cursor and leaves the cursor
+        // after the text (sub_42C700), as a message does.
+        draw_at_once(&mut api, window, "A skipped line.");
+        assert_eq!(shown_message(&api), "A skipped line.");
+        let after_line = api.surface_text_states[&window];
+        assert_eq!(after_line.cursor_y, home.cursor_y);
+        assert!(after_line.cursor_x > home.cursor_x);
+        assert!(!api.text_nodes.contains_key(&window));
+        assert_eq!(
+            api.text_nodes[&api.text_runtime.target_node.unwrap()].z,
+            api.graph_surfaces[&window].z
+        );
+
+        // On a page of several lines scrmsg._bp asks Graph91:8E whether the
+        // cursor is at a line's start and, when it isn't, draws a line feed
+        // with Graph92:91 before the next line.
+        let at_line_start = call_graph(&mut api, 0x91, 0x8e, &mut vec![Value::Int(window)]);
+        assert_eq!(at_line_start.unwrap(), Value::Int(0));
+        draw_at_once(&mut api, window, "\n");
+        let next_line = api.surface_text_states[&window];
+        assert_eq!(next_line.cursor_x, home.cursor_x);
+        assert!(next_line.cursor_y > home.cursor_y);
+
+        // The line typed after skipping stops goes on the next line; the
+        // skipped one stays above it.
+        api.start_native_message("The next line.".into(), Some(window));
+        assert_eq!(shown_message(&api), "A skipped line.\n");
+        api.tick_text(10_000);
+        assert_eq!(shown_message(&api), "A skipped line.\nThe next line.");
+
+        // Graph92:8E clears both.
+        call_graph(&mut api, 0x92, 0x8e, &mut vec![Value::Int(window)]).unwrap();
+        assert!(api
+            .text_nodes
+            .values()
+            .filter(|node| node.target_surface == Some(window))
+            .all(|node| node.text.is_empty()));
+        assert_eq!(api.surface_text_states[&window].cursor_x, home.cursor_x);
+        assert_eq!(api.surface_text_states[&window].cursor_y, home.cursor_y);
+    }
+
+    #[test]
+    fn graph92_91_from_a_cursor_in_mid_line_keeps_all_its_glyphs() {
+        let manager =
+            ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let mut api = super::RuntimeTraceApi::new(manager);
+        let window = 0xB000_0000_u32 as i32;
+        api.graph_surfaces
+            .insert(window, RuntimeSurface::display(window, 1128.0, 400.0));
+        api.reset_window_text_cursor(window);
+        let without_spaces =
+            |text: &str| text.chars().filter(|ch| !ch.is_whitespace()).collect::<String>();
+
+        // A skipped line extended in parts: the second part starts where
+        // the first one ends, near the right edge, goes on to the edge and
+        // wraps to the left edge (sub_435290 has no line limit).
+        let first = "Part one. ".repeat(7);
+        let second = "and then the rest of the line, ".repeat(12);
+        draw_at_once(&mut api, window, &first);
+        assert!(api.surface_text_states[&window].cursor_x > 600);
+        draw_at_once(&mut api, window, &second);
+
+        let both = without_spaces(&format!("{first}{second}"));
+        assert_eq!(without_spaces(&shown_message(&api)), both);
+        assert_eq!(without_spaces(&api.surface_text_buffers[&window]), both);
+    }
+
+    #[test]
+    fn graph92_91_leaves_another_windows_message_where_it_is() {
+        let manager =
+            ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let mut api = super::RuntimeTraceApi::new(manager);
+        let window = message_window(&mut api);
+        let other = 0xB000_0001_u32 as i32;
+        api.graph_surfaces
+            .insert(other, RuntimeSurface::display(other, 600.0, 100.0));
+        api.reset_window_text_cursor(other);
+
+        // The engine keeps one message node: text drawn on another window
+        // while it shows a message stays a node of that window.
+        api.start_native_message("A message.".into(), Some(window));
+        api.tick_text(10_000);
+        draw_at_once(&mut api, other, "Other text.");
+        assert_eq!(shown_message(&api), "A message.");
+        assert_eq!(api.text_nodes[&other].text, "Other text.");
+    }
+
     #[test]
     fn graph_icon_batch_rebuilds_window_backing_in_record_order() {
         let manager =
@@ -16832,8 +17057,17 @@ mod input_tests {
         api.start_native_message("字幕".into(), Some(window));
         api.tick_text(1000);
         let target = api.text_runtime.target_node.unwrap();
+        // Byte 0x0C is CProcDspMsg's page feed (vtable+40, sub_433890): it
+        // clears the window and sends the cursor home.
         assert_eq!(api.start_native_message("\x0c".into(), Some(window)), 0);
-        assert_eq!(api.text_nodes[&target].text, "字幕");
+        assert_eq!(api.text_nodes[&target].text, "");
+        assert_eq!(
+            (
+                api.surface_text_states[&window].cursor_x,
+                api.surface_text_states[&window].cursor_y
+            ),
+            (118, 58)
+        );
     }
 
     #[test]
@@ -26900,32 +27134,46 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                     // sub_486500 and the message procedure both enter
                     // sub_42B710, so direct formatted draws must preserve the
                     // same ruby spans and kinsoku wrapping as 92:90.
-                    let parsed = text::parse_and_wrap_styled_message(text, &state);
-                    let x = state.x;
-                    let y = state.y;
-                    self.store_bitmap_text_run(
-                        target,
-                        RuntimeTextNode {
-                            text: parsed.text.clone(),
-                            enabled: true,
-                            owner_object: Some(target),
-                            screen_attached: false,
-                            target_surface: Some(target),
-                            x,
-                            y,
-                            size: state.font_size,
-                            line_height: state.line_height,
-                            formatted_layout: true,
-                            color: state.color,
-                            z: target,
-                            ruby_spans: parsed.ruby_spans,
-                            style_spans: parsed.style_spans,
-                        },
-                    );
-                    self.surface_text_buffers
-                        .entry(target)
-                        .or_default()
-                        .push_str(&parsed.text);
+                    if self.graph_surfaces.contains_key(&target)
+                        && self.message_text_node_is_free_for(target)
+                    {
+                        // Into the window's text bitmap, at its cursor, as
+                        // a message draws. It is laid out on the window's
+                        // page: from a cursor in mid-line it goes on to the
+                        // window's right edge and wraps to its left edge.
+                        let drawn = self.draw_window_text_at_once(target, text);
+                        self.surface_text_buffers
+                            .entry(target)
+                            .or_default()
+                            .push_str(&drawn);
+                    } else {
+                        let parsed = text::parse_and_wrap_styled_message(text, &state);
+                        self.surface_text_buffers
+                            .entry(target)
+                            .or_default()
+                            .push_str(&parsed.text);
+                        let x = state.x;
+                        let y = state.y;
+                        self.store_bitmap_text_run(
+                            target,
+                            RuntimeTextNode {
+                                text: parsed.text.clone(),
+                                enabled: true,
+                                owner_object: Some(target),
+                                screen_attached: false,
+                                target_surface: Some(target),
+                                x,
+                                y,
+                                size: state.font_size,
+                                line_height: state.line_height,
+                                formatted_layout: true,
+                                color: state.color,
+                                z: target,
+                                ruby_spans: parsed.ruby_spans,
+                                style_spans: parsed.style_spans,
+                            },
+                        );
+                    }
                 }
                 tracing::debug!(
                     target,
@@ -27035,9 +27283,7 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                 // sub_486EB0 -> sub_441340: cursor reset, buffer clear.
                 let target = pop_int_value(stack).unwrap_or_default();
                 self.graph92_require_window(target)?;
-                self.reset_window_text_cursor(target);
-                self.clear_bitmap_text(target);
-                self.surface_text_buffers.insert(target, String::new());
+                self.clear_window_text(target);
                 if self.native_message_surface_target == Some(target) {
                     self.reset_native_message_text();
                 }
