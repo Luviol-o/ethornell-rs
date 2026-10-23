@@ -1157,20 +1157,20 @@ impl RuntimeTraceApi {
                 // sub_485410 -> sub_434750.
                 let value = pop_int_value(stack).unwrap_or_default();
                 let property = pop_int_value(stack).unwrap_or_default() as u32;
-                if !matches!(property, 0 | 0x8000_0000 | 0x8000_0001 | 0x8000_0002) {
-                    return Some(Err(ethornell_vm::VmError::Runtime(format!(
-                        "無効なファンクション番号 [ {} ] が指定されました",
-                        property as i32
-                    ))));
+                // BGI 1.622 raises 無効なファンクション番号 for any other
+                // property. Wonderful Everyday's boot script (a different BGI)
+                // sets 0x80000004 and carries on in the original: an unknown
+                // property is ignored.
+                if matches!(property, 0 | 0x8000_0000 | 0x8000_0001 | 0x8000_0002) {
+                    if property == 0x8000_0001 && value < 0 {
+                        return Some(Err(ethornell_vm::VmError::Runtime(format!(
+                            "無効なファンクションパラメータ [ {value} ] が指定されました"
+                        ))));
+                    }
+                    self.graph_config
+                        .text_global_properties
+                        .insert(property, value);
                 }
-                if property == 0x8000_0001 && value < 0 {
-                    return Some(Err(ethornell_vm::VmError::Runtime(format!(
-                        "無効なファンクションパラメータ [ {value} ] が指定されました"
-                    ))));
-                }
-                self.graph_config
-                    .text_global_properties
-                    .insert(property, value);
                 ethornell_vm::Value::None
             }
             0x9b => {

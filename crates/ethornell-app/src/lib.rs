@@ -11513,6 +11513,10 @@ mod input_tests {
         call_graph(&mut api, 0x91, 0x88, &mut font).unwrap();
         let mut text_property = vec![Value::Int(0x8000_0000_u32 as i32), Value::Int(1)];
         call_graph(&mut api, 0x91, 0x9a, &mut text_property).unwrap();
+        // Wonderful Everyday's boot script sets 0x80000004: ignored.
+        let mut unknown_property = vec![Value::Int(0x8000_0004_u32 as i32), Value::Int(1)];
+        call_graph(&mut api, 0x91, 0x9a, &mut unknown_property).unwrap();
+        assert!(!api.graph_config.text_global_properties.contains_key(&0x8000_0004));
 
         assert!(api.graph_surfaces[&surface].isolated_group);
         assert_eq!(api.graph_surfaces[&surface].line_spacing_percent, 50);
@@ -17255,14 +17259,12 @@ mod input_tests {
         // logwnd._bp calls 92:1B(B, X, 1) once per entry; through the VM the
         // call must receive all three arguments (it was a stub without an
         // arity, which got none).
-        let instruction = |offset: u64, name: &'static str, raw: Vec<u8>, operands| BpInstruction {
+        let instruction = |offset: u64, name: &'static str, raw: Vec<u8>, operands: Vec<BpOperand>| BpInstruction {
             offset,
             opcode: BpOpcode::Known { code: raw[0], name },
-            opcode_hex: format!("0x{:02X}", raw[0]),
-            opcode_name: name.into(),
-            operands,
+            operands: operands.into_boxed_slice(),
             known_call: None,
-            raw,
+            raw: raw.into(),
             warning: None,
         };
         let push = |offset: u64, value: u32| {
@@ -17286,8 +17288,8 @@ mod input_tests {
         api.store_runtime_bitmap(text, glyph, 2);
         let program = BpProgram {
             script_name: Some("outline-halo".into()),
-            functions: Vec::new(),
-            strings: Vec::new(),
+            functions: Vec::new().into(),
+            strings: Vec::new().into(),
             instructions: std::sync::Arc::new(vec![
                 push(0x10, halo as u32),
                 push(0x15, text as u32),
