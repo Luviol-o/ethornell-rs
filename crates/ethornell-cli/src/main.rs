@@ -1622,7 +1622,7 @@ fn print_call_site_instruction(marker: &str, inst: &BpInstruction) {
         .unwrap_or_default();
     println!(
         "{marker} {:08X} {:>4} {:<14} {:<28} raw={:02X?}{}",
-        inst.offset, inst.opcode_hex, inst.opcode_name, operands, inst.raw, known
+        inst.offset, inst.opcode_hex(), inst.opcode.name(), operands, inst.raw, known
     );
 }
 
@@ -1751,7 +1751,7 @@ fn print_disasm(
                 .unwrap_or_default();
             println!(
                 "{:08X} {:>4} {:<14} {:<28} raw={:02X?}{}{}",
-                inst.offset, inst.opcode_hex, inst.opcode_name, operands, inst.raw, known, warning
+                inst.offset, inst.opcode_hex(), inst.opcode.name(), operands, inst.raw, known, warning
             );
         }
     }

@@ -247,7 +247,7 @@ impl StackEffectState {
             return;
         }
 
-        match instruction.opcode_name.as_str() {
+        match instruction.opcode.name() {
             "push_byte" | "push_word" | "push_dword" | "push_base_offset" | "push_string"
             | "push_offset" | "load_base" => self.push(1),
             "store_base" | "jmp" | "call" => self.pop(1),

@@ -137,11 +137,11 @@ impl RuntimeTraceApi {
             .get("mode6-transition-current")
             .copied()
             .unwrap_or(a[6]);
-        let Some(prepared) = self.prepare_projected_source(object,a[4],a[5],transition,crate::native_projected_source::perspective_ratio(vector.position_z,a[14] as u32)) else {
+        let Some(prepared) = self.prepare_projected_source(object,a[4],a[5],transition,crate::native_projected_source::perspective_ratio(vector.position_z,a[14] as u32),false) else {
             self.graph_layers.remove(&object);
             return false;
         };
-        let source=prepared.image;
+        let Some(source)=prepared.image else { return false; };
         let offset_x=(offset_x >> prepared.level).wrapping_add(prepared.anchor_shift);
         let offset_y=offset_y >> prepared.level;
         let scale_x=scale_x.wrapping_shl(prepared.level);

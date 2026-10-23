@@ -228,9 +228,10 @@ impl Renderer<'_> {
         validate_rgba(image)?;
         let native = unsafe { (self.gpu.create)(image.width, image.height, image.rgba.as_ptr()) };
         if native == 0 {
-            return Err(EthornellError::Other(
-                "native GPU texture allocation failed".into(),
-            ));
+            return Err(EthornellError::Other(format!(
+                "native GPU texture allocation failed: {}x{} RGBA",
+                image.width, image.height,
+            )));
         }
         let id = self.next;
         self.next = self

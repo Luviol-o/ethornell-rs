@@ -39,6 +39,9 @@ features = ["dx12", "metal", "webgpu"]
 workspace = true
 features = ["webgl"]
 
+[target.'cfg(target_os = "vita")'.dependencies]
+vitasdk-sys = { version = "=0.3.3", default-features = false, features = ["SceSysmem_stub"] }
+
 [target.'cfg(not(any(target_os="vita",target_os="horizon")))'.dependencies]
 ruffle_core = { git = "https://github.com/ruffle-rs/ruffle.git", tag = "v0.4.1", features = ["default_font", "lzma", "mp3", "aac", "nellymoser"] }
 ruffle_render_wgpu = { git = "https://github.com/ruffle-rs/ruffle.git", tag = "v0.4.1" }
