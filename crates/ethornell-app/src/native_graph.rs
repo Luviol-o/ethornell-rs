@@ -2932,6 +2932,7 @@ impl RuntimeTraceApi {
                         "これ以上、スプライトオブジェクトを生成する事は出来ません".into(),
                     )));
                 }
+                self.display_changes += 1;
                 tracing::info!(sprite = handle, "GraphCreateSpriteObject");
                 ethornell_vm::Value::Int(handle)
             }
@@ -2968,6 +2969,7 @@ impl RuntimeTraceApi {
                 if !released {
                     return Some(Err(ethornell_vm::VmError::Runtime("無効なスプライトハンドルが指定されました".to_string())));
                 }
+                self.display_changes += 1;
                 tracing::debug!(handle, "GraphReleaseSpriteObject");
                 ethornell_vm::Value::None
             }

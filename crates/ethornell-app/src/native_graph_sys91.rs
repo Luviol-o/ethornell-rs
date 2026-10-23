@@ -569,6 +569,7 @@ impl RuntimeTraceApi {
                 let object = self.alloc_input_processor_handle();
                 self.graph_input_objects
                     .insert(object, RuntimeGraphInputObject::new_extended(window));
+                self.display_changes += 1;
                 tracing::debug!(window, object, "Graph91CreateExtendedIconInputProcessor");
                 ethornell_vm::Value::Int(object)
             }
