@@ -49,7 +49,11 @@ including the Android and iOS apps and the console ports.
 The window uses the game's icon from `icon.png`, an `.ico` file, or the icon
 resources embedded in its Windows executable, in that order.
 
-For a GBK Chinese translation, also set `ETHORNELL_TEXT_ENCODING=gbk`.
-This selects the encoding of text buffers passed to the graphics API, including
-dialogue and speaker names. The default is Shift-JIS (`cp932`). It does not
-change the encoding of resource names or BP system strings.
+Desktop and headless runs automatically detect Shift-JIS or GBK from a bounded
+sample of scenario text. If the sample is insufficient, they use Shift-JIS.
+Set `ETHORNELL_TEXT_ENCODING=gbk` or `ETHORNELL_TEXT_ENCODING=cp932` to override
+detection. `ETHORNELL_TEXT_ENCODING=auto` enables detection explicitly.
+This setting selects the encoding of text buffers passed to the graphics API,
+including dialogue and speaker names. Resource names and BP system strings
+keep their original encoding. Embedded hosts retain their explicit encoding
+configuration.

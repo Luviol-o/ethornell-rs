@@ -82,6 +82,7 @@ mod snapshot;
 mod surface_controls;
 mod text;
 mod text_anim;
+mod text_encoding;
 mod text_layout;
 mod timeline;
 mod timing;
@@ -8999,16 +9000,8 @@ impl RuntimeEngine {
         let program = ethornell_script::parse_bp_program(Some(script.to_string()), bytes);
         let mut vm = ethornell_vm::Vm::new();
         vm.set_native_abi_profile(confirmed_native_profile(&manager,bytes));
-        if let Ok(label) = std::env::var("ETHORNELL_TEXT_ENCODING") {
-            match label.trim().to_ascii_lowercase().as_str() {
-                "gbk" | "cp936" | "windows-936" => {
-                    vm.set_graph_text_encoding(encoding_rs::GBK);
-                    tracing::info!(encoding = "GBK", "game display text encoding configured");
-                }
-                "shift_jis" | "shift-jis" | "sjis" | "cp932" => {}
-                _ => tracing::warn!(%label, "unsupported ETHORNELL_TEXT_ENCODING; using Shift-JIS"),
-            }
-        }
+        let label = std::env::var("ETHORNELL_TEXT_ENCODING").ok();
+        vm.set_graph_text_encoding(text_encoding::select(&manager, label.as_deref()));
         vm.start(&program);
         Self {
             vm,

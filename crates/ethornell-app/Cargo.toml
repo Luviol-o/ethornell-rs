@@ -23,6 +23,7 @@ ethornell-vm = { path = "../ethornell-vm" }
 na_mpeg2_decoder = { path = "../na_mpeg2_decoder", default-features = false, features = ["video-only"] }
 ab_glyph.workspace = true
 encoding_rs.workspace = true
+chardetng = "0.1.17"
 serde_json.workspace = true
 pollster.workspace = true
 tracing.workspace = true
