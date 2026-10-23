@@ -16439,6 +16439,56 @@ mod input_tests {
     }
 
     #[test]
+    fn graph92_91_text_is_drawn_at_its_window_priority() {
+        // Wonderful Everyday draws a skipped line at once with Graph92:91
+        // into its message window (handle 0xB0000000, priority 117).
+        let manager =
+            ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let mut api = super::RuntimeTraceApi::new(manager);
+        let window = 0xB000_0000_u32 as i32;
+        let mut surface = RuntimeSurface::display(window, 1128.0, 200.0);
+        surface.z = 117;
+        api.graph_surfaces.insert(window, surface);
+        // The window has its font from Graph91:88, which Graph92:91 checks.
+        api.surface_text_states.entry(window).or_default().font_size = 28;
+        let mut args = [window, 0, 0, 1, 0, 1, 2, 1, 1, 0xffffff, 192]
+            .map(Value::Int)
+            .to_vec();
+        args[1] = Value::Str("A skipped line".into());
+
+        call_graph(&mut api, 0x92, 0x91, &mut args).unwrap();
+
+        // The text joins the window's page, drawn by the message node.
+        let page = api.text_runtime.target_node.unwrap();
+        assert_eq!(api.text_nodes[&page].target_surface, Some(window));
+        assert_eq!(api.text_nodes[&page].z, 117);
+    }
+
+    #[test]
+    fn graph92_91_text_beside_another_windows_message_is_drawn_at_its_window_priority() {
+        let manager =
+            ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
+        let mut api = super::RuntimeTraceApi::new(manager);
+        let window = message_window(&mut api);
+        let other = 0xB000_0001_u32 as i32;
+        let mut surface = RuntimeSurface::display(other, 600.0, 100.0);
+        surface.z = 120;
+        api.graph_surfaces.insert(other, surface);
+        api.reset_window_text_cursor(other);
+
+        // The message node shows the first window's message, so the text
+        // drawn on the other window keeps a node of its own.
+        api.start_native_message("A message.".into(), Some(window));
+        api.tick_text(10_000);
+        draw_at_once(&mut api, other, "Other text.");
+
+        assert_eq!(api.text_nodes[&other].text, "Other text.");
+        // The window's priority, not its handle (0xB0000001 is negative as
+        // a priority and put the text under the whole scene).
+        assert_eq!(api.text_nodes[&other].z, 120);
+    }
+
+    #[test]
     fn graph92_91_draws_in_the_colour_and_style_it_is_given() {
         let manager =
             ethornell_archive::ResourceManager::open_game(env!("CARGO_MANIFEST_DIR")).unwrap();
@@ -27628,6 +27678,16 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                             .push_str(&parsed.text);
                         let x = state.x;
                         let y = state.y;
+                        // The window composes this text into its own
+                        // surface, so it is drawn at the window's priority,
+                        // as a 92:90 message is. The handle is not a
+                        // priority: 0xB0000000 put the text under the whole
+                        // scene.
+                        let z = self
+                            .graph_surfaces
+                            .get(&target)
+                            .map(|surface| surface.z)
+                            .unwrap_or(target);
                         self.store_bitmap_text_run(
                             target,
                             RuntimeTextNode {
@@ -27642,7 +27702,7 @@ impl ethornell_vm::GraphApi for RuntimeTraceApi {
                                 line_height: state.line_height,
                                 formatted_layout: true,
                                 color: state.color,
-                                z: target,
+                                z,
                                 ruby_spans: parsed.ruby_spans,
                                 style_spans: parsed.style_spans,
                             },
