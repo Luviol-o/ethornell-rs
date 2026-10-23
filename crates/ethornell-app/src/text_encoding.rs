@@ -5,6 +5,43 @@ use encoding_rs::{Encoding, GBK, SHIFT_JIS};
 use ethornell_archive::ResourceManager;
 use std::collections::BTreeSet;
 
+/// Display-text code page. Resource names and BP system strings remain Shift-JIS.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TextEncoding {
+    ShiftJis,
+    Gbk,
+    #[default]
+    Auto,
+}
+
+impl std::str::FromStr for TextEncoding {
+    type Err = String;
+
+    fn from_str(label: &str) -> Result<Self, Self::Err> {
+        match label.trim().to_ascii_lowercase().as_str() {
+            "auto" => Ok(Self::Auto),
+            "shift_jis" | "shift-jis" | "sjis" | "cp932" => Ok(Self::ShiftJis),
+            "gbk" | "cp936" | "windows-936" => Ok(Self::Gbk),
+            _ => Err(format!(
+                "unsupported text encoding {label:?}; use auto, cp932 or gbk"
+            )),
+        }
+    }
+}
+
+impl TextEncoding {
+    pub(crate) fn resolve(self, manager: &ResourceManager) -> &'static Encoding {
+        select(
+            manager,
+            Some(match self {
+                Self::Auto => "auto",
+                Self::ShiftJis => "cp932",
+                Self::Gbk => "gbk",
+            }),
+        )
+    }
+}
+
 const MAX_PROBES: usize = 64;
 const MAX_RESOURCE_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_READ_BYTES: u64 = 16 * 1024 * 1024;
@@ -238,6 +275,24 @@ mod tests {
     }
 
     #[test]
+    fn desktop_choices_preserve_explicit_code_pages() {
+        for (label, choice) in [
+            ("cp932", TextEncoding::ShiftJis),
+            ("gbk", TextEncoding::Gbk),
+            ("auto", TextEncoding::Auto),
+        ] {
+            assert_eq!(label.parse::<TextEncoding>(), Ok(choice));
+        }
+        assert!("utf8".parse::<TextEncoding>().is_err());
+        let game = GameFixture::new();
+        game.archive("scenario.arc", "scene", &scenario(&CHINESE.repeat(8), GBK));
+        let manager = game.manager();
+        assert_eq!(TextEncoding::Auto.resolve(&manager), GBK);
+        assert_eq!(TextEncoding::ShiftJis.resolve(&manager), SHIFT_JIS);
+        assert_eq!(TextEncoding::Gbk.resolve(&manager), GBK);
+    }
+
+    #[test]
     fn explicit_code_pages_override_detection() {
         let game = GameFixture::new();
         game.archive("scenario.arc", "scene", &scenario(&CHINESE.repeat(8), GBK));
@@ -293,12 +348,18 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires ETHORNELL_ENCODING_REPRO_GAME with an authorized GBK game path"]
-    fn detects_authorized_gbk_game() {
+    #[ignore = "requires ETHORNELL_ENCODING_REPRO_GAME with an authorized game path"]
+    fn detects_authorized_game() {
+        ethornell_core::init_tracing();
         let root = std::env::var_os("ETHORNELL_ENCODING_REPRO_GAME").expect("authorized game path");
         let manager = ResourceManager::open_game(root).unwrap();
         let encoding = select(&manager, None);
         eprintln!("Detected display encoding: {}", encoding.name());
-        assert_eq!(encoding, GBK);
+        let expected = std::env::var("ETHORNELL_ENCODING_REPRO_EXPECTED")
+            .unwrap_or_else(|_| "gbk".into())
+            .parse::<TextEncoding>()
+            .unwrap();
+        assert_ne!(expected, TextEncoding::Auto);
+        assert_eq!(encoding, expected.resolve(&manager));
     }
 }

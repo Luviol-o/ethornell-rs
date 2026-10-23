@@ -98,7 +98,7 @@ pub(crate) fn user_data_alias(name: &str) -> String {
 
 #[cfg(fd_policy)]
 unsafe fn errno_ptr() -> *mut libc::c_int {
-    #[cfg(target_vendor = "apple")]
+    #[cfg(any(target_vendor = "apple", target_os = "freebsd"))]
     {
         unsafe { libc::__error() }
     }
@@ -106,7 +106,11 @@ unsafe fn errno_ptr() -> *mut libc::c_int {
     {
         unsafe { libc::__errno() }
     }
-    #[cfg(all(not(target_vendor = "apple"), not(target_os = "android")))]
+    #[cfg(all(
+        not(target_vendor = "apple"),
+        not(target_os = "android"),
+        not(target_os = "freebsd")
+    ))]
     {
         unsafe { libc::__errno_location() }
     }

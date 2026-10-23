@@ -1970,7 +1970,7 @@ impl RuntimeTraceApi {
         };
 
         let [anchor_x,anchor_y,angle,scale_x,scale_y]=mode5.mode5_transform_parameters(dynamic);
-        let Some(prepared)=self.prepare_projected_source(mode5.node_id,mode5.resource_id,secondary,transition_value,scale_x as u32) else {
+        let Some(prepared)=self.prepare_projected_source(mode5.node_id,mode5.resource_id,secondary,transition_value,scale_x as u32,true) else {
             self.graph_layers.remove(&mode5.node_id);
             return false;
         };
@@ -1994,7 +1994,8 @@ impl RuntimeTraceApi {
                 (geometry.origin_offset_x as i32).wrapping_shl(16).wrapping_add(project(mode5.position_x)&65535),
                 (geometry.origin_offset_y as i32).wrapping_shl(16).wrapping_add(project(mode5.position_y)&65535),
             ];
-            let raster=crate::native_effector::native_inverse_affine(&prepared.image,[width,height],destination,[ax,ay,angle,sx,sy],mode5.interpolation);
+            let Some(image) = prepared.image.as_ref() else { return false; };
+            let raster=crate::native_effector::native_inverse_affine(image,[width,height],destination,[ax,ay,angle,sx,sy],mode5.interpolation);
             let key=format!("runtime:sprite-mode5-raster:{}",mode5.node_id);
             self.store_graph_image(key.clone(),raster);
             Some(key)
@@ -2931,6 +2932,7 @@ impl RuntimeTraceApi {
                         "これ以上、スプライトオブジェクトを生成する事は出来ません".into(),
                     )));
                 }
+                self.display_changes += 1;
                 tracing::info!(sprite = handle, "GraphCreateSpriteObject");
                 ethornell_vm::Value::Int(handle)
             }
@@ -2967,6 +2969,7 @@ impl RuntimeTraceApi {
                 if !released {
                     return Some(Err(ethornell_vm::VmError::Runtime("無効なスプライトハンドルが指定されました".to_string())));
                 }
+                self.display_changes += 1;
                 tracing::debug!(handle, "GraphReleaseSpriteObject");
                 ethornell_vm::Value::None
             }
